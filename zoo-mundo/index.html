@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#2f9e63">
+<meta name="description" content="Zoo Mundo - jogo educativo infantil de exploracao sobre animais, habitats e continentes.">
+<title>Zoo Mundo - Explore. Descubra. Proteja.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/estilo.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦁</text></svg>">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ======================= TELA INICIAL ======================= -->
+  <section id="tela-titulo" class="tela ativa">
+    <div class="ceu"></div>
+    <div class="titulo-conteudo">
+      <h1 class="logo"><span>ZOO</span> <span class="logo-2">MUNDO</span></h1>
+      <p class="tagline">Explore. Descubra. Proteja.</p>
+      <canvas id="canvas-titulo" width="640" height="190" aria-hidden="true"></canvas>
+      <div class="titulo-botoes">
+        <button id="btn-continuar" class="btn btn-grande btn-amarelo oculto">CONTINUAR AVENTURA</button>
+        <button id="btn-comecar" class="btn btn-grande">COMEÇAR A AVENTURA</button>
+        <button id="btn-recomecar" class="btn btn-texto oculto">Começar do zero</button>
+      </div>
+      <p class="rodape-titulo">Um passeio pelo mundo dos animais 🌍</p>
+    </div>
+  </section>
+
+  <!-- ==================== ESCOLHA DE PERSONAGEM ==================== -->
+  <section id="tela-personagem" class="tela">
+    <div class="ceu"></div>
+    <div class="painel-escolha">
+      <h2 class="titulo-secao">Quem vai explorar hoje?</h2>
+      <div id="grade-personagens" class="grade-personagens"></div>
+      <button id="btn-jogar" class="btn btn-grande">VAMOS LÁ!</button>
+    </div>
+  </section>
+
+  <!-- ========================= JOGO ========================= -->
+  <section id="tela-jogo" class="tela">
+    <canvas id="mapa"></canvas>
+
+    <!-- HUD -->
+    <header class="hud">
+      <div class="hud-esq">
+        <div class="hud-avatar"><canvas id="hud-avatar" width="112" height="112"></canvas></div>
+        <div class="hud-infos">
+          <div class="hud-linha"><span class="hud-icone">⭐</span><b id="hud-pontos">0</b><span class="hud-legenda">pontos</span></div>
+          <div class="hud-linha"><span class="hud-icone">🐾</span><b id="hud-animais">0 / 12</b><span class="hud-legenda">animais</span></div>
+        </div>
+      </div>
+      <div class="hud-dir">
+        <div class="minimapa-caixa">
+          <canvas id="minimapa" width="132" height="66"></canvas>
+        </div>
+        <div class="hud-botoes">
+          <button id="btn-passaporte" class="btn-icone" title="Passaporte do Explorador">🛂<span>Passaporte</span></button>
+          <button id="btn-colecao" class="btn-icone" title="Meu Zoológico">🦓<span>Meu Zoo</span></button>
+          <button id="btn-som" class="btn-icone btn-icone-mini" title="Ligar/desligar som">🔊</button>
+        </div>
+      </div>
+    </header>
+
+    <div id="meta-atual" class="meta-atual"></div>
+
+    <!-- Controles de toque -->
+    <div class="controles">
+      <div id="zona-joystick" class="zona-joystick">
+        <div id="joy-base" class="joy-base"></div>
+        <div id="joy-topo" class="joy-topo"></div>
+      </div>
+      <button id="btn-acao" class="btn-acao">👋<small>Falar</small></button>
+    </div>
+
+    <div id="dica-teclas" class="dica-teclas">WASD / setas para andar &nbsp;·&nbsp; <b>E</b> ou toque no animal para conversar</div>
+  </section>
+
+  <!-- ========================= MODAIS ========================= -->
+  <div id="modal-encontro" class="modal" role="dialog" aria-modal="true" aria-label="Encontro com animal">
+    <div class="modal-cartao cartao-encontro">
+      <button class="fechar" data-fechar="modal-encontro" aria-label="Fechar">✕</button>
+      <div id="encontro-conteudo"></div>
+    </div>
+  </div>
+
+  <div id="modal-passaporte" class="modal" role="dialog" aria-modal="true" aria-label="Passaporte do explorador">
+    <div class="modal-cartao cartao-passaporte">
+      <button class="fechar" data-fechar="modal-passaporte" aria-label="Fechar">✕</button>
+      <h2 class="titulo-modal">🛂 Passaporte do Explorador</h2>
+      <p class="sub-modal" id="passaporte-resumo"></p>
+      <div id="passaporte-lista" class="passaporte-lista"></div>
+    </div>
+  </div>
+
+  <div id="modal-colecao" class="modal" role="dialog" aria-modal="true" aria-label="Meu zoologico">
+    <div class="modal-cartao cartao-colecao">
+      <button class="fechar" data-fechar="modal-colecao" aria-label="Fechar">✕</button>
+      <h2 class="titulo-modal">🦓 Meu Zoológico</h2>
+      <p class="sub-modal" id="colecao-resumo"></p>
+      <div id="colecao-grade" class="colecao-grade"></div>
+      <div id="colecao-detalhe" class="colecao-detalhe oculto"></div>
+    </div>
+  </div>
+
+  <!-- Celebracoes -->
+  <div id="festa" class="festa"></div>
+  <div id="aviso-regiao" class="aviso-regiao">
+    <div class="aviso-cartao">
+      <div class="aviso-icone" id="aviso-icone">🎉</div>
+      <h3 id="aviso-titulo">NOVA REGIÃO DESCOBERTA!</h3>
+      <p id="aviso-texto"></p>
+      <button class="btn btn-amarelo" id="aviso-ok">OBA!</button>
+    </div>
+  </div>
+</div>
+
+<!-- Dados -->
+<script src="js/data/regioes.js"></script>
+<script src="js/data/animais.js"></script>
+<script src="js/data/personagens.js"></script>
+<!-- Nucleo -->
+<script src="js/core/utils.js"></script>
+<script src="js/core/audio.js"></script>
+<script src="js/core/estado.js"></script>
+<!-- Desenho -->
+<script src="js/render/sprites-animais.js"></script>
+<script src="js/render/sprites-personagem.js"></script>
+<script src="js/render/cenario.js"></script>
+<!-- Jogo -->
+<script src="js/game/mundo.js"></script>
+<script src="js/game/entrada.js"></script>
+<script src="js/game/jogo.js"></script>
+<!-- Interface -->
+<script src="js/ui/comum.js"></script>
+<script src="js/ui/encontro.js"></script>
+<script src="js/ui/passaporte.js"></script>
+<script src="js/ui/colecao.js"></script>
+<script src="js/ui/telas.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
