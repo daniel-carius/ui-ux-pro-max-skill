@@ -175,7 +175,8 @@ ZM.Cenario = (function () {
     var w = o.largura || 150;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '600 12px Nunito, sans-serif';
-    var linhas = o.sub ? quebrar(ctx, o.sub, w - 26, 3) : [];
+    var sub = o.sub || textoDaPlaca(o.destino);
+    var linhas = sub ? quebrar(ctx, sub, w - 26, 3) : [];
     var h = 26 + linhas.length * 14;
 
     U.shadow(ctx, o.x, o.y, w * 0.35, 7, 0.16);
@@ -197,6 +198,20 @@ ZM.Cenario = (function () {
     }
     ctx.textBaseline = 'alphabetic';
   };
+
+  /* Texto da placa: dica quando a regiao esta liberada, meta quando esta fechada */
+  function textoDaPlaca(regiaoId) {
+    var r = ZM.REGION_BY_ID[regiaoId];
+    if (!r) return '';
+    if (ZM.Estado.regiaoLiberada(regiaoId)) return r.dica;
+    if (r.unlock.tipo === 'descobertas') {
+      var faltam = Math.max(0, r.unlock.valor - ZM.Estado.totalDescobertos());
+      return faltam > 0
+        ? 'Descubra mais ' + faltam + (faltam === 1 ? ' animal' : ' animais') + ' para desbloquear.'
+        : 'Explore mais para desbloquear esta região.';
+    }
+    return 'Explore mais para desbloquear esta região.';
+  }
 
   function quebrar(ctx, texto, maxW, maxLinhas) {
     var palavras = String(texto).split(' '), linha = '', linhas = [];

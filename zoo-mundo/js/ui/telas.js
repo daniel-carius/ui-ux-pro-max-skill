@@ -90,6 +90,7 @@ ZM.Telas = (function () {
     ZM.Jogo.trocarPersonagem(ZM.Estado.get().personagem);
     mostrar('tela-jogo');
     atualizarHUD();
+    atualizarComitiva();
     ZM.Jogo.comecar();
     var dica = document.getElementById('dica-teclas');
     setTimeout(function () { dica.style.opacity = '0'; }, 7000);
@@ -159,6 +160,33 @@ ZM.Telas = (function () {
     }
   }
 
+  /* Painel dos animais que estão indo para casa com o jogador */
+  function atualizarComitiva() {
+    var caixa = document.getElementById('comitiva');
+    if (!caixa) return;
+    var lista = ZM.Jogo.comitiva();
+    caixa.innerHTML = '';
+    if (!lista.length) return;
+
+    var titulo = document.createElement('div');
+    titulo.className = 'comitiva-titulo';
+    titulo.textContent = lista.length === 1 ? '🏠 Levando para casa' : '🏠 Levando ' + lista.length + ' amigos para casa';
+    caixa.appendChild(titulo);
+
+    lista.forEach(function (a) {
+      var casa = ZM.REGION_BY_ID[a.casa];
+      var aberta = ZM.Estado.regiaoLiberada(a.casa);
+      var item = document.createElement('div');
+      item.className = 'comitiva-item' + (aberta ? '' : ' fechada');
+      item.appendChild(ZM.UI.canvasAnimal(a.sprite, 34, { sombra: false, zoom: 0.95 }));
+      var texto = document.createElement('div');
+      texto.innerHTML = '<b>' + a.nome + '</b><br><span class="destino">' +
+        (aberta ? '→ ' + casa.icone + ' ' + casa.nomeCurto : '🔒 ' + casa.nomeCurto + ' ainda fechada') + '</span>';
+      item.appendChild(texto);
+      caixa.appendChild(item);
+    });
+  }
+
   /* --------------------------- progressao ----------------------------- */
   function verificarProgresso() {
     var novidades = ZM.Estado.verificarProgresso();
@@ -187,7 +215,23 @@ ZM.Telas = (function () {
       }
     });
     atualizarHUD();
+    atualizarComitiva();
   }
 
-  return { iniciar: iniciar, mostrar: mostrar, atualizarHUD: atualizarHUD, verificarProgresso: verificarProgresso };
+  /* Chamado quando um animal chega na região dele */
+  function animalEntregue(animal) {
+    var casa = ZM.REGION_BY_ID[animal.casa];
+    ZM.UI.confete(40);
+    atualizarHUD();
+    atualizarComitiva();
+    ZM.UI.mensagem((animal.artigo === 'a' ? 'A ' : 'O ') + animal.nome + ' chegou em casa! ' +
+      casa.icone + ' +50 pontos');
+    verificarProgresso();
+  }
+
+  return {
+    iniciar: iniciar, mostrar: mostrar, atualizarHUD: atualizarHUD,
+    verificarProgresso: verificarProgresso, atualizarComitiva: atualizarComitiva,
+    animalEntregue: animalEntregue
+  };
 })();

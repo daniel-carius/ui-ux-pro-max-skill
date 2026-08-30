@@ -25,11 +25,20 @@ ZM.Audio.registrar('rugido',     'assets/audio/leao.mp3');
 | `carimbo`       | região completa (carimbo no passaporte)      |
 | `passo`         | reservado para passos do personagem          |
 
+| `seguindo`      | animal aceita acompanhar o jogador            |
+
 ## Vozes dos animais
 
-Cada animal tem o campo `som` em `js/data/animais.js`:
+Cada animal tem o campo `som` em `js/data/animais.js`. O botão 🔊 **Ouvir**, na
+janela do encontro e na ficha da coleção, toca exatamente esse som.
 
-`rugido`, `trombeta`, `sopro`, `relincho`, `bufo`, `bocejo`, `pulo`, `ronco`,
-`fungada`, `tambor`, `grunhido`, `agua`.
+- **África:** `rugido`, `trombeta`, `sopro`, `relincho`, `bufo`, `bocejo`
+- **Austrália:** `pulo`, `ronco`, `fungada`, `tambor`, `grunhido`, `agua`
+- **Brasil:** `rosnado`, `grasnado`, `assobio`, `chiado`, `guincho` (a preguiça usa `bocejo`)
+- **Ásia:** `mastigada`, `rugido-grave`, `chilro`, `grito`, `canto`, `resmungo`
+- **Polar:** `rugido-polar`, `grasno`, `latido`, `bufo-grave`, `ganido`, `bufo-rena`
 
 Registre um arquivo com o mesmo nome para substituir o som sintetizado.
+
+Os sons são gerados com osciladores e com ruído filtrado (para rugidos, bufos e
+chiados), com vibrato nos pios — tudo em `SINTESE`, dentro de `js/core/audio.js`.

@@ -350,5 +350,12 @@ ZM.SpritesAnimais = (function () {
 
   function existe(id) { return !!A[id]; }
 
-  return { desenhar: desenhar, desenharSilhueta: desenharSilhueta, existe: existe, lista: A };
+  /* Permite que outros arquivos acrescentem animais reutilizando os auxiliares */
+  function registrar(id, fn) { A[id] = fn; }
+
+  return {
+    desenhar: desenhar, desenharSilhueta: desenharSilhueta, existe: existe,
+    registrar: registrar, lista: A,
+    aux: { olho: olho, sorriso: sorriso, perna: perna, corpo: corpo }
+  };
 })();

@@ -51,7 +51,7 @@ ZM.REGIONS = [
     continente: 'Oceania',
     col: 2, row: 1,
     bioma: 'outback',
-    unlock: { tipo: 'descobertas', valor: 9 },
+    unlock: { tipo: 'descobertas', valor: 8 },
     mvp: true,
     paleta: {
       chao: '#e0a370', chaoAlt: '#cf8f5d', chaoDetalhe: '#eeb884',
@@ -69,15 +69,15 @@ ZM.REGIONS = [
     continente: 'América do Sul',
     col: 0, row: 0,
     bioma: 'floresta',
-    unlock: { tipo: 'embreve' },
-    mvp: false,
+    unlock: { tipo: 'descobertas', valor: 14 },
+    mvp: true,
     paleta: {
       chao: '#4f9a54', chaoAlt: '#438a48', chaoDetalhe: '#63ad66',
       caminho: '#8d6a44', caminhoBorda: '#7a5a39',
       agua: '#39a6c9', tronco: '#6b4a30', folha: '#2f7d45', folhaAlt: '#3f9a56',
       cartaz: '#2f9e63', ceu: '#7fc98a'
     },
-    dica: 'Floresta tropical, rios e vegetação densa.'
+    dica: 'Floresta tropical, rios e vegetação bem fechada.'
   },
   {
     id: 'asia', prep: 'na',
@@ -87,8 +87,8 @@ ZM.REGIONS = [
     continente: 'Ásia',
     col: 1, row: 0,
     bioma: 'bambuzal',
-    unlock: { tipo: 'embreve' },
-    mvp: false,
+    unlock: { tipo: 'descobertas', valor: 20 },
+    mvp: true,
     paleta: {
       chao: '#8fc98a', chaoAlt: '#7fbb7a', chaoDetalhe: '#a5d79f',
       caminho: '#d0b48f', caminhoBorda: '#bda079',
@@ -98,22 +98,22 @@ ZM.REGIONS = [
     dica: 'Bambus, montanhas e arquitetura milenar.'
   },
   {
-    id: 'polar', prep: 'na',
+    id: 'polar', prep: 'no',
     nome: 'Região Polar',
     nomeCurto: 'Polar',
     icone: '🐧',
     continente: 'Antártida',
     col: 2, row: 0,
     bioma: 'gelo',
-    unlock: { tipo: 'embreve' },
-    mvp: false,
+    unlock: { tipo: 'descobertas', valor: 26 },
+    mvp: true,
     paleta: {
       chao: '#eaf4fb', chaoAlt: '#dbe9f5', chaoDetalhe: '#ffffff',
       caminho: '#c6dcec', caminhoBorda: '#b0cbe0',
       agua: '#4fa8d8', tronco: '#b9cfdd', folha: '#dff0fa', folhaAlt: '#ffffff',
       cartaz: '#4f8fd9', ceu: '#dff0fa'
     },
-    dica: 'Neve, gelo e geleiras flutuantes.'
+    dica: 'Neve, gelo e geleiras flutuando na água.'
   }
 ];
 

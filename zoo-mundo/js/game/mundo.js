@@ -181,10 +181,7 @@ ZM.Mundo = (function () {
           tipo: 'placa', x: px, y: py, s: 1, regiao: par[0], raio: 16, raioLivre: 60,
           destino: par[1],
           titulo: destino.ref.icone + ' ' + destino.ref.nomeCurto,
-          sub: destino.ref.unlock.tipo === 'embreve'
-            ? 'Explore mais para desbloquear esta região.'
-            : destino.ref.dica,
-          largura: 168, altura: 62
+          largura: 168
         });
       });
       mundo.props.push({

@@ -213,6 +213,35 @@ html, body {
   pointer-events: none; text-align: center; max-width: 84vw;
 }
 
+/* comitiva: animais que estão indo para casa com o jogador */
+.comitiva {
+  position: absolute; top: 92px; left: 14px;
+  display: flex; flex-direction: column; gap: 6px;
+  pointer-events: none; max-width: 46vw;
+}
+.comitiva:empty { display: none; }
+.comitiva-titulo {
+  font-family: Fredoka, sans-serif; font-size: 12px; color: #fff8e7;
+  background: rgba(23, 46, 32, .72); border-radius: 999px;
+  padding: 4px 12px; align-self: flex-start;
+}
+.comitiva-item {
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(255, 248, 236, .94); border-radius: 16px;
+  padding: 4px 12px 4px 4px; box-shadow: 0 4px 10px rgba(0, 0, 0, .22);
+  font-family: Fredoka, sans-serif; font-size: 13px; color: var(--texto);
+  animation: sobe .3s cubic-bezier(.2, 1.3, .4, 1);
+}
+.comitiva-item canvas { width: 34px; height: 34px; }
+.comitiva-item b { font-weight: 600; }
+.comitiva-item .destino { color: var(--texto-suave); font-size: 12px; font-family: Nunito, sans-serif; font-weight: 700; }
+.comitiva-item.fechada .destino { color: #b4643f; }
+
+.instrucao {
+  background: #eefaf1; border-radius: 16px; padding: 12px 16px;
+  margin: 0 0 12px; font-weight: 700; color: #1c6b43; font-size: 15px;
+}
+
 .dica-teclas {
   position: absolute; top: 120px; left: 50%; transform: translateX(-50%);
   background: rgba(23, 46, 32, .6); color: #fff;
@@ -253,9 +282,41 @@ html, body {
   .btn-acao.destaque { opacity: 1; }
 }
 @media (max-width: 720px) {
-  .dica-teclas { display: none; }
+  /* comitiva: animais que estão indo para casa com o jogador */
+.comitiva {
+  position: absolute; top: 92px; left: 14px;
+  display: flex; flex-direction: column; gap: 6px;
+  pointer-events: none; max-width: 46vw;
+}
+.comitiva:empty { display: none; }
+.comitiva-titulo {
+  font-family: Fredoka, sans-serif; font-size: 12px; color: #fff8e7;
+  background: rgba(23, 46, 32, .72); border-radius: 999px;
+  padding: 4px 12px; align-self: flex-start;
+}
+.comitiva-item {
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(255, 248, 236, .94); border-radius: 16px;
+  padding: 4px 12px 4px 4px; box-shadow: 0 4px 10px rgba(0, 0, 0, .22);
+  font-family: Fredoka, sans-serif; font-size: 13px; color: var(--texto);
+  animation: sobe .3s cubic-bezier(.2, 1.3, .4, 1);
+}
+.comitiva-item canvas { width: 34px; height: 34px; }
+.comitiva-item b { font-weight: 600; }
+.comitiva-item .destino { color: var(--texto-suave); font-size: 12px; font-family: Nunito, sans-serif; font-weight: 700; }
+.comitiva-item.fechada .destino { color: #b4643f; }
+
+.instrucao {
+  background: #eefaf1; border-radius: 16px; padding: 12px 16px;
+  margin: 0 0 12px; font-weight: 700; color: #1c6b43; font-size: 15px;
+}
+
+.dica-teclas { display: none; }
   .hud-legenda { display: none; }
   #minimapa { width: 104px; height: 52px; }
+  .comitiva { top: 84px; left: 10px; gap: 4px; }
+  .comitiva-item { font-size: 12px; padding: 3px 10px 3px 3px; }
+  .comitiva-item canvas { width: 28px; height: 28px; }
   .meta-atual {
     left: 12px; right: 128px; transform: none; bottom: 18px;
     font-size: 13px; max-width: none; padding: 8px 14px;
@@ -363,6 +424,26 @@ html, body {
   background: linear-gradient(180deg, rgba(255, 248, 236, 0), var(--creme) 34%);
 }
 
+/* botão de ouvir o som do animal */
+.btn-som {
+  position: absolute; right: 12px; bottom: 12px;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: none; border-radius: 999px; cursor: pointer;
+  background: linear-gradient(180deg, #ffffff, #ffeec2);
+  color: #7a5410; font-family: Fredoka, sans-serif; font-size: 16px;
+  padding: 9px 16px;
+  box-shadow: 0 4px 0 #e6cf94, 0 6px 14px rgba(0, 0, 0, .12);
+}
+.btn-som:active { transform: translateY(3px); box-shadow: 0 1px 0 #e6cf94; }
+.btn-som.tocando { animation: som-pulso .5s ease; }
+@keyframes som-pulso {
+  0% { transform: scale(1) }
+  35% { transform: scale(1.12) }
+  100% { transform: scale(1) }
+}
+.colecao-detalhe .btn-som { position: static; margin: 2px 0 10px; }
+.titulo-detalhe { margin-bottom: 4px !important; }
+
 /* --------------------------- passaporte --------------------------------- */
 .passaporte-lista { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .cartao-regiao {
@@ -410,6 +491,27 @@ html, body {
 .colecao-detalhe h3 { font-family: Fredoka, sans-serif; font-size: 26px; margin: 0 0 10px; color: var(--verde-escuro); }
 .detalhe-topo { display: flex; gap: 16px; align-items: center; }
 .detalhe-topo canvas { width: 120px; height: 120px; background: #fff5d8; border-radius: 18px; flex: 0 0 auto; }
+
+/* recadinhos rápidos no topo da tela */
+.mensagens {
+  position: absolute; top: 96px; left: 50%; transform: translateX(-50%);
+  z-index: 50; display: flex; flex-direction: column; align-items: center; gap: 8px;
+  pointer-events: none; width: max-content; max-width: 92vw;
+}
+.mensagem {
+  background: linear-gradient(180deg, #fff8ec, #ffe9b8);
+  color: #6b4a10; font-family: Fredoka, sans-serif; font-size: 17px;
+  padding: 12px 22px; border-radius: 999px; text-align: center;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .28);
+  animation: recado 3.4s ease forwards;
+}
+@keyframes recado {
+  0% { transform: translateY(-16px) scale(.9); opacity: 0 }
+  10% { transform: none; opacity: 1 }
+  85% { transform: none; opacity: 1 }
+  100% { transform: translateY(-10px); opacity: 0 }
+}
+@media (max-width: 720px) { .mensagem { font-size: 14px; padding: 10px 16px; } .mensagens { top: 150px; } }
 
 /* ------------------------- celebracoes / avisos -------------------------- */
 .festa { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 60; }

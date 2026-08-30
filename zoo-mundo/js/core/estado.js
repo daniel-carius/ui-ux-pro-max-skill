@@ -18,6 +18,7 @@ ZM.Estado = (function () {
       pontos: 0,
       descobertos: [],          // ids de animais descobertos
       resgatados: [],           // ids levados para casa
+      seguindo: [],             // ids que estão acompanhando o jogador (em fila)
       regioes: { praca: true }, // regioes desbloqueadas
       completas: [],            // regioes com carimbo
       posicaoAnimais: posicoes, // id -> regiao atual
@@ -112,11 +113,30 @@ ZM.Estado = (function () {
     salvar();
   }
 
+  /* O animal passa a acompanhar o jogador */
+  function chamarParaSeguir(id) {
+    var d = get();
+    if (d.seguindo.indexOf(id) === -1) d.seguindo.push(id);
+    salvar();
+    emitir('seguindo', id);
+  }
+
+  function pararDeSeguir(id) {
+    var d = get();
+    var i = d.seguindo.indexOf(id);
+    if (i !== -1) d.seguindo.splice(i, 1);
+    salvar();
+  }
+
+  function estaSeguindo(id) { return get().seguindo.indexOf(id) !== -1; }
+  function comitiva() { return get().seguindo.slice(); }
+
   function levarParaCasa(id) {
     var d = get();
     var animal = ZM.ANIMAL_BY_ID[id];
     d.posicaoAnimais[id] = animal.casa;
     if (d.resgatados.indexOf(id) === -1) d.resgatados.push(id);
+    pararDeSeguir(id);
     salvar();
     emitir('resgate', id);
   }
@@ -170,6 +190,8 @@ ZM.Estado = (function () {
     totalDescobertos: totalDescobertos, totalAnimais: totalAnimais,
     regiaoDoAnimal: regiaoDoAnimal, progressoRegiao: progressoRegiao,
     definirPersonagem: definirPersonagem, marcarIniciado: marcarIniciado,
+    chamarParaSeguir: chamarParaSeguir, pararDeSeguir: pararDeSeguir,
+    estaSeguindo: estaSeguindo, comitiva: comitiva,
     salvarPosicaoJogador: salvarPosicaoJogador, somarPontos: somarPontos,
     descobrir: descobrir, levarParaCasa: levarParaCasa,
     verificarProgresso: verificarProgresso, proximaMeta: proximaMeta

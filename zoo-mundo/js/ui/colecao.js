@@ -42,7 +42,7 @@ ZM.Colecao = (function () {
   }
 
   function mostrarDetalhe(a) {
-    ZM.Audio.tocar(a.som);
+    ZM.Audio.tocar(a.som);   // toca ao abrir; o botão repete quando a criança quiser
     var d = document.getElementById('colecao-detalhe');
     d.innerHTML = '';
     d.classList.remove('oculto');
@@ -53,8 +53,10 @@ ZM.Colecao = (function () {
 
     var info = document.createElement('div');
     var h = document.createElement('h3');
+    h.className = 'titulo-detalhe';
     h.textContent = a.nome.toUpperCase() + ' ' + a.emoji;
     info.appendChild(h);
+    info.appendChild(ZM.UI.botaoSom(a));
 
     [['Região', ZM.REGION_BY_ID[a.casa].icone + ' ' + ZM.REGION_BY_ID[a.casa].nomeCurto],
      ['Continente', a.continente],

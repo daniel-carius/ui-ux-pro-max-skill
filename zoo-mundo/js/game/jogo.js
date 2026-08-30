@@ -16,9 +16,15 @@ ZM.Jogo = (function () {
   var acumuladorSalvar = 0;
   var minimapa = null, minimapaCtx = null;
 
+  var rastro = [];                 // caminho recente do jogador (a comitiva anda por ele)
+  var aoEntregar = function () {};
+
   var RAIO_JOGADOR = 13;
+  var PASSO_RASTRO = 9;            // distância entre pontos guardados do caminho
+  var VAO_COMITIVA = 5;            // quantos pontos de distância entre um animal e outro
   var RAIO_INTERACAO = 105;
   var VELOCIDADE = 215;
+  var PONTOS_ENTREGA = 50;
 
   /* ------------------------------ inicio ------------------------------ */
   function iniciar(elCanvas, elMinimapa) {
@@ -88,24 +94,53 @@ ZM.Jogo = (function () {
       animais.push({
         ref: ref, id: ref.id, regiao: regiaoId,
         baseX: pos.x, baseY: pos.y, x: pos.x, y: pos.y,
-        fase: Math.random() * 10, brilho: 0
+        fase: Math.random() * 10, brilho: 0,
+        seguindo: ZM.Estado.estaSeguindo(ref.id), dir: 1
       });
     });
   }
 
-  /* Reposiciona um animal resgatado, com efeito de partida */
-  function levarParaCasa(id) {
+  /* O animal começa a acompanhar o jogador */
+  function chamarParaSeguir(id) {
     var a = buscar(id);
     if (!a) return;
-    faiscas(a.x, a.y - 30, 26, '#ffd166');
-    ZM.Estado.levarParaCasa(id);
+    a.seguindo = true;
+    ZM.Estado.chamarParaSeguir(id);
+    ZM.Audio.tocar('seguindo');
+    faiscas(a.x, a.y - 30, 14, '#7ee0c0');
+    textoFlutuante(a.x, a.y - 80, 'Vamos juntos!', '#ffffff');
+  }
+
+  /* O animal para de acompanhar e fica onde está */
+  function deixarAqui(id) {
+    var a = buscar(id);
+    if (!a) return;
+    a.seguindo = false;
+    ZM.Estado.pararDeSeguir(id);
+    var pos = posicaoLivre(a.x, a.y);
+    a.regiao = ZM.Mundo.regiaoEm(pos.x, pos.y).id;
+    a.baseX = a.x = pos.x; a.baseY = a.y = pos.y;
+  }
+
+  /* O animal chegou na região dele: comemoração e recompensa */
+  function chegouEmCasa(a) {
     var reg = ZM.Mundo.dados.porRegiao[a.ref.casa];
-    var vizinhos = animais.filter(function (o) { return o.regiao === a.ref.casa; }).length;
+    var vizinhos = animais.filter(function (o) {
+      return o.regiao === a.ref.casa && !o.seguindo && o !== a;
+    }).length;
     var ang = -Math.PI / 2 + (vizinhos + 1) * 1.05;
     var pos = posicaoLivre(reg.cx + Math.cos(ang) * 250, reg.cy + Math.sin(ang) * 190);
+    a.seguindo = false;
     a.regiao = a.ref.casa;
     a.baseX = a.x = pos.x; a.baseY = a.y = pos.y;
     a.brilho = 1;
+    ZM.Estado.levarParaCasa(a.id);
+    comemorar(jogador.x, jogador.y);
+    textoFlutuante(jogador.x, jogador.y - 90, '+' + PONTOS_ENTREGA, '#ffd166');
+    ZM.Estado.somarPontos(PONTOS_ENTREGA);
+    ZM.Audio.tocar('casa');
+    ZM.Audio.tocar(a.ref.som);
+    aoEntregar(a.ref);
   }
 
   function buscar(id) {
@@ -185,18 +220,44 @@ ZM.Jogo = (function () {
     }
     if (faixaRegiao.vida > 0) faixaRegiao.vida -= dt;
 
-    // animais passeiam
+    // rastro do jogador (a comitiva anda por onde ele andou)
+    var ultimo = rastro[rastro.length - 1];
+    if (!ultimo || U.dist(ultimo.x, ultimo.y, jogador.x, jogador.y) > PASSO_RASTRO) {
+      rastro.push({ x: jogador.x, y: jogador.y });
+      if (rastro.length > 400) rastro.shift();
+    }
+
+    // animais passeiam (ou acompanham o jogador)
+    var lugarNaFila = 0;
     animais.forEach(function (a) {
-      a.x = a.baseX + Math.sin(tempo * 0.45 + a.fase) * 26;
-      a.y = a.baseY + Math.sin(tempo * 0.33 + a.fase * 1.7) * 14;
+      if (a.seguindo) {
+        var indice = rastro.length - 1 - (lugarNaFila + 1) * VAO_COMITIVA;
+        var alvoPos = indice >= 0 ? rastro[indice] : { x: jogador.x, y: jogador.y };
+        var antesX = a.x;
+        a.x = U.lerp(a.x, alvoPos.x, Math.min(1, dt * 9));
+        a.y = U.lerp(a.y, alvoPos.y + 6, Math.min(1, dt * 9));
+        if (Math.abs(a.x - antesX) > 0.4) a.dir = a.x > antesX ? 1 : -1;
+        a.baseX = a.x; a.baseY = a.y;
+        lugarNaFila++;
+      } else {
+        a.x = a.baseX + Math.sin(tempo * 0.45 + a.fase) * 26;
+        a.y = a.baseY + Math.sin(tempo * 0.33 + a.fase * 1.7) * 14;
+      }
       if (a.brilho > 0) a.brilho -= dt * 0.5;
     });
+
+    // chegou em casa? (vale a região onde o jogador está)
+    if (regiaoAtual) {
+      animais.forEach(function (a) {
+        if (a.seguindo && regiaoAtual.id === a.ref.casa) chegouEmCasa(a);
+      });
+    }
 
     // alvo de interacao
     alvoProximo = null;
     var melhor = RAIO_INTERACAO;
     animais.forEach(function (a) {
-      if (!ZM.Estado.regiaoLiberada(a.regiao)) return;
+      if (a.seguindo || !ZM.Estado.regiaoLiberada(a.regiao)) return;
       var d = U.dist(jogador.x, jogador.y, a.x, a.y - 20);
       if (d < melhor) { melhor = d; alvoProximo = a; }
     });
@@ -208,7 +269,7 @@ ZM.Jogo = (function () {
       var p = telaParaMundo(clique.x, clique.y);
       var tocado = null, melhorD = 70;
       animais.forEach(function (a) {
-        if (!ZM.Estado.regiaoLiberada(a.regiao)) return;
+        if (!a.seguindo && !ZM.Estado.regiaoLiberada(a.regiao)) return;
         var d = U.dist(p.x, p.y, a.x, a.y - 30);
         if (d < melhorD) { melhorD = d; tocado = a; }
       });
@@ -301,7 +362,7 @@ ZM.Jogo = (function () {
       fila.push({ y: p.y, tipo: 'prop', o: p });
     });
     animais.forEach(function (a) {
-      if (!ZM.Estado.regiaoLiberada(a.regiao)) return;
+      if (!a.seguindo && !ZM.Estado.regiaoLiberada(a.regiao)) return;
       if (a.x < vx - 120 || a.x > vx + vw + 120 || a.y < vy - 160 || a.y > vy + vh + 160) return;
       fila.push({ y: a.y, tipo: 'animal', o: a });
     });
@@ -360,10 +421,20 @@ ZM.Jogo = (function () {
   function desenharAnimal(a) {
     var descoberto = ZM.Estado.descoberto(a.id);
     var perdido = a.regiao !== a.ref.casa;
-    ZM.SpritesAnimais.desenhar(a.ref.sprite, ctx, a.x, a.y, 0.86, tempo + a.fase);
+    ZM.SpritesAnimais.desenhar(a.ref.sprite, ctx, a.x, a.y, a.seguindo ? 0.78 : 0.86,
+      tempo + a.fase, { espelhar: a.seguindo && a.dir < 0 });
 
     // indicadores
     var topo = a.y - 96;
+    if (a.seguindo) {
+      var pulsa = 1 + Math.sin(tempo * 5 + a.fase) * 0.12;
+      ctx.save();
+      ctx.translate(a.x + 22, a.y - 74);
+      ctx.scale(pulsa, pulsa);
+      coracao(ctx, 0, 0, 7, '#ff8fab');
+      ctx.restore();
+      return;
+    }
     if (!descoberto) {
       var pulo = Math.sin(tempo * 4 + a.fase) * 4;
       balaozinho(ctx, a.x, topo + pulo, perdido ? '#ff8fab' : '#ffd166', perdido ? '?' : '!');
@@ -398,6 +469,15 @@ ZM.Jogo = (function () {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(simbolo, x, y + 1);
     ctx.textBaseline = 'alphabetic';
+  }
+
+  function coracao(ctx, x, y, r, cor) {
+    ctx.fillStyle = cor;
+    ctx.beginPath();
+    ctx.moveTo(x, y + r * 0.9);
+    ctx.bezierCurveTo(x - r * 1.5, y - r * 0.4, x - r * 0.5, y - r * 1.3, x, y - r * 0.4);
+    ctx.bezierCurveTo(x + r * 0.5, y - r * 1.3, x + r * 1.5, y - r * 0.4, x, y + r * 0.9);
+    ctx.fill();
   }
 
   function estrela(ctx, x, y, r, cor) {
@@ -459,6 +539,10 @@ ZM.Jogo = (function () {
     var pos = ZM.Mundo.resolver(x, y, RAIO_JOGADOR);
     jogador.x = pos.x; jogador.y = pos.y;
     camera.x = jogador.x; camera.y = jogador.y;
+    rastro = [{ x: jogador.x, y: jogador.y }];
+    animais.forEach(function (a) {              // a comitiva vem junto
+      if (a.seguindo) { a.x = a.baseX = jogador.x; a.y = a.baseY = jogador.y + 6; }
+    });
   }
   function animaisNoMundo() {
     return animais.map(function (a) { return { id: a.id, x: a.x, y: a.y, regiao: a.regiao }; });
@@ -468,7 +552,12 @@ ZM.Jogo = (function () {
 
   return {
     iniciar: iniciar, comecar: comecar, pausar: pausar, estaPausado: estaPausado,
-    aoEncontrarAnimal: aoEncontrarAnimal, levarParaCasa: levarParaCasa,
+    aoEncontrarAnimal: aoEncontrarAnimal,
+    chamarParaSeguir: chamarParaSeguir, deixarAqui: deixarAqui,
+    aoEntregarAnimal: function (fn) { aoEntregar = fn; },
+    comitiva: function () {
+      return animais.filter(function (a) { return a.seguindo; }).map(function (a) { return a.ref; });
+    },
     faiscas: faiscas, comemorar: comemorar, textoFlutuante: textoFlutuante,
     atualizarRegioes: atualizarRegioes, trocarPersonagem: trocarPersonagem,
     criarAnimais: criarAnimais, jogadorMundo: jogadorMundo, temAlvo: temAlvo, alvoAtual: alvoAtual,

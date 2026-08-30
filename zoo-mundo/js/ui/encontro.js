@@ -9,7 +9,7 @@ ZM.Encontro = (function () {
 
   var PONTOS_ANIMAL = 100;
   var PONTOS_PRIMEIRA = 25;
-  var PONTOS_RESGATE = 50;
+  /* Os pontos por levar o animal em casa são dados no mapa, quando ele chega lá. */
 
   var alvo = null, regiaoEncontro = null, ganhos = 0, semErro = true, aoTerminar = null;
 
@@ -28,6 +28,7 @@ ZM.Encontro = (function () {
     var div = document.createElement('div');
     div.className = 'palco-animal';
     div.appendChild(ZM.UI.canvasAnimalAnimado(alvo.sprite, 320, altura || 190));
+    div.appendChild(ZM.UI.botaoSom(alvo));
     return div;
   }
 
@@ -161,18 +162,31 @@ ZM.Encontro = (function () {
     }
 
     if (perdido) {
+      var casaAberta = ZM.Estado.regiaoLiberada(alvo.casa);
       var aviso = document.createElement('div');
       aviso.className = 'feedback perdido';
       aviso.textContent = 'Esse animal está perdido! Vamos ajudá-lo a voltar para casa?';
       c.appendChild(aviso);
+
+      var comoFunciona = document.createElement('p');
+      comoFunciona.className = 'instrucao';
+      comoFunciona.innerHTML = casaAberta
+        ? '🐾 Ele vai andar atrás de você. Leve-o até <b>' + ZM.REGION_BY_ID[alvo.casa].icone + ' ' +
+          ZM.REGION_BY_ID[alvo.casa].nomeCurto + '</b> e ele volta para a família dele!'
+        : '🐾 Ele vai andar atrás de você. A porta ' + preposicao(alvo.casa) + ' <b>' +
+          ZM.REGION_BY_ID[alvo.casa].nomeCurto + '</b> ainda está fechada — ele fica com você até você abrir!';
+      c.appendChild(comoFunciona);
       c.appendChild(recompensas());
 
       var acoes = document.createElement('div');
       acoes.className = 'acoes-modal';
       var levar = document.createElement('button');
       levar.className = 'btn btn-amarelo';
-      levar.innerHTML = '🏠 Levar para casa';
-      levar.onclick = function () { passoResgate(); };
+      levar.innerHTML = '🐾 Vamos juntos!';
+      levar.onclick = function () {
+        ZM.Jogo.chamarParaSeguir(alvo.id);
+        encerrar();
+      };
       acoes.appendChild(levar);
 
       var depois = document.createElement('button');
@@ -194,62 +208,61 @@ ZM.Encontro = (function () {
     }
   }
 
-  /* 4) Resgate: o animal volta para a regiao dele */
-  function passoResgate() {
-    ganhos += PONTOS_RESGATE;
-    ZM.Jogo.levarParaCasa(alvo.id);
-    ZM.Audio.tocar('casa');
-    ZM.Audio.tocar(alvo.som);
-
-    limpar();
-    var c = conteudo();
-    c.appendChild(titulo('De volta para casa! 🏠'));
-    c.appendChild(palco(160));
-    var f = document.createElement('div');
-    f.className = 'feedback bom';
-    f.textContent = artigoMaiusculo(alvo) + alvo.nome + ' já está ' + preposicao(alvo.casa) + ' ' +
-      ZM.REGION_BY_ID[alvo.casa].nomeCurto + ', junto da família dele. Obrigado, explorador!';
-    c.appendChild(f);
-    c.appendChild(recompensas());
-    ZM.UI.confete(50);
-
-    var acoes = document.createElement('div');
-    acoes.className = 'acoes-modal';
-    var ok = document.createElement('button');
-    ok.className = 'btn';
-    ok.textContent = 'CONTINUAR EXPLORANDO';
-    ok.onclick = encerrar;
-    acoes.appendChild(ok);
-    c.appendChild(acoes);
-  }
-
   /* Reencontro com animal ja descoberto */
   function reencontro() {
     limpar();
     var c = conteudo();
     var perdido = regiaoEncontro !== alvo.casa;
-    c.appendChild(titulo('Oi de novo, ' + alvo.nome + '! ' + alvo.emoji));
+    var acompanhando = ZM.Estado.estaSeguindo(alvo.id);
+    var casa = ZM.REGION_BY_ID[alvo.casa];
+
+    c.appendChild(titulo(acompanhando
+      ? 'Estou com você! ' + alvo.emoji
+      : 'Oi de novo, ' + alvo.nome + '! ' + alvo.emoji));
     c.appendChild(palco(160));
-    c.appendChild(fichaAnimal());
-    c.appendChild(curiosidade());
     ZM.Audio.tocar(alvo.som);
+
+    if (acompanhando) {
+      var rumo = document.createElement('div');
+      rumo.className = 'feedback bom';
+      rumo.innerHTML = 'Estamos indo para ' + casa.icone + ' <b>' + casa.nomeCurto + '</b>' +
+        (ZM.Estado.regiaoLiberada(alvo.casa) ? '.' : ' — assim que a região abrir!');
+      c.appendChild(rumo);
+    } else {
+      c.appendChild(fichaAnimal());
+      c.appendChild(curiosidade());
+    }
 
     var acoes = document.createElement('div');
     acoes.className = 'acoes-modal';
-    if (perdido) {
+
+    if (acompanhando) {
+      var soltar = document.createElement('button');
+      soltar.className = 'btn btn-texto';
+      soltar.textContent = 'Deixar aqui';
+      soltar.onclick = function () {
+        ZM.Jogo.deixarAqui(alvo.id);
+        encerrar();
+      };
+      acoes.appendChild(soltar);
+    } else if (perdido) {
       var aviso = document.createElement('div');
       aviso.className = 'feedback perdido';
-      aviso.textContent = 'Ele ainda está longe de casa. Vamos ajudar?';
+      aviso.textContent = 'Ele ainda está longe de casa. Vamos juntos?';
       c.insertBefore(aviso, c.lastChild);
       var levar = document.createElement('button');
       levar.className = 'btn btn-amarelo';
-      levar.innerHTML = '🏠 Levar para casa';
-      levar.onclick = function () { ganhos = 0; passoResgate(); };
+      levar.innerHTML = '🐾 Vamos juntos!';
+      levar.onclick = function () {
+        ZM.Jogo.chamarParaSeguir(alvo.id);
+        encerrar();
+      };
       acoes.appendChild(levar);
     }
+
     var ok = document.createElement('button');
     ok.className = 'btn';
-    ok.textContent = 'TCHAU!';
+    ok.textContent = acompanhando ? 'CONTINUAR' : 'TCHAU!';
     ok.onclick = encerrar;
     acoes.appendChild(ok);
     c.appendChild(acoes);

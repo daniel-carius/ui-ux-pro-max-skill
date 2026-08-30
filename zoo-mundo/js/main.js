@@ -25,6 +25,11 @@
       });
     });
 
+    // animal entregue na região dele
+    ZM.Jogo.aoEntregarAnimal(function (animal) {
+      ZM.Telas.animalEntregue(animal);
+    });
+
     ZM.Telas.iniciar();
     ZM.Telas.atualizarHUD();
 

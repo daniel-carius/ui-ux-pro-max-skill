@@ -99,6 +99,24 @@ ZM.UI = (function () {
     return c;
   }
 
+  /* Botão "ouvir o som do animal" */
+  function botaoSom(animal, rotulo) {
+    var b = document.createElement('button');
+    b.className = 'btn-som';
+    b.type = 'button';
+    b.innerHTML = '<span aria-hidden="true">🔊</span>' + (rotulo === false ? '' : '<span>Ouvir</span>');
+    b.setAttribute('aria-label', 'Ouvir o som ' + (animal.artigo === 'a' ? 'da ' : 'do ') + animal.nome);
+    b.onclick = function (e) {
+      e.stopPropagation();
+      ZM.Audio.despertar();
+      ZM.Audio.tocar(animal.som);
+      b.classList.remove('tocando');
+      void b.offsetWidth;
+      b.classList.add('tocando');
+    };
+    return b;
+  }
+
   /* Confete comemorativo */
   function confete(quantidade) {
     var alvo = document.getElementById('festa');
@@ -116,6 +134,17 @@ ZM.UI = (function () {
       alvo.appendChild(p);
       (function (el) { setTimeout(function () { el.remove(); }, 3600); })(p);
     }
+  }
+
+  /* Recado rápido no topo (não interrompe o jogo) */
+  function mensagem(texto) {
+    var caixa = document.getElementById('mensagens');
+    if (!caixa) return;
+    var el = document.createElement('div');
+    el.className = 'mensagem';
+    el.textContent = texto;
+    caixa.appendChild(el);
+    setTimeout(function () { el.remove(); }, 3500);
   }
 
   /* Aviso grande de nova regiao / carimbo */
@@ -156,6 +185,7 @@ ZM.UI = (function () {
   return {
     $: $, $$: $$, abrirModal: abrirModal, fecharModal: fecharModal, fecharTodos: fecharTodos,
     canvasAnimal: canvasAnimal, canvasAnimalAnimado: canvasAnimalAnimado,
-    canvasPersonagem: canvasPersonagem, confete: confete, aviso: aviso
+    canvasPersonagem: canvasPersonagem, confete: confete, aviso: aviso,
+    botaoSom: botaoSom, mensagem: mensagem
   };
 })();
