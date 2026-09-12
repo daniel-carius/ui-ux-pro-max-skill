@@ -49,7 +49,10 @@
     <!-- HUD -->
     <header class="hud">
       <div class="hud-esq">
-        <div class="hud-avatar"><canvas id="hud-avatar" width="112" height="112"></canvas></div>
+        <div class="hud-avatar-caixa">
+          <div class="hud-avatar"><canvas id="hud-avatar" width="112" height="112"></canvas></div>
+          <div id="hud-nivel" class="hud-nivel" title="Nível de explorador">🌱</div>
+        </div>
         <div class="hud-infos">
           <div class="hud-linha"><span class="hud-icone">⭐</span><b id="hud-pontos">0</b><span class="hud-legenda">pontos</span></div>
           <div class="hud-linha"><span class="hud-icone">🐾</span><b id="hud-animais">0 / 12</b><span class="hud-legenda">animais</span></div>
@@ -57,7 +60,7 @@
       </div>
       <div class="hud-dir">
         <div class="minimapa-caixa">
-          <canvas id="minimapa" width="132" height="66"></canvas>
+          <canvas id="minimapa" width="120" height="90"></canvas>
         </div>
         <div class="hud-botoes">
           <button id="btn-passaporte" class="btn-icone" title="Passaporte do Explorador">🛂<span>Passaporte</span></button>
@@ -68,6 +71,7 @@
     </header>
 
     <div id="comitiva" class="comitiva"></div>
+    <div id="mochila" class="mochila" aria-label="Mochila"></div>
 
     <div id="meta-atual" class="meta-atual"></div>
 
@@ -127,6 +131,7 @@
 <script src="js/data/regioes.js"></script>
 <script src="js/data/animais.js"></script>
 <script src="js/data/personagens.js"></script>
+<script src="js/data/comidas.js"></script>
 <!-- Nucleo -->
 <script src="js/core/utils.js"></script>
 <script src="js/core/audio.js"></script>
@@ -134,6 +139,7 @@
 <!-- Desenho -->
 <script src="js/render/sprites-animais.js"></script>
 <script src="js/render/sprites-animais-mundo.js"></script>
+<script src="js/render/sprites-animais-mundo2.js"></script>
 <script src="js/render/sprites-personagem.js"></script>
 <script src="js/render/cenario.js"></script>
 <!-- Jogo -->

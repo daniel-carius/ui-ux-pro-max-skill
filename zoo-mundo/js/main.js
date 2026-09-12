@@ -30,6 +30,10 @@
       ZM.Telas.animalEntregue(animal);
     });
 
+    ZM.Jogo.aoColherComida(ZM.Telas.colheuComida);
+    ZM.Jogo.aoAlimentarAnimal(ZM.Telas.alimentou);
+    ZM.Estado.ao('nivel', ZM.Telas.subiuDeNivel);
+
     ZM.Telas.iniciar();
     ZM.Telas.atualizarHUD();
 

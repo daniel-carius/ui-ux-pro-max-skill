@@ -19,6 +19,9 @@ ZM.Estado = (function () {
       descobertos: [],          // ids de animais descobertos
       resgatados: [],           // ids levados para casa
       seguindo: [],             // ids que estão acompanhando o jogador (em fila)
+      mochila: {},              // comidaId -> quantidade (máx. 3 por tipo)
+      pedidos: {},              // animalId -> comidaId (animal tímido esperando comida)
+      alimentados: [],          // ids de animais que já comeram
       regioes: { praca: true }, // regioes desbloqueadas
       completas: [],            // regioes com carimbo
       posicaoAnimais: posicoes, // id -> regiao atual
@@ -99,8 +102,11 @@ ZM.Estado = (function () {
 
   function somarPontos(n) {
     var d = get();
+    var antes = nivelPorPontos(d.pontos);
     d.pontos += n;
+    var depois = nivelPorPontos(d.pontos);
     emitir('pontos', d.pontos);
+    if (depois !== antes) emitir('nivel', nivelAtual());
     salvar();
   }
 
@@ -111,6 +117,72 @@ ZM.Estado = (function () {
       emitir('descoberta', id);
     }
     salvar();
+  }
+
+  /* Níveis de explorador (por pontos) --------------------------------- */
+  var NIVEIS = [
+    { pontos: 0,    nome: 'Iniciante',     icone: '🌱' },
+    { pontos: 1000, nome: 'Explorador',    icone: '🧭' },
+    { pontos: 2500, nome: 'Guia',          icone: '🗺️' },
+    { pontos: 4500, nome: 'Guardião',      icone: '🛡️' },
+    { pontos: 7500, nome: 'Lenda do Zoo',  icone: '🏆' }
+  ];
+
+  function nivelPorPontos(pontos) {
+    var atual = NIVEIS[0];
+    for (var i = 0; i < NIVEIS.length; i++) if (pontos >= NIVEIS[i].pontos) atual = NIVEIS[i];
+    return atual;
+  }
+
+  function nivelAtual() {
+    var n = nivelPorPontos(get().pontos);
+    var i = NIVEIS.indexOf(n);
+    var proximo = NIVEIS[i + 1] || null;
+    return { indice: i, nome: n.nome, icone: n.icone, pontos: n.pontos, proximo: proximo };
+  }
+
+  /* Mochila e pedidos de comida ---------------------------------------- */
+  var MAX_POR_TIPO = 3;
+
+  function quantidadeComida(id) { return get().mochila[id] || 0; }
+  function temComida(id) { return quantidadeComida(id) > 0; }
+
+  function guardarComida(id) {
+    var d = get();
+    if ((d.mochila[id] || 0) >= MAX_POR_TIPO) return false;
+    d.mochila[id] = (d.mochila[id] || 0) + 1;
+    salvar();
+    emitir('mochila', d.mochila);
+    return true;
+  }
+
+  function usarComida(id) {
+    var d = get();
+    if (!d.mochila[id]) return false;
+    d.mochila[id] -= 1;
+    if (d.mochila[id] <= 0) delete d.mochila[id];
+    salvar();
+    emitir('mochila', d.mochila);
+    return true;
+  }
+
+  function registrarPedido(animalId, comidaId) {
+    get().pedidos[animalId] = comidaId;
+    salvar();
+  }
+  function pedidoDe(animalId) { return get().pedidos[animalId] || null; }
+  function limparPedido(animalId) { delete get().pedidos[animalId]; salvar(); }
+  function marcarAlimentado(animalId) {
+    var d = get();
+    if (d.alimentados.indexOf(animalId) === -1) d.alimentados.push(animalId);
+    limparPedido(animalId);
+  }
+  function foiAlimentado(animalId) { return get().alimentados.indexOf(animalId) !== -1; }
+
+  /* Um animal tímido só aceita seguir depois de comer */
+  function precisaComer(animalId) {
+    var a = ZM.ANIMAL_BY_ID[animalId];
+    return !!(a && a.timido && !foiAlimentado(animalId));
   }
 
   /* O animal passa a acompanhar o jogador */
@@ -192,6 +264,11 @@ ZM.Estado = (function () {
     definirPersonagem: definirPersonagem, marcarIniciado: marcarIniciado,
     chamarParaSeguir: chamarParaSeguir, pararDeSeguir: pararDeSeguir,
     estaSeguindo: estaSeguindo, comitiva: comitiva,
+    NIVEIS: NIVEIS, nivelAtual: nivelAtual,
+    quantidadeComida: quantidadeComida, temComida: temComida,
+    guardarComida: guardarComida, usarComida: usarComida, MAX_POR_TIPO: MAX_POR_TIPO,
+    registrarPedido: registrarPedido, pedidoDe: pedidoDe, limparPedido: limparPedido,
+    marcarAlimentado: marcarAlimentado, foiAlimentado: foiAlimentado, precisaComer: precisaComer,
     salvarPosicaoJogador: salvarPosicaoJogador, somarPontos: somarPontos,
     descobrir: descobrir, levarParaCasa: levarParaCasa,
     verificarProgresso: verificarProgresso, proximaMeta: proximaMeta

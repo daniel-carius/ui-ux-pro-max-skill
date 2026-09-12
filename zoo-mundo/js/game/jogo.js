@@ -18,6 +18,12 @@ ZM.Jogo = (function () {
 
   var rastro = [];                 // caminho recente do jogador (a comitiva anda por ele)
   var aoEntregar = function () {};
+  var aoColher = function () {};
+  var aoAlimentar = function () {};
+  var fontes = [];                 // props que dão comida
+  var alvoComida = null;
+  var RECARGA_FONTE = 25;          // segundos até a fonte dar comida de novo
+  var RAIO_COLHEITA = 90;
 
   var RAIO_JOGADOR = 13;
   var PASSO_RASTRO = 9;            // distância entre pontos guardados do caminho
@@ -33,6 +39,7 @@ ZM.Jogo = (function () {
     minimapa = elMinimapa;
     if (minimapa) minimapaCtx = minimapa.getContext('2d');
     mundo = ZM.Mundo.construir();
+    fontes = mundo.props.filter(function (p) { return !!p.comida; });
     criarJogador();
     criarAnimais();
     camera.x = jogador.x; camera.y = jogador.y;
@@ -98,6 +105,47 @@ ZM.Jogo = (function () {
         seguindo: ZM.Estado.estaSeguindo(ref.id), dir: 1
       });
     });
+  }
+
+  /* Colhe comida numa fonte do cenário (árvore, bambu, cais, pedra...) */
+  function colher(fonte) {
+    var f = fonte || alvoComida;
+    if (!f || f.vazio) return false;
+    var comida = ZM.COMIDA_BY_ID[f.comida];
+    if (!ZM.Estado.guardarComida(f.comida)) {
+      ZM.Audio.tocar('quase');
+      textoFlutuante(f.x, f.y - 70, 'Mochila cheia de ' + comida.emoji + '!', '#ffffff');
+      return false;
+    }
+    f.recargaAte = tempo + RECARGA_FONTE;
+    f.vazio = true;
+    ZM.Audio.tocar('colher');
+    faiscas(f.x, f.y - 40, 12, comida.cor);
+    textoFlutuante(f.x, f.y - 76, '+1 ' + comida.emoji, '#ffffff');
+    aoColher(comida);
+    return true;
+  }
+
+  /* Dá ao animal a comida que ele pediu: ele come e passa a acompanhar */
+  function alimentar(id) {
+    var a = buscar(id);
+    var comidaId = ZM.Estado.pedidoDe(id) || a.ref.comida;
+    if (!a || !ZM.Estado.temComida(comidaId)) return false;
+    var comida = ZM.COMIDA_BY_ID[comidaId];
+    ZM.Estado.usarComida(comidaId);
+    ZM.Estado.marcarAlimentado(id);
+    a.comendo = 1.4;
+    ZM.Audio.tocar('comer');
+    setTimeout(function () { ZM.Audio.tocar(a.ref.som); }, 500);
+    faiscas(a.x, a.y - 40, 18, comida.cor);
+    for (var i = 0; i < 5; i++) {
+      particulas.push({ x: a.x + (Math.random() - 0.5) * 30, y: a.y - 60, vx: (Math.random() - 0.5) * 30, vy: -50 - Math.random() * 40,
+        vida: 1.2, total: 1.2, cor: '#ff8fab', r: 6, forma: 'coracao', semGravidade: true });
+    }
+    textoFlutuante(a.x, a.y - 96, 'Nhac! ' + comida.emoji, '#ffffff');
+    aoAlimentar(a.ref, comida);
+    setTimeout(function () { chamarParaSeguir(id); }, 900);
+    return true;
   }
 
   /* O animal começa a acompanhar o jogador */
@@ -253,6 +301,24 @@ ZM.Jogo = (function () {
       });
     }
 
+    // fontes de comida recarregam com o tempo
+    for (var fi = 0; fi < fontes.length; fi++) {
+      var fo = fontes[fi];
+      if (fo.vazio && tempo >= (fo.recargaAte || 0)) fo.vazio = false;
+    }
+
+    // fonte de comida mais perto (só conta quando não há animal por perto)
+    alvoComida = null;
+    var melhorF = RAIO_COLHEITA;
+    for (var fj = 0; fj < fontes.length; fj++) {
+      var ft = fontes[fj];
+      if (ft.vazio || !ZM.Estado.regiaoLiberada(ft.regiao)) continue;
+      var df = U.dist(jogador.x, jogador.y, ft.x, ft.y - 10);
+      if (df < melhorF) { melhorF = df; alvoComida = ft; }
+    }
+
+    animais.forEach(function (a) { if (a.comendo > 0) a.comendo -= dt; });
+
     // alvo de interacao
     alvoProximo = null;
     var melhor = RAIO_INTERACAO;
@@ -262,20 +328,38 @@ ZM.Jogo = (function () {
       if (d < melhor) { melhor = d; alvoProximo = a; }
     });
 
+    // animal e fonte ao alcance ao mesmo tempo: o animal vence, a não ser que a fonte esteja bem mais perto
+    if (alvoProximo && alvoComida) {
+      if (melhorF < melhor * 0.6) alvoProximo = null; else alvoComida = null;
+    }
+
     // acoes
-    if (ZM.Entrada.consumirAcao() && alvoProximo) abrirEncontro(alvoProximo);
+    if (ZM.Entrada.consumirAcao()) {
+      if (alvoProximo) abrirEncontro(alvoProximo);
+      else if (alvoComida) colher(alvoComida);
+    }
     var clique = ZM.Entrada.consumirClique();
     if (clique) {
       var p = telaParaMundo(clique.x, clique.y);
+      // toque direto numa fonte de comida vale mesmo com animal por perto
+      var fonteTocada = null, melhorFT = 55;
+      fontes.forEach(function (f) {
+        if (f.vazio || !ZM.Estado.regiaoLiberada(f.regiao)) return;
+        var d = U.dist(p.x, p.y, f.x, f.y - 30);
+        if (d < melhorFT) { melhorFT = d; fonteTocada = f; }
+      });
       var tocado = null, melhorD = 70;
       animais.forEach(function (a) {
         if (!a.seguindo && !ZM.Estado.regiaoLiberada(a.regiao)) return;
         var d = U.dist(p.x, p.y, a.x, a.y - 30);
         if (d < melhorD) { melhorD = d; tocado = a; }
       });
-      if (tocado) {
+      if (tocado && (!fonteTocada || melhorD <= melhorFT)) {
         if (U.dist(jogador.x, jogador.y, tocado.x, tocado.y) <= RAIO_INTERACAO * 1.6) abrirEncontro(tocado);
         else textoFlutuante(tocado.x, tocado.y - 70, 'Chegue mais perto!', '#ffffff');
+      } else if (fonteTocada) {
+        if (U.dist(jogador.x, jogador.y, fonteTocada.x, fonteTocada.y) <= RAIO_COLHEITA * 1.6) colher(fonteTocada);
+        else textoFlutuante(fonteTocada.x, fonteTocada.y - 70, 'Chegue mais perto!', '#ffffff');
       }
     }
 
@@ -283,7 +367,8 @@ ZM.Jogo = (function () {
     for (var i = particulas.length - 1; i >= 0; i--) {
       var pt = particulas[i];
       pt.vida -= dt;
-      pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.vy += 260 * dt;
+      pt.x += pt.vx * dt; pt.y += pt.vy * dt;
+      if (!pt.semGravidade) pt.vy += 260 * dt;
       if (pt.vida <= 0) particulas.splice(i, 1);
     }
     for (var j = textos.length - 1; j >= 0; j--) {
@@ -310,6 +395,11 @@ ZM.Jogo = (function () {
   function abrirEncontro(a) {
     ZM.Estado.salvarPosicaoJogador(jogador.x, jogador.y);
     ZM.Estado.salvar();
+    var pedido = ZM.Estado.pedidoDe(a.id);
+    if (pedido && !a.seguindo && ZM.Estado.temComida(pedido)) {   // já sabe o que ele come: só entrega
+      alimentar(a.id);
+      return;
+    }
     ZM.Audio.tocar('encontro');
     aoInteragir(a.ref, a.regiao);
   }
@@ -373,6 +463,7 @@ ZM.Jogo = (function () {
       if (item.tipo === 'prop') {
         var reg = ZM.Mundo.dados.porRegiao[item.o.regiao];
         ZM.Cenario.desenhar(ctx, item.o, reg.ref.paleta, tempo);
+        if (item.o.comida) desenharFonte(item.o);
       } else if (item.tipo === 'animal') {
         desenharAnimal(item.o);
       } else {
@@ -386,6 +477,7 @@ ZM.Jogo = (function () {
       var a = U.clamp(p.vida, 0, 1);
       ctx.globalAlpha = a;
       if (p.forma === 'estrela') estrela(ctx, p.x, p.y, p.r * 1.7, p.cor);
+      else if (p.forma === 'coracao') coracao(ctx, p.x, p.y, p.r, p.cor);
       else U.circle(ctx, p.x, p.y, p.r, p.cor);
       ctx.globalAlpha = 1;
     });
@@ -421,11 +513,25 @@ ZM.Jogo = (function () {
   function desenharAnimal(a) {
     var descoberto = ZM.Estado.descoberto(a.id);
     var perdido = a.regiao !== a.ref.casa;
-    ZM.SpritesAnimais.desenhar(a.ref.sprite, ctx, a.x, a.y, a.seguindo ? 0.78 : 0.86,
+    var pulo = a.comendo > 0 ? Math.abs(Math.sin(tempo * 14)) * 8 : 0;
+    ZM.SpritesAnimais.desenhar(a.ref.sprite, ctx, a.x, a.y - pulo, a.seguindo ? 0.78 : 0.86,
       tempo + a.fase, { espelhar: a.seguindo && a.dir < 0 });
 
     // indicadores
     var topo = a.y - 96;
+    var pedido = ZM.Estado.pedidoDe(a.id);
+    if (pedido && !a.seguindo) {
+      var comida = ZM.COMIDA_BY_ID[pedido];
+      var py = topo - 6 + Math.sin(tempo * 4 + a.fase) * 4;
+      U.circle(ctx, a.x + 4, py, 17, '#ffffff');
+      U.circle(ctx, a.x - 10, py + 16, 5, '#ffffff');
+      U.circle(ctx, a.x - 17, py + 24, 3, '#ffffff');
+      ctx.font = '18px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#000'; ctx.fillText(comida.emoji, a.x + 4, py + 1);
+      ctx.textBaseline = 'alphabetic';
+      if (alvoProximo === a) aroAlvo(a);
+      return;
+    }
     if (a.seguindo) {
       var pulsa = 1 + Math.sin(tempo * 5 + a.fase) * 0.12;
       ctx.save();
@@ -450,10 +556,35 @@ ZM.Jogo = (function () {
       U.circle(ctx, a.x, a.y - 30, 60 * (1.2 - a.brilho), 'rgba(255,236,170,0.35)');
       ctx.globalAlpha = 1;
     }
-    if (alvoProximo === a) {
+    if (alvoProximo === a) aroAlvo(a);
+  }
+
+  function aroAlvo(a) {
+    ctx.globalAlpha = 0.85;
+    ctx.strokeStyle = '#fff3c4'; ctx.lineWidth = 3; ctx.setLineDash([7, 7]);
+    ctx.beginPath(); ctx.ellipse(a.x, a.y, 44, 18, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+
+  /* Fonte de comida: mostra a comida flutuando quando está disponível e perto */
+  function desenharFonte(f) {
+    if (f.vazio) return;
+    if (Math.abs(f.x - jogador.x) > 190 || Math.abs(f.y - jogador.y) > 170) return;   // só as fontes bem perto, para não poluir a tela
+    var comida = ZM.COMIDA_BY_ID[f.comida];
+    var alturaTopo = { pedra: 34, capim: 36, arbusto: 42, bambu: 90, pesqueiro: 60, cozinha: 96, pier: 48, palmeira: 100 }[f.tipo] || 84;
+    var y = f.y - alturaTopo * (f.s || 1) - 10 + Math.sin(tempo * 3 + f.x * 0.05) * 3;
+    ctx.globalAlpha = 0.95;
+    U.circle(ctx, f.x, y, 13, 'rgba(255,255,255,0.9)');
+    ctx.font = '15px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#000';
+    ctx.fillText(comida.emoji, f.x, y + 1);
+    ctx.textBaseline = 'alphabetic';
+    ctx.globalAlpha = 1;
+    if (alvoComida === f) {
       ctx.globalAlpha = 0.85;
       ctx.strokeStyle = '#fff3c4'; ctx.lineWidth = 3; ctx.setLineDash([7, 7]);
-      ctx.beginPath(); ctx.ellipse(a.x, a.y, 44, 18, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(f.x, f.y, 34, 14, 0, 0, Math.PI * 2); ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
     }
@@ -547,7 +678,7 @@ ZM.Jogo = (function () {
   function animaisNoMundo() {
     return animais.map(function (a) { return { id: a.id, x: a.x, y: a.y, regiao: a.regiao }; });
   }
-  function temAlvo() { return !!alvoProximo; }
+  function temAlvo() { return !!alvoProximo || !!alvoComida; }
   function alvoAtual() { return alvoProximo ? alvoProximo.id : null; }
 
   return {
@@ -555,6 +686,13 @@ ZM.Jogo = (function () {
     aoEncontrarAnimal: aoEncontrarAnimal,
     chamarParaSeguir: chamarParaSeguir, deixarAqui: deixarAqui,
     aoEntregarAnimal: function (fn) { aoEntregar = fn; },
+    aoColherComida: function (fn) { aoColher = fn; },
+    aoAlimentarAnimal: function (fn) { aoAlimentar = fn; },
+    colher: colher, alimentar: alimentar,
+    alvoComidaAtual: function () { return alvoComida ? { tipo: alvoComida.tipo, comida: alvoComida.comida, x: alvoComida.x, y: alvoComida.y } : null; },
+    fontesDeComida: function () {
+      return fontes.map(function (f) { return { tipo: f.tipo, comida: f.comida, x: f.x, y: f.y, regiao: f.regiao, vazio: !!f.vazio }; });
+    },
     comitiva: function () {
       return animais.filter(function (a) { return a.seguindo; }).map(function (a) { return a.ref; });
     },

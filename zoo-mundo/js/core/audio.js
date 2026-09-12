@@ -65,7 +65,26 @@ ZM.Audio = (function () {
     latido:      [{ f: 500, t: 'ruido', d: 0.12, v: 0.45, sweep: 180, q: 6 }, { f: 460, t: 'ruido', d: 0.14, v: 0.4, delay: 0.18, sweep: 160, q: 6 }],
     'bufo-grave':[{ f: 150, t: 'ruido', d: 0.45, v: 0.55, sweep: 55, q: 5 }],
     ganido:      [{ f: 900, t: 'sawtooth', d: 0.16, v: 0.2, sweep: 1500, vib: 16, vibAmp: 80 }, { f: 1100, t: 'sawtooth', d: 0.16, v: 0.18, delay: 0.17, sweep: 700 }],
-    'bufo-rena': [{ f: 300, t: 'ruido', d: 0.28, v: 0.4, sweep: 120, q: 4 }, { f: 200, t: 'triangle', d: 0.2, v: 0.18, delay: 0.3, sweep: 140 }]
+    'bufo-rena': [{ f: 300, t: 'ruido', d: 0.28, v: 0.4, sweep: 120, q: 4 }, { f: 200, t: 'triangle', d: 0.2, v: 0.18, delay: 0.3, sweep: 140 }],
+    /* América do Norte */
+    mugido:      [{ f: 160, t: 'sawtooth', d: 0.5, v: 0.24, sweep: 110, vib: 6, vibAmp: 18 }],
+    bramido:     [{ f: 220, t: 'sawtooth', d: 0.45, v: 0.22, sweep: 420, vib: 8, vibAmp: 30 }],
+    'rosnado-grave': [{ f: 170, t: 'ruido', d: 0.55, v: 0.55, sweep: 70, q: 8 }, { f: 75, t: 'sawtooth', d: 0.5, v: 0.22, sweep: 55 }],
+    'grito-aguia': [{ f: 1800, t: 'sawtooth', d: 0.22, v: 0.18, sweep: 900, vib: 20, vibAmp: 140 }, { f: 1500, t: 'sawtooth', d: 0.2, v: 0.16, delay: 0.24, sweep: 700 }],
+    estalo:      [{ f: 900, t: 'ruido', d: 0.06, v: 0.5, sweep: 300, q: 8 }, { f: 850, t: 'ruido', d: 0.06, v: 0.45, delay: 0.14, sweep: 280, q: 8 }, { f: 800, t: 'ruido', d: 0.08, v: 0.4, delay: 0.28, sweep: 260, q: 8 }],
+    /* Europa */
+    uivo:        [{ f: 380, t: 'sine', d: 0.9, v: 0.3, sweep: 620, vib: 5, vibAmp: 16 }],
+    'pio-coruja': [{ f: 420, t: 'sine', d: 0.18, v: 0.3, sweep: 360 }, { f: 400, t: 'sine', d: 0.3, v: 0.28, delay: 0.24, sweep: 330 }],
+    /* Oceano */
+    borbulha:    [{ f: 400, t: 'sine', d: 0.08, v: 0.25, sweep: 900 }, { f: 500, t: 'sine', d: 0.08, v: 0.22, delay: 0.12, sweep: 1100 }, { f: 650, t: 'sine', d: 0.1, v: 0.2, delay: 0.24, sweep: 1400 }],
+    'sopro-agua': [{ f: 600, t: 'ruido', d: 0.35, v: 0.35, sweep: 1400, q: 2 }],
+    'assobio-golfinho': [{ f: 1800, t: 'sine', d: 0.14, v: 0.24, sweep: 2600, vib: 28, vibAmp: 160 }, { f: 2400, t: 'sine', d: 0.14, v: 0.2, delay: 0.16, sweep: 1900 }, { f: 2000, t: 'sine', d: 0.12, v: 0.18, delay: 0.32, sweep: 2800 }],
+    estalinho:   [{ f: 1600, t: 'ruido', d: 0.05, v: 0.35, sweep: 900, q: 9 }, { f: 1700, t: 'ruido', d: 0.05, v: 0.3, delay: 0.1, sweep: 950, q: 9 }],
+    clique:      [{ f: 1200, t: 'square', d: 0.04, v: 0.16 }, { f: 1300, t: 'square', d: 0.04, v: 0.16, delay: 0.09 }, { f: 1100, t: 'square', d: 0.05, v: 0.14, delay: 0.2 }],
+    /* comida */
+    colher:      [{ f: 660, t: 'triangle', d: 0.08, v: 0.4 }, { f: 990, t: 'triangle', d: 0.14, v: 0.4, delay: 0.07 }],
+    comer:       [{ f: 300, t: 'ruido', d: 0.1, v: 0.35, sweep: 160, q: 3 }, { f: 280, t: 'ruido', d: 0.1, v: 0.32, delay: 0.14, sweep: 150, q: 3 }, { f: 520, t: 'sine', d: 0.16, v: 0.35, delay: 0.32, sweep: 780 }, { f: 780, t: 'sine', d: 0.22, v: 0.35, delay: 0.46, sweep: 1040 }],
+    nivel:       [{ f: 523, t: 'square', d: 0.1, v: 0.25 }, { f: 659, t: 'square', d: 0.1, v: 0.25, delay: 0.1 }, { f: 784, t: 'square', d: 0.1, v: 0.25, delay: 0.2 }, { f: 1046, t: 'square', d: 0.36, v: 0.28, delay: 0.3 }, { f: 1318, t: 'square', d: 0.5, v: 0.22, delay: 0.42 }]
   };
 
   function garantirContexto() {

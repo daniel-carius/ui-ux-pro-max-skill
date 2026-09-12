@@ -161,7 +161,26 @@ ZM.Encontro = (function () {
       ZM.Jogo.comemorar(pos.x, pos.y);
     }
 
-    if (perdido) {
+    if (perdido && ZM.Estado.precisaComer(alvo.id)) {
+      var fome = document.createElement('div');
+      fome.className = 'feedback perdido';
+      fome.textContent = 'Ele está perdido, mas está com fome e não quer sair daí!';
+      c.appendChild(fome);
+      c.appendChild(recompensas());
+      var acoesFome = document.createElement('div');
+      acoesFome.className = 'acoes-modal';
+      var descobrirComida = document.createElement('button');
+      descobrirComida.className = 'btn btn-amarelo';
+      descobrirComida.innerHTML = '🍽️ O que ele come?';
+      descobrirComida.onclick = passoComida;
+      acoesFome.appendChild(descobrirComida);
+      var depoisFome = document.createElement('button');
+      depoisFome.className = 'btn btn-texto';
+      depoisFome.textContent = 'Agora não';
+      depoisFome.onclick = encerrar;
+      acoesFome.appendChild(depoisFome);
+      c.appendChild(acoesFome);
+    } else if (perdido) {
       var casaAberta = ZM.Estado.regiaoLiberada(alvo.casa);
       var aviso = document.createElement('div');
       aviso.className = 'feedback perdido';
@@ -208,6 +227,74 @@ ZM.Encontro = (function () {
     }
   }
 
+  /* 4) Animal tímido: descobrir o que ele come */
+  function passoComida() {
+    limpar();
+    var c = conteudo();
+    var acertouPrimeira = true;
+    c.appendChild(titulo('Hmm, que fome! ' + alvo.emoji));
+    c.appendChild(palco(150));
+    c.appendChild(pergunta('O que será que ' + artigo(alvo) + alvo.nome.toLowerCase() + ' come?'));
+
+    var certa = ZM.COMIDA_BY_ID[alvo.comida];
+    var outras = U.shuffle(ZM.COMIDAS.filter(function (co) { return co.id !== alvo.comida; })).slice(0, 2);
+    var opcoes = U.shuffle([certa].concat(outras)).map(function (co) {
+      return { rotulo: co.nome.charAt(0).toUpperCase() + co.nome.slice(1), icone: co.emoji, certo: co.id === alvo.comida };
+    });
+
+    c.appendChild(caixaOpcoes(opcoes, false, function (op, botao, box) {
+      if (op.certo) {
+        botao.classList.add('certa');
+        ZM.Audio.tocar('correto');
+        if (acertouPrimeira) ganhos += PONTOS_PRIMEIRA;
+        Array.prototype.forEach.call(box.children, function (b) { b.disabled = true; });
+        ZM.Estado.registrarPedido(alvo.id, alvo.comida);
+        setTimeout(passoEntrega, 620);
+      } else {
+        acertouPrimeira = false; semErro = false;
+        botao.classList.add('quase');
+        botao.disabled = true;
+        ZM.Audio.tocar('quase');
+        mensagemRapida(box, 'Quase! Ele não come isso. 😊');
+      }
+    }));
+  }
+
+  /* 5) Tem a comida na mochila? Entrega; senão, vai procurar */
+  function passoEntrega() {
+    limpar();
+    var c = conteudo();
+    var comida = ZM.COMIDA_BY_ID[alvo.comida];
+    var tem = ZM.Estado.temComida(alvo.comida);
+    c.appendChild(titulo(tem ? 'Você tem ' + comida.emoji + '!' : 'Precisamos de ' + comida.emoji + ' ' + comida.nome));
+    c.appendChild(palco(150));
+
+    var f = document.createElement('div');
+    f.className = 'feedback bom';
+    f.textContent = 'Isso mesmo! ' + artigoMaiusculo(alvo) + alvo.nome + ' come ' + comida.nome + ' ' + comida.emoji;
+    c.appendChild(f);
+
+    var instrucao = document.createElement('p');
+    instrucao.className = 'instrucao';
+    instrucao.innerHTML = tem
+      ? '🎒 Você já tem ' + comida.emoji + ' na mochila. Dê para ele e ele vai com você!'
+      : '🎒 Você ainda não tem ' + comida.nome + '. Procure <b>' + comida.dica + '</b> e volte aqui: é só entregar!';
+    c.appendChild(instrucao);
+    c.appendChild(recompensas());
+
+    var acoes = document.createElement('div');
+    acoes.className = 'acoes-modal';
+    var principal = document.createElement('button');
+    principal.className = 'btn btn-amarelo';
+    principal.innerHTML = tem ? 'Dar ' + comida.emoji + ' ' + comida.nome : 'VOU PROCURAR! 🔍';
+    principal.onclick = function () {
+      if (tem) ZM.Jogo.alimentar(alvo.id);
+      encerrar();
+    };
+    acoes.appendChild(principal);
+    c.appendChild(acoes);
+  }
+
   /* Reencontro com animal ja descoberto */
   function reencontro() {
     limpar();
@@ -245,6 +332,24 @@ ZM.Encontro = (function () {
         encerrar();
       };
       acoes.appendChild(soltar);
+    } else if (perdido && ZM.Estado.precisaComer(alvo.id)) {
+      var pedido = ZM.Estado.pedidoDe(alvo.id);
+      var aviso2 = document.createElement('div');
+      aviso2.className = 'feedback perdido';
+      if (pedido) {
+        var co = ZM.COMIDA_BY_ID[pedido];
+        aviso2.innerHTML = 'Ainda estou com fome de ' + co.emoji + ' <b>' + co.nome + '</b>! Procure ' + co.dica + '.';
+      } else {
+        aviso2.textContent = 'Ele está com fome e não quer sair daí. O que será que ele come?';
+      }
+      c.insertBefore(aviso2, c.lastChild);
+      if (!pedido) {
+        var descobrir = document.createElement('button');
+        descobrir.className = 'btn btn-amarelo';
+        descobrir.innerHTML = '🍽️ O que ele come?';
+        descobrir.onclick = passoComida;
+        acoes.appendChild(descobrir);
+      }
     } else if (perdido) {
       var aviso = document.createElement('div');
       aviso.className = 'feedback perdido';

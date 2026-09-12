@@ -13,6 +13,7 @@ vêm e leva os que estão perdidos de volta para casa — andando com eles pelo 
 | Andar | `WASD` ou setas | joystick virtual (metade esquerda da tela) |
 | Conversar com o animal | `E`, `Espaço`, `Enter` ou clique no animal | botão 👋 **Falar** ou toque no animal |
 | Ouvir o som do animal | botão 🔊 **Ouvir** na janela do animal | botão 🔊 **Ouvir** |
+| Colher comida | `E` perto de uma árvore com frutas, bambu, arbusto, capim, pedra ou cais | botão 👋 ou toque na fonte |
 | Passaporte | `P` | botão 🛂 |
 | Meu Zoológico | `Z` | botão 🦓 |
 | Fechar janela | `Esc` | botão ✕ |
@@ -52,30 +53,61 @@ tempo, formando uma fila. Se a região dele ainda estiver fechada, ele continua
 junto até você desbloqueá-la; e dá para deixá-lo em qualquer lugar falando com
 ele de novo.
 
-- **Pontuação:** 100 por animal novo, +25 por acertar cada pergunta de primeira,
-  +50 quando o animal chega em casa.
+### Animais tímidos e comida
+
+Alguns animais perdidos estão com fome e **não saem do lugar** até comer. Aí o
+encontro ganha uma pergunta a mais — *"O que será que o coala come?"* — com três
+opções. Acertando, o pedido fica registrado (o animal passa a mostrar 💭🌿 na
+cabeça e entra no painel *Está com fome*). A comida se **colhe no cenário**:
+
+| Comida | Onde colher |
+|--------|-------------|
+| 🍌 fruta | árvores que têm frutinhas penduradas (nem todas!) |
+| 🎋 bambu | bambuzais da Ásia |
+| 🌿 folhas | arbustos, acácias e eucaliptos |
+| 🌾 capim | tufos de capim alto |
+| 🐟 peixe | cais de pesca na beira dos lagos e o píer do Oceano |
+| 🐛 insetos | levantando as pedras |
+| 🍖 carne | Cozinha do Zoo, ao lado da fonte da Praça |
+
+Cada fonte dá 1 item e demora ~25 s para dar de novo; a mochila guarda até 3 de
+cada tipo. Se a criança já tiver a comida, dá na hora; se não, vai procurar e, ao
+voltar e falar com o animal, **só entrega** — sem repetir o quiz. Ele come
+("Nhac!"), solta coraçõezinhos e passa a seguir.
+
+### Nível de explorador
+
+Os pontos sobem o nível — 🌱 Iniciante → 🧭 Explorador (1000) → 🗺️ Guia (2500)
+→ 🛡️ Guardião (4500) → 🏆 Lenda do Zoo (7500) — com badge no HUD, barra no
+passaporte e uma comemoração a cada subida.
+
+- **Pontuação:** 100 por animal novo, +25 por acertar cada pergunta de primeira
+  (nome, região e comida), +50 quando o animal chega em casa.
 - **Progressão:** 3 animais descobertos abrem a **África**, 8 a **Austrália**,
-  14 o **Brasil**, 20 a **Ásia** e 26 a **Região Polar**. As regiões fechadas
-  aparecem no mapa com névoa, portão trancado e uma placa dizendo quantos animais
-  faltam.
+  14 o **Brasil**, 20 a **Ásia** e 26 a **Região Polar**. Descobrir **todos os 30**
+  abre a **América do Norte**; 36 abrem a **Europa** e 42 o **Oceano**. As regiões
+  fechadas aparecem no mapa com névoa, portão trancado e uma placa dizendo quantos
+  animais faltam.
 - **Passaporte:** progresso por região e carimbo `REGIÃO COMPLETA` com confete.
-- **Meu Zoológico:** 30 cards; os animais não descobertos aparecem como silhueta.
+- **Meu Zoológico:** 48 cards; os animais não descobertos aparecem como silhueta.
 - **Som de cada animal:** o botão 🔊 **Ouvir** toca a voz do bicho (rugido, pio,
   bufo...) na janela do encontro e na ficha da coleção.
 
 ## Mapa
 
-O mundo é uma grade de células de 1200 × 900 px (3 colunas × 2 linhas):
+O mundo é uma grade de células de 1200 × 900 px (3 colunas × 3 linhas):
 
 ```
 ┌──────────┬──────────┬──────────┐
 │  Brasil  │   Ásia   │  Polar   │
 ├──────────┼──────────┼──────────┤
 │  África  │  Praça   │Austrália │
+├──────────┼──────────┼──────────┤
+│  Europa  │ Am. Norte│  Oceano  │   ← expansão, abre depois dos 30
 └──────────┴──────────┴──────────┘
 ```
 
-São **30 animais**, seis por região:
+São **48 animais**, seis por região:
 
 | Região | Animais |
 |--------|---------|
@@ -84,8 +116,12 @@ São **30 animais**, seis por região:
 | 🦜 Brasil | Onça-pintada, Arara-azul, Tucano, Preguiça, Capivara, Macaco-prego |
 | 🐼 Ásia | Panda-gigante, Tigre, Panda-vermelho, Orangotango, Pavão, Camelo |
 | 🐧 Polar | Urso-polar, Pinguim, Foca, Morsa, Raposa-do-ártico, Rena |
+| 🦬 América do Norte | Bisão, Guaxinim, Alce, Urso-pardo, Águia-careca, Castor |
+| 🦉 Europa | Lobo, Raposa-vermelha, Cervo, Ouriço, Coruja, Javali |
+| 🐬 Oceano | Tubarão, Tartaruga-marinha, Golfinho, Polvo, Cavalo-marinho, Caranguejo |
 
-Metade deles (15) começa na região errada, esperando uma carona até em casa.
+21 deles começam na região errada, esperando uma carona até em casa — e 9 desses
+são tímidos e só vão depois de comer.
 
 Cada região tem paleta, vegetação e chão próprios (savana, outback, floresta,
 bambuzal, gelo). As passagens entre regiões só abrem quando as duas estão
@@ -101,8 +137,9 @@ zoo-mundo/
 ├── assets/audio/            # opcional: arquivos de som (veja LEIA-ME.md)
 └── js/
     ├── data/                # DADOS separados da interface
-    │   ├── animais.js       # 30 animais: nome, sprite, casa, habitat, curiosidade...
-    │   ├── regioes.js       # 6 regiões: posição na grade, paleta, regra de desbloqueio
+    │   ├── animais.js       # 48 animais: nome, sprite, casa, comida, curiosidade...
+    │   ├── comidas.js       # alimentos: emoji, onde colher, dica para a criança
+    │   ├── regioes.js       # 9 regiões: posição na grade, paleta, regra de desbloqueio
     │   └── personagens.js   # 4 personagens jogáveis
     ├── core/
     │   ├── utils.js         # matemática, cores, RNG com semente, colisão
@@ -111,12 +148,13 @@ zoo-mundo/
     ├── render/
     │   ├── sprites-animais.js     # animais da África e da Austrália (vetor em canvas)
     │   ├── sprites-animais-mundo.js  # animais do Brasil, da Ásia e do Polar
+    │   ├── sprites-animais-mundo2.js # América do Norte, Europa e Oceano
     │   ├── sprites-personagem.js  # personagem em 4 direções com animação
     │   └── cenario.js             # árvores, pedras, placas, portões, fonte
     ├── game/
     │   ├── mundo.js         # monta o mapa, o chão, o cenário e as barreiras
     │   ├── entrada.js       # teclado, toque e joystick virtual
-    │   └── jogo.js          # câmera, loop, animais, comitiva, partículas, minimapa
+    │   └── jogo.js          # câmera, loop, animais, comitiva, comida, partículas, minimapa
     ├── ui/
     │   ├── comum.js         # modais, canvas de sprites, confete, avisos
     │   ├── encontro.js      # quiz, resgate e recompensas
@@ -138,7 +176,7 @@ desenhados por código no canvas, então o jogo abre offline e pesa poucos KB.
   id: 'tucano', nome: 'Tucano', artigo: 'o', emoji: '🦜', sprite: 'tucano',
   casa: 'brasil', continente: 'América do Sul', habitat: 'Floresta tropical',
   alimentacao: 'Frugívoro', curiosidade: 'O bico enorme ajuda a refrescar o corpo.',
-  som: 'sopro',
+  som: 'sopro', comida: 'fruta', timido: true,   // timido: só segue depois de comer
   spawn: { regiao: 'praca', x: 0.4, y: 0.6 }   // x/y de 0 a 1 dentro da região
 }
 ```
@@ -150,9 +188,12 @@ querer uma carona até em casa. Depois crie o desenho em
 `som` em `js/core/audio.js` — ou registre um arquivo de áudio, como explica
 `assets/audio/LEIA-ME.md`.
 
+**Nova comida** — acrescente em `js/data/comidas.js` com a lista `fonte` dos tipos
+de cenário que a oferecem; o motor marca as fontes e desenha o balão sozinho.
+
 **Nova região** — acrescente em `js/data/regioes.js` com `col`/`row` livres na
-grade, uma paleta, um `bioma` (a receita de cenário vem de `RECEITAS` em
-`js/game/mundo.js`) e a regra de desbloqueio:
+grade, uma paleta, um `bioma` (a receita de cenário e os lagos vêm de `RECEITAS` e
+`LAGOS` em `js/game/mundo.js`) e a regra de desbloqueio:
 
 ```js
 unlock: { tipo: 'descobertas', valor: 12 }   // ou { tipo: 'embreve' } / { tipo: 'inicial' }

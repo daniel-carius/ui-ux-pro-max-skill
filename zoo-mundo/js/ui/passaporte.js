@@ -19,6 +19,18 @@ ZM.Passaporte = (function () {
     resumo.textContent = '⭐ ' + d.pontos + ' pontos · 🐾 ' + ZM.Estado.totalDescobertos() +
       ' de ' + ZM.Estado.totalAnimais() + ' animais descobertos';
 
+    var antigo = document.querySelector('.nivel-passaporte');
+    if (antigo) antigo.remove();
+    var nivel = ZM.Estado.nivelAtual();
+    var caixaNivel = document.createElement('div');
+    caixaNivel.className = 'nivel-passaporte';
+    var progresso = nivel.proximo
+      ? Math.round((d.pontos - nivel.pontos) / (nivel.proximo.pontos - nivel.pontos) * 100) : 100;
+    caixaNivel.innerHTML = '<span>' + nivel.icone + ' Nível: <b>' + nivel.nome + '</b></span>' +
+      '<div class="barra"><i style="width:' + progresso + '%"></i></div>' +
+      '<small>' + (nivel.proximo ? 'próximo: ' + nivel.proximo.icone + ' ' + nivel.proximo.nome + ' aos ' + nivel.proximo.pontos + ' pontos' : 'nível máximo!') + '</small>';
+    lista.parentNode.insertBefore(caixaNivel, lista);
+
     ZM.REGIONS.forEach(function (r) {
       if (r.id === 'praca') return;                   // a praca e o ponto de encontro
       var moram = ZM.animaisDaRegiao(r.id);

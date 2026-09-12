@@ -117,6 +117,7 @@ ZM.Mundo = (function () {
 
   function pontosProtegidos(reg) {
     var pts = [{ x: reg.cx, y: reg.cy, raioLivre: 120 }];
+    if (reg.id === 'praca') pts.push({ x: reg.cx + 120, y: reg.cy + 250, raioLivre: 110 });   // Cozinha do Zoo
     portasDaRegiao(reg.id).forEach(function (porta) {
       pts.push({ x: porta.x, y: porta.y, raioLivre: 150 });
       // corredor entre a porta e o centro
@@ -138,8 +139,29 @@ ZM.Mundo = (function () {
     outback:  [{ tipo: 'eucalipto', n: 10, s: [0.85, 1.2], r: 15 }, { tipo: 'pedra', n: 12, s: [0.9, 1.5], r: 24, cor: '#c1663f' }, { tipo: 'arbusto', n: 12, s: [0.7, 1.0], r: 0, cor: '#9db878' }, { tipo: 'capim', n: 16, s: [0.7, 1.1], r: 0, cor: '#c99a6a' }],
     floresta: [{ tipo: 'selva', n: 20, s: [0.9, 1.3], r: 20 }, { tipo: 'arbusto', n: 20, s: [0.9, 1.3], r: 0 }, { tipo: 'pedra', n: 5, s: [0.8, 1.1], r: 20, cor: '#8d9a86' }],
     bambuzal: [{ tipo: 'bambu', n: 16, s: [0.9, 1.3], r: 14 }, { tipo: 'sakura', n: 6, s: [0.9, 1.2], r: 18 }, { tipo: 'pedra', n: 6, s: [0.8, 1.2], r: 20, cor: '#9fa9a0' }, { tipo: 'arco', n: 1, s: [1, 1], r: 40 }],
-    gelo:     [{ tipo: 'iceberg', n: 10, s: [0.9, 1.4], r: 26 }, { tipo: 'pinheiro', n: 8, s: [0.9, 1.2], r: 16 }, { tipo: 'pedra', n: 5, s: [0.8, 1.1], r: 20, cor: '#cddcea' }]
+    gelo:     [{ tipo: 'iceberg', n: 10, s: [0.9, 1.4], r: 26 }, { tipo: 'pinheiro', n: 8, s: [0.9, 1.2], r: 16 }, { tipo: 'pedra', n: 5, s: [0.8, 1.1], r: 20, cor: '#cddcea' }],
+    pradaria: [{ tipo: 'carvalho', n: 10, s: [0.9, 1.25], r: 18 }, { tipo: 'pinheiro', n: 6, s: [0.9, 1.2], r: 16 }, { tipo: 'pedra', n: 6, s: [0.8, 1.2], r: 20, cor: '#a89f8c' }, { tipo: 'capim', n: 20, s: [0.8, 1.2], r: 0, cor: '#d1b45a' }, { tipo: 'cabana', n: 1, s: [1, 1], r: 48 }],
+    bosque:   [{ tipo: 'carvalho', n: 14, s: [0.85, 1.2], r: 18, outono: true }, { tipo: 'pinheiro', n: 5, s: [0.9, 1.2], r: 16 }, { tipo: 'cogumelo', n: 12, s: [0.8, 1.3], r: 0 }, { tipo: 'pedra', n: 5, s: [0.8, 1.1], r: 20, cor: '#8f9a86' }, { tipo: 'arbusto', n: 8, s: [0.8, 1.1], r: 0, cor: '#6f9750', flores: true }],
+    recife:   [{ tipo: 'palmeira', n: 9, s: [0.9, 1.2], r: 14 }, { tipo: 'coral', n: 14, s: [0.8, 1.3], r: 10, cores: ['#ff7b9c', '#ffa94d', '#c084fc', '#4fd1c5'] }, { tipo: 'pedra', n: 5, s: [0.8, 1.1], r: 20, cor: '#c9b493' }, { tipo: 'concha', n: 10, s: [0.8, 1.2], r: 0 }]
   };
+
+  /* Lagos de cada bioma (posição relativa à célula). Usados no chão e no cais de pesca. */
+  var LAGOS = {
+    savana:   [{ x: 0.62, y: 0.78, rx: 150, ry: 78 }],
+    outback:  [{ x: 0.50, y: 0.76, rx: 130, ry: 60 }],
+    floresta: [{ x: 0.50, y: 0.60, rx: 240, ry: 90 }],
+    gelo:     [{ x: 0.30, y: 0.35, rx: 190, ry: 110 }, { x: 0.72, y: 0.70, rx: 150, ry: 90 }],
+    pradaria: [{ x: 0.74, y: 0.30, rx: 160, ry: 80 }],
+    bosque:   [{ x: 0.30, y: 0.72, rx: 120, ry: 62 }],
+    recife:   [],
+    bambuzal: [{ x: 0.78, y: 0.72, rx: 110, ry: 58 }]
+  };
+
+  function lagosDaRegiao(reg) {
+    return (LAGOS[reg.ref.bioma] || []).map(function (l) {
+      return { x: reg.x + l.x * reg.w, y: reg.y + l.y * reg.h, rx: l.rx, ry: l.ry };
+    });
+  }
 
   function gerarCenario(reg) {
     var rand = U.rng(reg.ref.col * 977 + reg.ref.row * 131 + 7);
@@ -150,6 +172,23 @@ ZM.Mundo = (function () {
     if (reg.id === 'praca') {
       var fonte = { tipo: 'fonte', x: reg.cx, y: reg.cy + 10, s: 1, regiao: reg.id, raio: 46, raioLivre: 90 };
       mundo.props.push(fonte); criados.push(fonte);
+      // ao sul da fonte, longe dos animais que nascem na praça (canguru a oeste, tucano a leste)
+      var cozinha = { tipo: 'cozinha', x: reg.cx + 120, y: reg.cy + 250, s: 1, regiao: reg.id, raio: 44, raioLivre: 90,
+                      comida: ZM.comidaDoCenario('cozinha') };
+      mundo.props.push(cozinha); criados.push(cozinha);
+    }
+
+    // cais de pesca na beira de cada lago (fonte de peixe)
+    lagosDaRegiao(reg).forEach(function (l) {
+      var cais = { tipo: 'pesqueiro', x: l.x - l.rx * 0.5, y: l.y + l.ry + 4, s: 1, regiao: reg.id,
+                   raio: 22, raioLivre: 70, comida: ZM.comidaDoCenario('pesqueiro') };
+      mundo.props.push(cais); criados.push(cais);
+      protegidos.push({ x: l.x, y: l.y, raioLivre: Math.max(l.rx, l.ry) * 0.9 });
+    });
+
+    if (reg.ref.bioma === 'recife') {
+      var pier = { tipo: 'pier', x: reg.cx + 260, y: reg.cy - 160, s: 1, regiao: reg.id, raio: 0, raioLivre: 70, comida: 'peixe' };
+      mundo.props.push(pier); criados.push(pier);
     }
 
     receita.forEach(function (grupo) {
@@ -161,8 +200,18 @@ ZM.Mundo = (function () {
           tipo: grupo.tipo, x: x, y: y,
           s: U.lerp(grupo.s[0], grupo.s[1], rand()),
           regiao: reg.id, raio: grupo.r, raioLivre: 44,
-          cor: grupo.cor, flores: grupo.flores && rand() > 0.4
+          cor: grupo.cores ? grupo.cores[Math.floor(rand() * grupo.cores.length)] : grupo.cor,
+          flores: grupo.flores && rand() > 0.4,
+          outono: grupo.outono
         };
+        // fontes de comida: árvores frutíferas (parte delas), bambu, arbustos, capim, pedras...
+        var comida = ZM.comidaDoCenario(grupo.tipo);
+        if (comida === 'fruta') {
+          obj.frutas = rand() < 0.45;
+          if (obj.frutas) obj.comida = 'fruta';
+        } else if (comida) {
+          obj.comida = comida;
+        }
         mundo.props.push(obj); criados.push(obj);
         i++;
       }
@@ -210,14 +259,35 @@ ZM.Mundo = (function () {
           U.rgba(rand() > 0.5 ? pal.chaoAlt : pal.chaoDetalhe, 0.5), rand() * 3);
       }
 
-      // agua
-      if (reg.ref.bioma === 'savana') lago(ctx, reg.x + reg.w * 0.62, reg.y + reg.h * 0.78, 150, 78, pal);
-      if (reg.ref.bioma === 'outback') lago(ctx, reg.x + reg.w * 0.5, reg.y + reg.h * 0.76, 130, 60, pal);
-      if (reg.ref.bioma === 'floresta') lago(ctx, reg.x + reg.w * 0.5, reg.y + reg.h * 0.6, 240, 90, pal);
-      if (reg.ref.bioma === 'gelo') {
-        lago(ctx, reg.x + reg.w * 0.3, reg.y + reg.h * 0.35, 190, 110, pal);
-        lago(ctx, reg.x + reg.w * 0.72, reg.y + reg.h * 0.7, 150, 90, pal);
+      // recife: a célula é mar, com ilhas de areia ligadas pelos caminhos
+      if (reg.ref.bioma === 'recife') {
+        ctx.fillStyle = pal.agua;
+        ctx.fillRect(reg.x, reg.y, reg.w, reg.h);
+        for (var w = 0; w < 60; w++) {
+          U.ellipse(ctx, reg.x + rand() * reg.w, reg.y + rand() * reg.h, 40 + rand() * 60, 6 + rand() * 6,
+            U.rgba('#ffffff', 0.18), rand() * 0.4 - 0.2);
+        }
+        U.ellipse(ctx, reg.cx, reg.cy, 400, 290, pal.chaoAlt);
+        U.ellipse(ctx, reg.cx, reg.cy, 380, 270, pal.chao);
+        portasDaRegiao(reg.id).forEach(function (porta) {
+          U.ellipse(ctx, porta.x, porta.y, 170, 150, pal.chao);
+          ctx.strokeStyle = pal.chao; ctx.lineWidth = 150; ctx.lineCap = 'round';
+          ctx.beginPath(); ctx.moveTo(reg.cx, reg.cy); ctx.lineTo(porta.x, porta.y); ctx.stroke();
+        });
+        U.ellipse(ctx, reg.cx + 260, reg.cy - 140, 170, 110, pal.chao);
+        U.ellipse(ctx, reg.cx - 300, reg.cy + 180, 150, 100, pal.chao);
       }
+
+      // folhas caídas do bosque e riacho da pradaria
+      if (reg.ref.bioma === 'bosque') {
+        for (var f = 0; f < 160; f++) {
+          U.ellipse(ctx, reg.x + rand() * reg.w, reg.y + rand() * reg.h, 5 + rand() * 4, 3 + rand() * 2,
+            U.rgba(rand() > 0.5 ? '#d9883a' : '#c25a2a', 0.55), rand() * 3);
+        }
+      }
+
+      // agua
+      lagosDaRegiao(reg).forEach(function (l) { lago(ctx, l.x, l.y, l.rx, l.ry, pal); });
 
       // caminhos ate as portas
       ctx.lineCap = 'round';

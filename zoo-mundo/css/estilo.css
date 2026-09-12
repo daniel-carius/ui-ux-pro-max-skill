@@ -174,6 +174,13 @@ html, body {
   overflow: hidden; display: grid; place-items: center;
 }
 .hud-avatar canvas { width: 56px; height: 56px; }
+.hud-avatar-caixa { position: relative; }
+.hud-nivel {
+  position: absolute; bottom: -6px; left: 50%; transform: translateX(-50%);
+  background: linear-gradient(180deg, #fff8ec, #ffe9b8); border-radius: 999px;
+  font-size: 12px; padding: 2px 8px; white-space: nowrap;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, .25); font-family: Fredoka, sans-serif; color: #6b4a10;
+}
 .hud-infos { display: flex; flex-direction: column; gap: 5px; }
 .hud-linha {
   display: flex; align-items: center; gap: 6px;
@@ -189,7 +196,7 @@ html, body {
   background: rgba(255, 248, 236, .92); padding: 5px; border-radius: 14px;
   box-shadow: 0 4px 10px rgba(0, 0, 0, .25); line-height: 0;
 }
-#minimapa { width: 132px; height: 66px; border-radius: 9px; background: #294a33; }
+#minimapa { width: 120px; height: 90px; border-radius: 9px; background: #294a33; }
 .hud-botoes { display: flex; gap: 8px; }
 .btn-icone {
   display: flex; flex-direction: column; align-items: center; gap: 1px;
@@ -211,6 +218,31 @@ html, body {
   font-family: Fredoka, sans-serif; font-size: 15px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, .3);
   pointer-events: none; text-align: center; max-width: 84vw;
+}
+
+/* mochila: comidas colhidas */
+.mochila {
+  position: absolute; right: 14px; top: 172px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 5px;
+  pointer-events: none;
+}
+.mochila:empty { display: none; }
+.mochila-titulo {
+  font-family: Fredoka, sans-serif; font-size: 12px; color: #fff8e7;
+  background: rgba(23, 46, 32, .72); border-radius: 999px; padding: 4px 12px;
+}
+.mochila-item {
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(255, 248, 236, .94); border-radius: 999px;
+  padding: 4px 12px 4px 8px; box-shadow: 0 4px 10px rgba(0, 0, 0, .22);
+  font-family: Fredoka, sans-serif; font-size: 14px; color: var(--texto);
+  animation: sobe .3s cubic-bezier(.2, 1.3, .4, 1);
+}
+.mochila-item .emoji { font-size: 18px; }
+.mochila-item b { font-weight: 600; }
+@media (max-width: 720px) {
+  .mochila { top: 150px; right: 10px; }
+  .mochila-item { font-size: 12px; padding: 3px 9px 3px 6px; }
 }
 
 /* comitiva: animais que estão indo para casa com o jogador */
@@ -236,6 +268,8 @@ html, body {
 .comitiva-item b { font-weight: 600; }
 .comitiva-item .destino { color: var(--texto-suave); font-size: 12px; font-family: Nunito, sans-serif; font-weight: 700; }
 .comitiva-item.fechada .destino { color: #b4643f; }
+.comitiva-item.pedido { background: rgba(255, 240, 214, .95); }
+.comitiva-item.pedido .destino { color: #8a5a12; }
 
 .instrucao {
   background: #eefaf1; border-radius: 16px; padding: 12px 16px;
@@ -282,7 +316,32 @@ html, body {
   .btn-acao.destaque { opacity: 1; }
 }
 @media (max-width: 720px) {
-  /* comitiva: animais que estão indo para casa com o jogador */
+  /* mochila: comidas colhidas */
+.mochila {
+  position: absolute; right: 14px; top: 172px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 5px;
+  pointer-events: none;
+}
+.mochila:empty { display: none; }
+.mochila-titulo {
+  font-family: Fredoka, sans-serif; font-size: 12px; color: #fff8e7;
+  background: rgba(23, 46, 32, .72); border-radius: 999px; padding: 4px 12px;
+}
+.mochila-item {
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(255, 248, 236, .94); border-radius: 999px;
+  padding: 4px 12px 4px 8px; box-shadow: 0 4px 10px rgba(0, 0, 0, .22);
+  font-family: Fredoka, sans-serif; font-size: 14px; color: var(--texto);
+  animation: sobe .3s cubic-bezier(.2, 1.3, .4, 1);
+}
+.mochila-item .emoji { font-size: 18px; }
+.mochila-item b { font-weight: 600; }
+@media (max-width: 720px) {
+  .mochila { top: 150px; right: 10px; }
+  .mochila-item { font-size: 12px; padding: 3px 9px 3px 6px; }
+}
+
+/* comitiva: animais que estão indo para casa com o jogador */
 .comitiva {
   position: absolute; top: 92px; left: 14px;
   display: flex; flex-direction: column; gap: 6px;
@@ -305,6 +364,8 @@ html, body {
 .comitiva-item b { font-weight: 600; }
 .comitiva-item .destino { color: var(--texto-suave); font-size: 12px; font-family: Nunito, sans-serif; font-weight: 700; }
 .comitiva-item.fechada .destino { color: #b4643f; }
+.comitiva-item.pedido { background: rgba(255, 240, 214, .95); }
+.comitiva-item.pedido .destino { color: #8a5a12; }
 
 .instrucao {
   background: #eefaf1; border-radius: 16px; padding: 12px 16px;
@@ -313,7 +374,7 @@ html, body {
 
 .dica-teclas { display: none; }
   .hud-legenda { display: none; }
-  #minimapa { width: 104px; height: 52px; }
+  #minimapa { width: 96px; height: 72px; }
   .comitiva { top: 84px; left: 10px; gap: 4px; }
   .comitiva-item { font-size: 12px; padding: 3px 10px 3px 3px; }
   .comitiva-item canvas { width: 28px; height: 28px; }
@@ -445,6 +506,16 @@ html, body {
 .titulo-detalhe { margin-bottom: 4px !important; }
 
 /* --------------------------- passaporte --------------------------------- */
+.nivel-passaporte {
+  display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+  background: linear-gradient(180deg, #fff8ec, #ffe9b8); border-radius: 18px;
+  padding: 10px 16px; margin: 0 auto 16px; font-family: Fredoka, sans-serif;
+  color: #6b4a10; max-width: 520px;
+}
+.nivel-passaporte .barra { flex: 1 1 160px; height: 10px; background: rgba(0, 0, 0, .08); }
+.nivel-passaporte .barra i { background: linear-gradient(90deg, #ffd166, #ef6c33); }
+.nivel-passaporte small { font-family: Nunito, sans-serif; font-weight: 700; color: #8a6a2a; }
+
 .passaporte-lista { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .cartao-regiao {
   background: #fff; border-radius: 22px; padding: 16px; text-align: left;

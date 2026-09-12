@@ -26,6 +26,9 @@ ZM.Audio.registrar('rugido',     'assets/audio/leao.mp3');
 | `passo`         | reservado para passos do personagem          |
 
 | `seguindo`      | animal aceita acompanhar o jogador            |
+| `colher`        | comida guardada na mochila                    |
+| `comer`         | animal come a comida ("Nhac!")                |
+| `nivel`         | subiu de nível                                |
 
 ## Vozes dos animais
 
@@ -37,6 +40,9 @@ janela do encontro e na ficha da coleção, toca exatamente esse som.
 - **Brasil:** `rosnado`, `grasnado`, `assobio`, `chiado`, `guincho` (a preguiça usa `bocejo`)
 - **Ásia:** `mastigada`, `rugido-grave`, `chilro`, `grito`, `canto`, `resmungo`
 - **Polar:** `rugido-polar`, `grasno`, `latido`, `bufo-grave`, `ganido`, `bufo-rena`
+- **América do Norte:** `mugido`, `chiado`, `bramido`, `rosnado-grave`, `grito-aguia`, `estalo`
+- **Europa:** `uivo`, `ganido`, `sopro`, `fungada`, `pio-coruja`, `grunhido`
+- **Oceano:** `borbulha`, `sopro-agua`, `assobio-golfinho`, `estalinho`, `clique`
 
 Registre um arquivo com o mesmo nome para substituir o som sintetizado.
 

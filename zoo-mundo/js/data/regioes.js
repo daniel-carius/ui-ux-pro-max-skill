@@ -114,6 +114,62 @@ ZM.REGIONS = [
       cartaz: '#4f8fd9', ceu: '#dff0fa'
     },
     dica: 'Neve, gelo e geleiras flutuando na água.'
+  },
+
+  /* ------------------- EXPANSÃO (abre depois dos 30) ------------------- */
+  {
+    id: 'america', prep: 'na',
+    nome: 'América do Norte · Florestas',
+    nomeCurto: 'América do Norte',
+    icone: '🦬',
+    continente: 'América do Norte',
+    col: 1, row: 2,
+    bioma: 'pradaria',
+    unlock: { tipo: 'descobertas', valor: 30 },
+    mvp: true,
+    paleta: {
+      chao: '#a8c96a', chaoAlt: '#94b85a', chaoDetalhe: '#c2dc86',
+      caminho: '#d9c08a', caminhoBorda: '#c4aa72',
+      agua: '#5cb8dc', tronco: '#7b5636', folha: '#3f8f4f', folhaAlt: '#5aae66',
+      cartaz: '#c96a2c', ceu: '#c8e6a0'
+    },
+    dica: 'Pradarias douradas, pinheiros altos e um riacho cheio de castores.'
+  },
+  {
+    id: 'europa', prep: 'na',
+    nome: 'Europa · Bosques',
+    nomeCurto: 'Europa',
+    icone: '🦉',
+    continente: 'Europa',
+    col: 0, row: 2,
+    bioma: 'bosque',
+    unlock: { tipo: 'descobertas', valor: 36 },
+    mvp: true,
+    paleta: {
+      chao: '#7fa85c', chaoAlt: '#6f9750', chaoDetalhe: '#a9c27a',
+      caminho: '#cdb58c', caminhoBorda: '#b89f76',
+      agua: '#5aaed1', tronco: '#6b4a30', folha: '#5c8f3e', folhaAlt: '#d9883a',
+      cartaz: '#a44a2a', ceu: '#c4dba6'
+    },
+    dica: 'Bosques de carvalho, folhas de outono e cogumelos escondidos.'
+  },
+  {
+    id: 'oceano', prep: 'no',
+    nome: 'Oceano · Recife',
+    nomeCurto: 'Oceano',
+    icone: '🐬',
+    continente: 'Oceanos',
+    col: 2, row: 2,
+    bioma: 'recife',
+    unlock: { tipo: 'descobertas', valor: 42 },
+    mvp: true,
+    paleta: {
+      chao: '#f4e3b8', chaoAlt: '#ead598', chaoDetalhe: '#fff2cf',
+      caminho: '#e6cf9c', caminhoBorda: '#d3ba84',
+      agua: '#3fb7d6', tronco: '#a67c52', folha: '#4fb37a', folhaAlt: '#78cf9a',
+      cartaz: '#2f8fb8', ceu: '#bfe9f5'
+    },
+    dica: 'Água turquesa, corais coloridos e um píer para ver os bichos do mar.'
   }
 ];
 

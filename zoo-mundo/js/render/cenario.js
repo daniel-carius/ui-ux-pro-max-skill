@@ -23,6 +23,7 @@ ZM.Cenario = (function () {
     U.circle(ctx, o.x + 16 * o.s, y + 6 * o.s, 20 * o.s, pal.folha);
     U.circle(ctx, o.x, y - 10 * o.s, 26 * o.s, pal.folhaAlt);
     U.circle(ctx, o.x - 8 * o.s, y - 16 * o.s, 14 * o.s, U.rgba('#ffffff', 0.18));
+    frutas(ctx, o, [[-18, -38], [12, -52], [18, -34], [-4, -28]]);
   };
 
   /* Acacia (savana africana) */
@@ -61,6 +62,7 @@ ZM.Cenario = (function () {
     U.circle(ctx, o.x + 22 * o.s, y, 22 * o.s, pal.folha);
     U.circle(ctx, o.x, y - 18 * o.s, 30 * o.s, pal.folhaAlt);
     U.circle(ctx, o.x + 6 * o.s, y - 4 * o.s, 20 * o.s, pal.folha);
+    frutas(ctx, o, [[-24, -52], [14, -70], [24, -46], [-2, -38]], '#ffd23f');
   };
 
   /* Bambuzal */
@@ -87,6 +89,7 @@ ZM.Cenario = (function () {
     U.circle(ctx, o.x - 16 * o.s, y, 19 * o.s, '#f3b3ce');
     U.circle(ctx, o.x + 16 * o.s, y, 19 * o.s, '#f3b3ce');
     U.circle(ctx, o.x, y - 14 * o.s, 23 * o.s, '#ffc9de');
+    frutas(ctx, o, [[-16, -46], [12, -58], [18, -40]], '#e84c5a');
   };
 
   /* Pinheiro nevado */
@@ -119,7 +122,159 @@ ZM.Cenario = (function () {
     ctx.lineTo(o.x - 4 * o.s, o.y); ctx.closePath(); ctx.fill();
   };
 
-  /* Pedra */
+
+  /* Frutas penduradas (fontes de comida) */
+  function frutas(ctx, o, pontos, cor) {
+    if (!o.frutas || o.vazio) return;
+    pontos.forEach(function (q) {
+      U.circle(ctx, o.x + q[0] * o.s, o.y + q[1] * o.s, 4.2 * o.s, cor || '#ff8f3f');
+      U.circle(ctx, o.x + (q[0] - 1.4) * o.s, o.y + (q[1] - 1.4) * o.s, 1.5 * o.s, 'rgba(255,255,255,0.55)');
+    });
+  }
+
+  /* Carvalho (bosques da Europa e florestas da América do Norte) */
+  D.carvalho = function (ctx, o, pal) {
+    U.shadow(ctx, o.x, o.y, 30 * o.s, 9 * o.s, 0.17);
+    tronco(ctx, o.x, o.y, 15 * o.s, 40 * o.s, pal.tronco);
+    ctx.strokeStyle = pal.tronco; ctx.lineWidth = 5 * o.s; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(o.x, o.y - 30 * o.s); ctx.lineTo(o.x - 16 * o.s, o.y - 48 * o.s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(o.x, o.y - 30 * o.s); ctx.lineTo(o.x + 16 * o.s, o.y - 48 * o.s); ctx.stroke();
+    var y = o.y - 56 * o.s;
+    var a = o.outono ? '#d9883a' : pal.folha, b = o.outono ? '#e8a54a' : pal.folhaAlt;
+    U.circle(ctx, o.x - 24 * o.s, y + 8 * o.s, 22 * o.s, a);
+    U.circle(ctx, o.x + 24 * o.s, y + 8 * o.s, 22 * o.s, a);
+    U.circle(ctx, o.x, y - 12 * o.s, 28 * o.s, b);
+    U.circle(ctx, o.x - 6 * o.s, y - 18 * o.s, 14 * o.s, U.rgba('#ffffff', 0.16));
+    frutas(ctx, o, [[-22, -50], [10, -66], [22, -46], [-4, -40]], '#e84c5a');
+  };
+
+  /* Cogumelo do bosque */
+  D.cogumelo = function (ctx, o) {
+    U.shadow(ctx, o.x, o.y, 12 * o.s, 4 * o.s, 0.12);
+    U.roundRect(ctx, o.x - 5 * o.s, o.y - 16 * o.s, 10 * o.s, 16 * o.s, 4 * o.s);
+    ctx.fillStyle = '#f3e6cf'; ctx.fill();
+    U.ellipse(ctx, o.x, o.y - 16 * o.s, 15 * o.s, 9 * o.s, '#d9534f');
+    U.circle(ctx, o.x - 6 * o.s, o.y - 19 * o.s, 2.5 * o.s, '#fff3e6');
+    U.circle(ctx, o.x + 5 * o.s, o.y - 16 * o.s, 2 * o.s, '#fff3e6');
+    U.circle(ctx, o.x + 1 * o.s, o.y - 22 * o.s, 1.8 * o.s, '#fff3e6');
+  };
+
+  /* Cabana de madeira (América do Norte) */
+  D.cabana = function (ctx, o) {
+    U.shadow(ctx, o.x, o.y, 50, 12, 0.16);
+    ctx.fillStyle = '#9b6b43';
+    ctx.fillRect(o.x - 44, o.y - 46, 88, 46);
+    ctx.strokeStyle = 'rgba(0,0,0,0.14)'; ctx.lineWidth = 2;
+    for (var i = 1; i < 5; i++) { ctx.beginPath(); ctx.moveTo(o.x - 44, o.y - 46 + i * 9); ctx.lineTo(o.x + 44, o.y - 46 + i * 9); ctx.stroke(); }
+    ctx.fillStyle = '#5a3a24';
+    ctx.beginPath(); ctx.moveTo(o.x - 52, o.y - 44); ctx.lineTo(o.x, o.y - 84); ctx.lineTo(o.x + 52, o.y - 44); ctx.closePath(); ctx.fill();
+    U.roundRect(ctx, o.x - 10, o.y - 30, 20, 30, 4); ctx.fillStyle = '#4a2f1c'; ctx.fill();
+    U.roundRect(ctx, o.x - 36, o.y - 36, 16, 14, 3); ctx.fillStyle = '#ffe9a8'; ctx.fill();
+    U.roundRect(ctx, o.x + 20, o.y - 36, 16, 14, 3); ctx.fillStyle = '#ffe9a8'; ctx.fill();
+  };
+
+  /* Palmeira com cocos (recife) */
+  D.palmeira = function (ctx, o, pal) {
+    U.shadow(ctx, o.x, o.y, 24 * o.s, 8 * o.s, 0.15);
+    ctx.strokeStyle = pal.tronco; ctx.lineWidth = 9 * o.s; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.quadraticCurveTo(o.x + 10 * o.s, o.y - 40 * o.s, o.x + 4 * o.s, o.y - 70 * o.s); ctx.stroke();
+    var tx = o.x + 4 * o.s, ty = o.y - 72 * o.s;
+    for (var i = 0; i < 6; i++) {
+      var ang = -Math.PI / 2 + (i - 2.5) * 0.55;
+      ctx.save(); ctx.translate(tx, ty); ctx.rotate(ang);
+      U.ellipse(ctx, 22 * o.s, 0, 24 * o.s, 7 * o.s, i % 2 ? pal.folha : pal.folhaAlt);
+      ctx.restore();
+    }
+    U.circle(ctx, tx - 6 * o.s, ty + 6 * o.s, 5 * o.s, '#8a5a34');
+    U.circle(ctx, tx + 5 * o.s, ty + 7 * o.s, 5 * o.s, '#8a5a34');
+    frutas(ctx, o, [[-2, -60], [10, -58]], '#ffd23f');
+  };
+
+  /* Coral */
+  D.coral = function (ctx, o) {
+    U.shadow(ctx, o.x, o.y, 16 * o.s, 5 * o.s, 0.10);
+    var cor = o.cor || '#ff7b9c';
+    ctx.strokeStyle = cor; ctx.lineWidth = 6 * o.s; ctx.lineCap = 'round';
+    [[-10, -26, -18, -40], [0, -30, 4, -46], [10, -24, 20, -36]].forEach(function (r) {
+      ctx.beginPath(); ctx.moveTo(o.x, o.y - 4 * o.s);
+      ctx.quadraticCurveTo(o.x + r[0] * o.s, o.y + r[1] * o.s, o.x + r[2] * o.s, o.y + r[3] * o.s); ctx.stroke();
+      U.circle(ctx, o.x + r[2] * o.s, o.y + r[3] * o.s, 4.5 * o.s, U.shade(cor, 0.3));
+    });
+    U.ellipse(ctx, o.x, o.y - 2 * o.s, 14 * o.s, 6 * o.s, cor);
+  };
+
+  /* Concha */
+  D.concha = function (ctx, o) {
+    ctx.fillStyle = '#fbe3d0';
+    ctx.beginPath();
+    ctx.moveTo(o.x, o.y);
+    for (var i = 0; i <= 6; i++) {
+      var ang = Math.PI + i * (Math.PI / 6);
+      ctx.lineTo(o.x + Math.cos(ang) * 13 * o.s, o.y + Math.sin(ang) * 11 * o.s);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#e9b9a0'; ctx.lineWidth = 1.4;
+    for (var k = 1; k < 6; k++) {
+      var a2 = Math.PI + k * (Math.PI / 6);
+      ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(o.x + Math.cos(a2) * 12 * o.s, o.y + Math.sin(a2) * 10 * o.s); ctx.stroke();
+    }
+  };
+
+  /* Píer de madeira (recife) */
+  D.pier = function (ctx, o) {
+    U.shadow(ctx, o.x, o.y, 40, 8, 0.12);
+    ctx.fillStyle = '#c9a06a';
+    ctx.fillRect(o.x - 48, o.y - 22, 96, 22);
+    ctx.strokeStyle = 'rgba(0,0,0,0.13)'; ctx.lineWidth = 2;
+    for (var i = -40; i <= 40; i += 12) { ctx.beginPath(); ctx.moveTo(o.x + i, o.y - 22); ctx.lineTo(o.x + i, o.y); ctx.stroke(); }
+    ctx.fillStyle = '#8f6a42';
+    ctx.fillRect(o.x - 46, o.y - 30, 6, 30); ctx.fillRect(o.x + 40, o.y - 30, 6, 30);
+  };
+
+  /* Pequeno cais de pesca na beira dos lagos (fonte de peixe) */
+  D.pesqueiro = function (ctx, o, pal, t) {
+    U.shadow(ctx, o.x, o.y, 24, 6, 0.12);
+    ctx.fillStyle = '#b98a58';
+    ctx.fillRect(o.x - 26, o.y - 14, 52, 14);
+    ctx.strokeStyle = 'rgba(0,0,0,0.14)'; ctx.lineWidth = 2;
+    for (var i = -20; i <= 20; i += 10) { ctx.beginPath(); ctx.moveTo(o.x + i, o.y - 14); ctx.lineTo(o.x + i, o.y); ctx.stroke(); }
+    ctx.fillStyle = '#8a6236';
+    ctx.fillRect(o.x - 24, o.y - 20, 5, 20); ctx.fillRect(o.x + 19, o.y - 20, 5, 20);
+    // balde e vara
+    U.roundRect(ctx, o.x - 12, o.y - 26, 12, 12, 3); ctx.fillStyle = '#5b8fd6'; ctx.fill();
+    ctx.strokeStyle = '#5a3a24'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(o.x + 8, o.y - 14); ctx.lineTo(o.x + 30, o.y - 46); ctx.stroke();
+    if (!o.vazio) {
+      var pulo = Math.abs(Math.sin((t || 0) * 3 + o.x)) * 8;
+      ctx.font = '13px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('🐟', o.x + 34, o.y - 46 + 8 - pulo);
+    }
+  };
+
+  /* Cozinha do Zoo (barraca na praça, fonte de carne) */
+  D.cozinha = function (ctx, o) {
+    U.shadow(ctx, o.x, o.y, 44, 10, 0.16);
+    ctx.fillStyle = '#e9e1d2';
+    ctx.fillRect(o.x - 38, o.y - 40, 76, 40);
+    ctx.fillStyle = '#8a6236';
+    ctx.fillRect(o.x - 42, o.y - 44, 84, 6);
+    ctx.fillStyle = '#d9534f';
+    for (var i = 0; i < 6; i++) {
+      ctx.fillStyle = i % 2 ? '#d9534f' : '#fff4e2';
+      ctx.beginPath(); ctx.moveTo(o.x - 48 + i * 16, o.y - 70); ctx.lineTo(o.x - 32 + i * 16, o.y - 70);
+      ctx.lineTo(o.x - 40 + i * 16, o.y - 52); ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = '#c0392b';
+    ctx.fillRect(o.x - 50, o.y - 76, 100, 8);
+    ctx.font = '700 12px Fredoka, Nunito, sans-serif'; ctx.fillStyle = '#5a3a24';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('COZINHA DO ZOO', o.x, o.y - 24);
+    ctx.font = '16px sans-serif';
+    ctx.fillText(o.vazio ? '🍽️' : '🍖', o.x, o.y - 8);
+    ctx.textBaseline = 'alphabetic';
+  };
+
+  /* Pedra: pode esconder insetos */
   D.pedra = function (ctx, o, pal) {
     U.shadow(ctx, o.x, o.y, 20 * o.s, 6 * o.s, 0.15);
     var cor = o.cor || '#a8a49c';
