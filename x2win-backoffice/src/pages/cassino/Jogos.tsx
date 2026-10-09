@@ -334,7 +334,7 @@ export default function Jogos() {
           icon={CheckCircle2}
           tone="success"
           value={num(onSite.length)}
-          hint={`${inactive} desativados · ${byPausedProvider} provedora pausada`}
+          hint={`${inactive} desativados · ${byPausedProvider} fora por provedora pausada`}
           formula={<>Um jogo aparece no site quando está ativo e a provedora dele também está ativa. Pausar a provedora esconde todos os jogos dela.</>}
         />
         <KpiCard label="Provedoras" icon={Building2} tone="info" value={num(providersWithGames.size)} hint={`${activeProviders} ativas · ${providersWithGames.size - activeProviders} pausadas`} />
