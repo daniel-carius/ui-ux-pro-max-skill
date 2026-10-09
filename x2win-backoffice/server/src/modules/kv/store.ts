@@ -89,3 +89,41 @@ export async function saveRow(
   }
   return { version: out.version, updatedAt: out.updated_at }
 }
+
+/**
+ * Regrava o valor da chave sem mudar a versão. Só para campos que o servidor é
+ * dono e que o painel nunca grava (ex.: saldo do jogador, aplicado pelo extrato):
+ * a versão continua a do conteúdo editável, então gravações do painel feitas sobre
+ * a versão atual não recebem 409 por causa de uma mudança que não podem fazer.
+ * Chame dentro de db.tx depois de loadRow(…, true).
+ */
+export async function rewriteRowValue(t: Db, cipher: Cipher, key: string, value: unknown, encrypt: boolean, row: KvRow): Promise<void> {
+  const json = JSON.stringify(value)
+  await t.query(`update kv_store set value = $2::jsonb, value_enc = $3, updated_at = now() where key = $1 and version = $4`, [
+    key,
+    encrypt ? null : json,
+    encrypt ? cipher.encrypt(json) : null,
+    row.version,
+  ])
+}
+
+/**
+ * Cifra as linhas gravadas em claro de chaves que hoje exigem cifra (regra ganhou
+ * `pii`/`secrets` depois da gravação). Não muda versão nem conteúdo. Devolve quantas.
+ */
+export async function encryptPlainRows(db: Db, cipher: Cipher, needsEncryption: (key: string) => boolean): Promise<number> {
+  const keys = await db.query<{ key: string }>('select key from kv_store where value_enc is null and value is not null')
+  let n = 0
+  for (const { key } of keys) {
+    if (!needsEncryption(key)) continue
+    const r = await db.one<{ value: unknown; version: number }>('select value, version from kv_store where key = $1 and value_enc is null', [key])
+    if (!r || r.value == null) continue
+    await db.query('update kv_store set value = null, value_enc = $2 where key = $1 and version = $3 and value_enc is null', [
+      key,
+      cipher.encrypt(JSON.stringify(r.value)),
+      r.version,
+    ])
+    n++
+  }
+  return n
+}

@@ -8,7 +8,7 @@ import { randomToken } from '../../lib/crypto'
 import { isMasked, maskSecret } from '../../lib/mask'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { writeAudit } from '../../services/audit'
-import { hostOf, WEBHOOK_EVENT_LABEL, WEBHOOK_EVENTS, webhookUrlProblem, type WebhookEvent } from './url'
+import { hostOf, WEBHOOK_EVENT_LABEL, WEBHOOK_EVENTS, webhookStrictMode, webhookUrlProblem, type WebhookEvent } from './url'
 
 /** Linha de settings com a versão da lista de destinos ({ version }). */
 export const DESTINATIONS_VERSION_KEY = 'campanhas.webhooks.destinos'
@@ -108,12 +108,13 @@ export const kvHandlers: KvHandlers = {
     async write(ctx, value, expectedVersion) {
       if (!canWriteKey(ctx.rule, ctx.auth.perms)) throw Errors.forbidden()
       const list = listSchema.parse(value)
-      const production = ctx.app.config.NODE_ENV === 'production'
+      // modo estrito salvo liberação explícita (não depende de NODE_ENV=production)
+      const strict = webhookStrictMode(ctx.app.config)
       const seen = new Set<string>()
       for (const d of list) {
         if (seen.has(d.id)) throw Errors.invalid(`Destino repetido na lista (${d.id}).`)
         seen.add(d.id)
-        const problem = webhookUrlProblem(d.url, production)
+        const problem = webhookUrlProblem(d.url, strict)
         if (problem) throw Errors.invalid(`${WEBHOOK_EVENT_LABEL[d.event]}: ${problem}`, { id: d.id, field: 'url' })
         const s = d.secret?.trim()
         if (s && !isMasked(s) && s.length < MIN_SECRET_LENGTH) {

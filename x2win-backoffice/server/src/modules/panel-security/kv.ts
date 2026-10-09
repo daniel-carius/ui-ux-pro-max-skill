@@ -1,18 +1,25 @@
 // Chave config.seguranca-painel (lista de IPs com trava contra se bloquear, 2FA para todos, tempo de sessão).
 // Formato do painel: { allowlist: [{ id, value, label, createdAt, createdBy }], enforce2faForAll, sessionTimeoutMinutes }.
+// Incluir ou retirar IPs da lista exige cargos.conceder (a lista pode deixar Superadmins de fora, como mexer
+// no cargo deles); descrição, 2FA para todos e tempo de inatividade seguem com seguranca-painel.editar.
+// Recuperação sem SQL: PANEL_ALLOWLIST_RESET=<valor novo> no ambiente da API esvazia a lista na subida, uma vez
+// por valor, com auditoria (resetAllowlistFromEnv, chamada pelo bootstrap).
+import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { canReadKey, canWriteKey } from '@shared/kv-registry'
 import type { Db } from '../../db'
 import { AppError, Errors } from '../../errors'
 import { ipAllowed, isIpOrCidr } from '../../lib/ip'
-import { newId } from '../../lib/crypto'
+import { newId, sha256 } from '../../lib/crypto'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { invalidateAllowlistCache } from '../../plugins/security'
 import { writeAudit } from '../../services/audit'
-import { assertKvVersion, bumpKvVersion, lockKvVersion, readKvVersion } from '../team/service'
+import { assertKvVersion, bumpKvVersion, GRANT_PERM, lockKvVersion, readKvVersion } from '../team/service'
 
 /** Linha de settings com a versão da segurança do painel ({ version }). */
 export const PANEL_SECURITY_VERSION_KEY = 'config.seguranca-painel'
+/** Linha de settings com o último pedido de recuperação da lista já aplicado ({ tokenHash, at }). */
+export const ALLOWLIST_RESET_KEY = 'config.seguranca-painel.recuperacao'
 export const MAX_ALLOWLIST = 100
 export const MAX_LABEL = 60
 export const MIN_TIMEOUT = 5
@@ -91,6 +98,18 @@ export async function readPanelSecurity(db: Db): Promise<KvValue> {
 
 const describe = (e: Pick<AllowEntry, 'value' | 'label'>) => (e.label ? `${e.value} (${e.label})` : e.value)
 
+/** Conjunto de IPs/faixas da lista (sem ordem nem descrição). */
+function allowValues(list: Pick<AllowEntry, 'value'>[]): string[] {
+  return [...new Set(list.map((e) => String(e.value).trim()))].sort()
+}
+
+/** A lista nova inclui ou retira algum IP/faixa em relação à gravada? */
+export function allowlistValuesChanged(before: Pick<AllowEntry, 'value'>[], after: Pick<AllowEntry, 'value'>[]): boolean {
+  const a = allowValues(before)
+  const b = allowValues(after)
+  return a.length !== b.length || a.some((v, i) => v !== b[i])
+}
+
 function summarize(before: PanelSecurity, after: PanelSecurity): string {
   const parts: string[] = []
   const beforeIds = new Map(before.allowlist.map((e) => [e.id, e]))
@@ -150,6 +169,10 @@ export const kvHandlers: KvHandlers = {
         const current = await lockKvVersion(t, PANEL_SECURITY_VERSION_KEY)
         assertKvVersion(current, expectedVersion)
         const before = toPanel(await loadRow(t, true))
+        // a lista de IPs vale para todos, inclusive Superadmins: mexer nela segue a regra de cargos administrativos
+        if (allowlistValuesChanged(before.allowlist, input.allowlist) && !ctx.auth.perms.has(GRANT_PERM)) {
+          throw Errors.forbidden('Só quem pode conceder cargos administrativos inclui ou retira IPs da lista de acesso do painel.')
+        }
         const beforeById = new Map(before.allowlist.map((e) => [e.id, e]))
         const now = new Date().toISOString()
 
@@ -176,4 +199,47 @@ export const kvHandlers: KvHandlers = {
       return saved
     },
   },
+}
+
+/**
+ * Recuperação de acesso sem SQL: com PANEL_ALLOWLIST_RESET definida no ambiente da API, a subida esvazia a lista
+ * de IPs (qualquer IP volta a entrar no login, que continua exigindo senha e 2FA) e registra na auditoria.
+ * Cada valor vale uma vez: subir de novo com o mesmo valor não mexe na lista (troque o valor para usar outra vez
+ * e retire a variável depois). Só quem opera o servidor define a variável.
+ */
+export async function resetAllowlistFromEnv(app: FastifyInstance, raw: string | undefined): Promise<'sem-pedido' | 'ja-aplicado' | 'esvaziada'> {
+  const token = raw?.trim()
+  if (!token) return 'sem-pedido'
+  const tokenHash = sha256(token)
+  const result = await app.db.tx(async (t): Promise<'ja-aplicado' | 'esvaziada'> => {
+    await t.query(`insert into settings (key, value) values ($1, '{}'::jsonb) on conflict (key) do nothing`, [ALLOWLIST_RESET_KEY])
+    const mark = await t.one<{ value: { tokenHash?: string } }>('select value from settings where key = $1 for update', [ALLOWLIST_RESET_KEY])
+    if (mark?.value?.tokenHash === tokenHash) return 'ja-aplicado'
+    const current = await lockKvVersion(t, PANEL_SECURITY_VERSION_KEY)
+    const before = toPanel(await loadRow(t, true))
+    await t.query(`update panel_security set allowlist = '[]'::jsonb, updated_at = now(), updated_by = null where id = 1`)
+    await bumpKvVersion(t, PANEL_SECURITY_VERSION_KEY, current, null)
+    await t.query(`update settings set value = $2::jsonb, updated_at = now(), updated_by = null where key = $1`, [
+      ALLOWLIST_RESET_KEY,
+      JSON.stringify({ tokenHash, at: new Date().toISOString() }),
+    ])
+    const removed = before.allowlist.length ? `IPs retirados: ${before.allowlist.map(describe).join(', ')}` : 'a lista já estava vazia'
+    await writeAudit(
+      t,
+      { id: null, name: 'Recuperação de acesso (servidor)', ip: '' },
+      {
+        action: 'desbloquear',
+        entity: 'Segurança do painel',
+        summary: `Lista de IPs do painel esvaziada pela variável PANEL_ALLOWLIST_RESET na subida da API (qualquer IP entra); ${removed}.`,
+      },
+    )
+    return 'esvaziada'
+  })
+  invalidateAllowlistCache()
+  if (result === 'esvaziada') {
+    app.log.warn('PANEL_ALLOWLIST_RESET: lista de IPs do painel esvaziada e registrada na auditoria. Retire a variável e refaça a lista pelo painel.')
+  } else {
+    app.log.warn('PANEL_ALLOWLIST_RESET já aplicada com este valor: a lista de IPs não foi alterada. Retire a variável do ambiente.')
+  }
+  return result
 }

@@ -28,6 +28,12 @@ const eventBody = z.object({
 })
 
 export default async function routes(app: FastifyInstance) {
+  // respostas com dados sensíveis (e-mails, IPs, chave PIX, resultado de envio): nunca no cache do navegador/proxy
+  app.addHook('onSend', async (_req, reply, payload) => {
+    if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store')
+    return payload
+  })
+
   app.post(
     '/events',
     {

@@ -2,12 +2,13 @@
 // operação inversa na gravação: valor mascarado que volta do painel é trocado
 // pelo valor gravado no mesmo caminho (o painel nunca recebe nem apaga o dado).
 //
-// Regra de campo: o nome do campo decide (SECRET_FIELD / PII_FIELD). O que está
-// dentro de um campo sensível também é sensível (ex.: credentials: { user, key }
-// ou phones: ['...']), para não vazar por um nome de campo filho genérico.
-import { PII_FIELD, SECRET_FIELD, type KvRule } from '@shared/kv-registry'
+// Regra de campo: o nome do campo decide (SECRET_FIELD / isPiiField, mais os
+// nomes extras da regra em rule.piiFields / URL_FIELD). O que está dentro de um
+// campo sensível também é sensível (ex.: credentials: { user, key } ou
+// phones: ['...']), para não vazar por um nome de campo filho genérico.
+import { isPiiField, SECRET_FIELD, URL_FIELD, type KvRule } from '@shared/kv-registry'
 import { Errors } from '../../errors'
-import { isMasked, maskPii, maskSecret } from '../../lib/mask'
+import { isMasked, maskPii, maskSecret, maskUrlTokens } from '../../lib/mask'
 import { hasOwn, isPlainObject, itemId, MISSING, setOwn, type JsonObject, type Maybe } from './json'
 
 export interface MaskPolicy {
@@ -15,39 +16,57 @@ export interface MaskPolicy {
   secrets: boolean
   /** mascara campos de dados pessoais */
   pii: boolean
+  /** nomes extras tratados como dado pessoal (KvRule.piiFields) */
+  piiFields?: readonly string[]
+  /** mascara tokens em campos de URL (KvRule.urls) */
+  urls?: boolean
+}
+
+function withExtras(base: MaskPolicy, rule: KvRule, urls: boolean): MaskPolicy {
+  const out: MaskPolicy = { ...base }
+  if (base.pii && rule.piiFields?.length) out.piiFields = rule.piiFields
+  if (urls) out.urls = true
+  return out
 }
 
 /** O que sai mascarado para esta pessoa. */
 export function readPolicy(rule: KvRule, perms: ReadonlySet<string>): MaskPolicy {
-  return { secrets: !!rule.secrets, pii: !!rule.pii && !perms.has(rule.pii.revealPermission) }
+  const base = { secrets: !!rule.secrets, pii: !!rule.pii && !perms.has(rule.pii.revealPermission) }
+  return withExtras(base, rule, !!rule.urls && !perms.has(rule.urls.revealPermission))
 }
 
 /** O que é tratado como sensível na gravação (restauração de máscaras), para qualquer pessoa. */
 export function writePolicy(rule: KvRule): MaskPolicy {
-  return { secrets: !!rule.secrets, pii: !!rule.pii }
+  return withExtras({ secrets: !!rule.secrets, pii: !!rule.pii }, rule, !!rule.urls)
 }
 
 interface Ctx {
   secret: boolean
   /** nome do campo pessoal mais próximo (decide a máscara), ou null */
   pii: string | null
+  /** dentro de um campo de URL */
+  url: boolean
 }
 
-const ROOT: Ctx = { secret: false, pii: null }
+const ROOT: Ctx = { secret: false, pii: null, url: false }
 
 function childCtx(ctx: Ctx, field: string, policy: MaskPolicy): Ctx {
   return {
     secret: ctx.secret || (policy.secrets && SECRET_FIELD.test(field)),
-    pii: policy.pii && PII_FIELD.test(field) ? field : ctx.pii,
+    pii: policy.pii && isPiiField(field, policy.piiFields) ? field : ctx.pii,
+    url: ctx.url || (!!policy.urls && URL_FIELD.test(field)),
   }
 }
 
-const sensitive = (ctx: Ctx) => ctx.secret || ctx.pii !== null
+const sensitive = (ctx: Ctx) => ctx.secret || ctx.pii !== null || ctx.url
 
 function maskLeaf(v: string | number, ctx: Ctx): unknown {
   if (ctx.secret) {
     if (typeof v !== 'string') return v
     return isMasked(v) ? v : maskSecret(v)
+  }
+  if (ctx.url && typeof v === 'string') {
+    return isMasked(v) ? v : maskUrlTokens(v)
   }
   if (ctx.pii !== null) {
     const s = String(v)
@@ -70,7 +89,7 @@ function redactNode(v: unknown, ctx: Ctx, policy: MaskPolicy): unknown {
 
 /** Cópia do valor com segredos e (se for o caso) dados pessoais mascarados. */
 export function redact(value: unknown, policy: MaskPolicy): unknown {
-  if (!policy.secrets && !policy.pii) return value
+  if (!policy.secrets && !policy.pii && !policy.urls) return value
   return redactNode(value, ROOT, policy)
 }
 
@@ -120,6 +139,6 @@ function restoreNode(v: unknown, stored: Maybe<unknown>, ctx: Ctx, policy: MaskP
  * Sem valor gravado correspondente → 400 (uma máscara nunca vira dado real).
  */
 export function restoreMasked(incoming: unknown, stored: Maybe<unknown>, policy: MaskPolicy): unknown {
-  if (!policy.secrets && !policy.pii) return incoming
+  if (!policy.secrets && !policy.pii && !policy.urls) return incoming
   return restoreNode(incoming, stored, ROOT, policy, [])
 }

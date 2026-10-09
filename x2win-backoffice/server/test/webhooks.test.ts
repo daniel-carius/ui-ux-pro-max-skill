@@ -313,7 +313,7 @@ describe('startWebhookDispatcher', () => {
 })
 
 describe('URL de destino', () => {
-  it('fora de produção: https em geral; http só para localhost/127.0.0.1', () => {
+  it('fora do modo estrito (testes): https em geral; http só para localhost/127.0.0.1', () => {
     expect(webhookUrlProblem('https://hooks.exemplo.com/in', false)).toBeNull()
     expect(webhookUrlProblem('http://127.0.0.1:8080/x', false)).toBeNull()
     expect(webhookUrlProblem('http://localhost/x', false)).toBeNull()
@@ -327,7 +327,7 @@ describe('URL de destino', () => {
     expect(webhookUrlProblem('não é url', false)).toBeTruthy()
   })
 
-  it('em produção: só https e só host público', () => {
+  it('modo estrito: só https e só host público', () => {
     expect(webhookUrlProblem('https://hooks.exemplo.com/in', true)).toBeNull()
     for (const u of [
       'http://hooks.exemplo.com/in',
@@ -542,6 +542,17 @@ describe('POST /api/webhooks/destinations/:id/test', () => {
     expect(await app.db.query('select id from webhook_outbox')).toHaveLength(0) // teste não passa pela fila
   })
 
+  it('resposta (sucesso ou erro) sai com Cache-Control: no-store', async () => {
+    const id = await insertDestination(app, { event: 'saque.pago', url: `${base}/cache`, secret: 'segredo-cache-1' })
+    const { cookie } = await loginAs(app, 'superadmin')
+    const ok = await api(app, 'POST', `/api/webhooks/destinations/${id}/test`, { cookie })
+    expect(ok.statusCode).toBe(200)
+    expect(String(ok.headers['cache-control'] ?? '')).toContain('no-store')
+    const nf = await api(app, 'POST', '/api/webhooks/destinations/nao-existe/test', { cookie })
+    expect(nf.statusCode).toBe(404)
+    expect(String(nf.headers['cache-control'] ?? '')).toContain('no-store')
+  })
+
   it('destino respondendo 500: execução com falha e motivo', async () => {
     const id = await insertDestination(app, { event: 'saque.rejeitado', url: `${base}/erro`, secret: 'segredo-erro-1' })
     const { cookie } = await loginAs(app, 'superadmin')
@@ -555,7 +566,8 @@ describe('POST /api/webhooks/destinations/:id/test', () => {
   it('exige webhooks.editar; destino inexistente → 404; sem sessão → 401', async () => {
     const id = await insertDestination(app, { event: 'saque.pago', url: `${base}/negado`, secret: 'segredo-negado' })
     for (const roleId of ['marketing-oficial', 'financeiro', 'suporte']) {
-      const { cookie } = await loginAs(app, roleId)
+      // com 2FA ativo: Marketing oficial exige 2FA para ter sessão (sem ele a resposta seria 401, não 403)
+      const { cookie } = await loginAs(app, roleId, { totp: true })
       const r = await api(app, 'POST', `/api/webhooks/destinations/${id}/test`, { cookie })
       expect(r.statusCode, roleId).toBe(403)
       expect(r.json().error.code).toBe('sem_permissao')

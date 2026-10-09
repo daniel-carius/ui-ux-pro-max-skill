@@ -5,7 +5,8 @@ import { findKvRule } from '@shared/kv-registry'
 import { effectivePermissions } from '@shared/permissions'
 import { sha256 } from '../src/lib/crypto'
 import type { KvContext } from '../src/kv/types'
-import { kvHandlers, type PanelSecurity } from '../src/modules/panel-security/kv'
+import { bootstrap } from '../src/bootstrap'
+import { ALLOWLIST_RESET_KEY, kvHandlers, resetAllowlistFromEnv, type PanelSecurity } from '../src/modules/panel-security/kv'
 import { getRole } from '../src/services/roles-repo'
 import type { AuthContext } from '../src/types'
 import { api, createTestApp, createUser, sessionCookie } from './helpers'
@@ -160,7 +161,7 @@ describe('config.seguranca-painel', () => {
     expect(list1[2].id).toMatch(/^ip_/)
 
     // outra pessoa grava depois: os itens antigos mantêm o carimbo; o novo leva o dela
-    const adm = await asRole(app, 'administrador', '10.1.1.1', 'Outra Pessoa')
+    const adm = await asRole(app, 'superadmin', '10.1.1.1', 'Outra Pessoa')
     const second = await save(
       base({ allowlist: [...list1.map((e) => ({ ...e, createdBy: 'Trocado' })), entry('192.168.0.0/16', 'VPN')] as never }),
       adm,
@@ -210,6 +211,117 @@ describe('config.seguranca-painel', () => {
     await save(base())
     const { invalidateAllowlistCache } = await import('../src/plugins/security')
     invalidateAllowlistCache()
+  })
+
+  it('incluir ou retirar IPs exige cargos.conceder; o resto segue com seguranca-painel.editar', async () => {
+    const adm = await asRole(app, 'administrador', '10.1.1.1', 'Admin Sem Conceder')
+    expect(adm.perms.has('seguranca-painel.editar')).toBe(true)
+    expect(adm.perms.has('cargos.conceder')).toBe(false)
+    // lista vazia → não vazia: recusado
+    await expect(save(base({ allowlist: [entry('10.1.1.1', 'só eu')] as never }), adm)).rejects.toMatchObject({ status: 403, code: 'sem_permissao' })
+    expect(((await handler.read(ctx(app, sa)))!.value as PanelSecurity).allowlist).toEqual([])
+
+    const listed = await save(base({ allowlist: [entry('10.0.0.0/8', 'Rede interna'), entry('189.45.12.0/24', 'Escritório')] as never }))
+    const list = (listed.value as PanelSecurity).allowlist
+    // incluir, retirar, trocar o valor ou esvaziar: recusado
+    await expect(save(base({ allowlist: [...list, entry('200.1.1.1')] as never }), adm)).rejects.toMatchObject({ status: 403 })
+    await expect(save(base({ allowlist: [list[0]] as never }), adm)).rejects.toMatchObject({ status: 403 })
+    await expect(save(base({ allowlist: [list[0], { ...list[1], value: '189.45.0.0/16' }] as never }), adm)).rejects.toMatchObject({ status: 403 })
+    await expect(save(base(), adm)).rejects.toMatchObject({ status: 403 })
+    expect(((await handler.read(ctx(app, sa)))!.value as PanelSecurity).allowlist).toEqual(list)
+
+    // mesma lista (outra ordem, descrição nova), 2FA para todos e tempo de inatividade: pode
+    const ok = await save(
+      base({ allowlist: [{ ...list[1], label: 'Escritório SP' }, list[0]] as never, enforce2faForAll: true, sessionTimeoutMinutes: 90 }),
+      adm,
+    )
+    expect(ok.value).toMatchObject({ enforce2faForAll: true, sessionTimeoutMinutes: 90 })
+    expect((ok.value as PanelSecurity).allowlist.map((e) => [e.value, e.label])).toEqual([
+      ['189.45.12.0/24', 'Escritório SP'],
+      ['10.0.0.0/8', 'Rede interna'],
+    ])
+    await save(base())
+    const { invalidateAllowlistCache } = await import('../src/plugins/security')
+    invalidateAllowlistCache()
+  })
+
+  // Regressão r1-authz-9: Administrador (sem cargos.conceder) trancava todos os Superadmins fora do painel.
+  it('Administrador não tranca os Superadmins fora do painel pela lista de IPs (HTTP)', async () => {
+    const ADMIN_IP = '10.0.0.5'
+    const SA_IP = '10.0.0.9'
+    const owner = await createUser(app, { roleId: 'superadmin', name: 'Superadmin' })
+    const saCookie = await sessionCookie(app, owner.id, 'active', SA_IP)
+    const adm = await createUser(app, { roleId: 'administrador', name: 'Administrador' })
+    const admCookie = await sessionCookie(app, adm.id, 'active', ADMIN_IP)
+    const URL = `/api/kv/${KEY}`
+
+    const cur = await api(app, 'GET', URL, { cookie: admCookie, ip: ADMIN_IP })
+    expect(cur.statusCode).toBe(200)
+    const put = await api(app, 'PUT', URL, {
+      cookie: admCookie,
+      ip: ADMIN_IP,
+      body: { value: { ...cur.json().value, allowlist: [{ value: ADMIN_IP, label: 'só eu' }] }, version: cur.json().version },
+    })
+    expect(put.statusCode, put.body).toBe(403)
+    expect(put.json().error.code).toBe('sem_permissao')
+
+    // o Superadmin continua entrando (sessão aberta e login)
+    expect((await api(app, 'GET', '/api/auth/me', { cookie: saCookie, ip: SA_IP })).statusCode).toBe(200)
+    const login = await api(app, 'POST', '/api/auth/login', { ip: SA_IP, body: { email: owner.email, password: owner.password } })
+    expect(login.statusCode, login.body).toBe(200)
+    expect(((await handler.read(ctx(app, sa)))!.value as PanelSecurity).allowlist).toEqual([])
+  })
+
+  it('recuperação pelo servidor (PANEL_ALLOWLIST_RESET): esvazia a lista uma vez por valor, com auditoria', async () => {
+    const restrict = () => save(base({ allowlist: [entry('10.1.1.1', 'Só a dona')] as never }))
+    const allowlist = async () => ((await handler.read(ctx(app, sa)))!.value as PanelSecurity).allowlist.map((e) => e.value)
+    await restrict()
+    expect((await api(app, 'GET', '/api/auth/me', { ip: '200.9.9.9' })).statusCode).toBe(403)
+
+    // sem a variável nada muda
+    expect(await resetAllowlistFromEnv(app, undefined)).toBe('sem-pedido')
+    expect(await resetAllowlistFromEnv(app, '   ')).toBe('sem-pedido')
+    expect(await allowlist()).toEqual(['10.1.1.1'])
+
+    const v0 = (await handler.read(ctx(app, sa)))!.version
+    expect(await resetAllowlistFromEnv(app, 'incidente-2026-10-09')).toBe('esvaziada')
+    const after = await handler.read(ctx(app, sa))
+    expect((after!.value as PanelSecurity).allowlist).toEqual([])
+    expect(after!.version).toBe(v0 + 1)
+    // vale na hora (cache limpo)
+    expect((await api(app, 'GET', '/api/auth/me', { ip: '200.9.9.9' })).statusCode).toBe(401)
+    const a = await app.db.one<{ action: string; entity: string; summary: string; actor_id: string | null; actor_name: string }>(
+      'select action, entity, summary, actor_id, actor_name from audit_log order by id desc limit 1',
+    )
+    expect(a).toMatchObject({ action: 'desbloquear', entity: 'Segurança do painel', actor_id: null, actor_name: 'Recuperação de acesso (servidor)' })
+    expect(a?.summary).toContain('PANEL_ALLOWLIST_RESET')
+    expect(a?.summary).toContain('IPs retirados: 10.1.1.1 (Só a dona)')
+    // o valor em si não fica guardado, só o hash
+    const mark = await app.db.one<{ value: Record<string, unknown> }>('select value from settings where key = $1', [ALLOWLIST_RESET_KEY])
+    expect(JSON.stringify(mark?.value)).not.toContain('incidente-2026-10-09')
+
+    // mesmo valor de novo (variável esquecida no ambiente): a lista refeita fica como está
+    await restrict()
+    expect(await resetAllowlistFromEnv(app, 'incidente-2026-10-09')).toBe('ja-aplicado')
+    expect(await allowlist()).toEqual(['10.1.1.1'])
+    expect(await resetAllowlistFromEnv(app, 'incidente-2')).toBe('esvaziada')
+    expect(await allowlist()).toEqual([])
+    await save(base())
+  })
+
+  it('a subida da API (bootstrap) aplica PANEL_ALLOWLIST_RESET', async () => {
+    const other = await createTestApp()
+    try {
+      await other.db.query(`update panel_security set allowlist = $1::jsonb where id = 1`, [JSON.stringify([{ value: '10.1.1.1' }])])
+      await bootstrap(other, {})
+      expect((await other.db.one<{ allowlist: unknown[] }>('select allowlist from panel_security where id = 1'))?.allowlist).toHaveLength(1)
+      await bootstrap(other, { PANEL_ALLOWLIST_RESET: 'incidente-3' })
+      expect((await other.db.one<{ allowlist: unknown[] }>('select allowlist from panel_security where id = 1'))?.allowlist).toEqual([])
+    } finally {
+      await other.close()
+      const { invalidateAllowlistCache } = await import('../src/plugins/security')
+      invalidateAllowlistCache()
+    }
   })
 
   it('o tempo de inatividade gravado derruba sessões paradas', async () => {

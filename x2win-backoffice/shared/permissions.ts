@@ -38,15 +38,34 @@ const ofModules = (mods: ModuleId[], kinds: Permission['kind'][] = ['ver', 'edit
   PERMISSIONS.filter((p) => mods.includes(p.module) && kinds.includes(p.kind)).map((p) => p.key)
 const keys = (...k: string[]) => k
 
+/** Cargo com acesso total. O 2FA dele é sempre exigido (o servidor não deixa desligar). */
+export const SUPERADMIN_ROLE_ID = 'superadmin'
+
+/**
+ * A exigência de 2FA deste cargo está travada: a subida da API (bootstrap) liga em toda instalação e o editor de
+ * cargos não deixa desligar. O painel mostra como "Exigido" e sem o botão de desligar.
+ */
+export function isRequire2faLocked(role: Pick<Role, 'id'>) {
+  return role.id === SUPERADMIN_ROLE_ID
+}
+
+/**
+ * Cargos que uma instalação nova (primeiro Superadmin criado pela subida) já entrega exigindo 2FA: acesso total e
+ * aprovação de saques. Depois disso só o Superadmin fica travado; os outros seguem a decisão da operação.
+ */
+export const INSTALL_REQUIRE_2FA_ROLE_IDS = [SUPERADMIN_ROLE_ID, 'administrador', 'financeiro'] as const
+
+// Catálogo base dos cargos (painel em demonstração e semente do banco). A exigência de 2FA de produção é aplicada
+// pela subida da API: veja isRequire2faLocked e INSTALL_REQUIRE_2FA_ROLE_IDS.
 export function seedRoles(): Role[] {
   return [
     {
-      id: 'superadmin',
+      id: SUPERADMIN_ROLE_ID,
       name: 'Superadmin',
       description: 'Acesso total, inclui conceder e retirar cargos',
       system: true,
       permissions: all,
-      require2fa: true,
+      require2fa: false,
       approvalCeiling: null,
       color: 'violet',
     },
@@ -56,7 +75,7 @@ export function seedRoles(): Role[] {
       description: 'Acesso total à operação',
       system: true,
       permissions: all.filter((k) => k !== 'cargos.conceder'),
-      require2fa: true,
+      require2fa: false,
       approvalCeiling: null,
       color: 'blue',
     },

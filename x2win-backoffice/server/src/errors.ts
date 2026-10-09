@@ -20,6 +20,7 @@ export const Errors = {
   invalid: (msg: string, details?: unknown) => new AppError(400, 'dados_invalidos', msg, details),
   ipBlocked: () => new AppError(403, 'ip_nao_autorizado', 'Seu IP não está na lista de acesso do painel.'),
   csrf: () => new AppError(403, 'requisicao_invalida', 'Requisição sem o cabeçalho de segurança do painel.'),
+  httpsRequired: () => new AppError(403, 'https_obrigatorio', 'Acesse o painel por HTTPS.'),
 }
 
 /** Corpo padrão de erro devolvido pela API. */

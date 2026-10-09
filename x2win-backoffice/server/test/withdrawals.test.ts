@@ -191,7 +191,8 @@ describe('POST /api/withdrawals/:id/approve', () => {
   it('cargos que não aprovam: Suporte, Marketing oficial e cargo com teto 0 → 403 sem_permissao', async () => {
     const id = await insertWithdrawal(app)
     for (const roleId of ['suporte', 'marketing-oficial', 'adm']) {
-      const { cookie } = await loginAs(app, roleId)
+      // com 2FA ativo: Marketing oficial exige 2FA para ter sessão (sem ele a resposta seria 401, não 403)
+      const { cookie } = await loginAs(app, roleId, { totp: true })
       for (const action of ['approve', 'reject']) {
         const r = await api(app, 'POST', `/api/withdrawals/${id}/${action}`, { cookie, body: { reason: 'Motivo qualquer' } })
         expect(r.statusCode, `${roleId} ${action}`).toBe(403)
@@ -308,6 +309,35 @@ describe('POST /api/withdrawals/:id/reveal-pix', () => {
   it('inexistente → 404; sem sessão → 401', async () => {
     expect((await api(app, 'POST', '/api/withdrawals/NADA/reveal-pix', { cookie: admin.cookie })).statusCode).toBe(404)
     expect((await api(app, 'POST', '/api/withdrawals/NADA/reveal-pix')).statusCode).toBe(401)
+  })
+})
+
+// Regressão r1-exposure-9: chave PIX completa, dados do jogador e decisões nunca ficam em cache.
+describe('Cache-Control: no-store nas rotas /api/withdrawals', () => {
+  it('aprovar, recusar, revelar PIX e respostas de erro saem com no-store', async () => {
+    const noStore = (r: { headers: Record<string, unknown> }) => String(r.headers['cache-control'] ?? '')
+    const a = await insertWithdrawal(app)
+    const approve = await api(app, 'POST', `/api/withdrawals/${a}/approve`, { cookie: admin.cookie })
+    expect(approve.statusCode).toBe(200)
+    expect(noStore(approve)).toContain('no-store')
+
+    const b = await insertWithdrawal(app)
+    const reject = await api(app, 'POST', `/api/withdrawals/${b}/reject`, { cookie: admin.cookie, body: { reason: 'Documento divergente' } })
+    expect(reject.statusCode).toBe(200)
+    expect(noStore(reject)).toContain('no-store')
+
+    const c = await insertWithdrawal(app, { pixKeyType: 'E-mail', pixKey: 'jogador.pix@banco.com' })
+    const reveal = await api(app, 'POST', `/api/withdrawals/${c}/reveal-pix`, { cookie: admin.cookie })
+    expect(reveal.statusCode).toBe(200)
+    expect(reveal.json()).toEqual({ pixKey: 'jogador.pix@banco.com' })
+    expect(noStore(reveal)).toContain('no-store')
+
+    const notFound = await api(app, 'POST', '/api/withdrawals/NADA/reveal-pix', { cookie: admin.cookie })
+    expect(notFound.statusCode).toBe(404)
+    expect(noStore(notFound)).toContain('no-store')
+    const again = await api(app, 'POST', `/api/withdrawals/${a}/approve`, { cookie: admin.cookie })
+    expect(again.statusCode).toBe(409)
+    expect(noStore(again)).toContain('no-store')
   })
 })
 

@@ -1,9 +1,11 @@
 // Disparador de webhooks: lê a fila (webhook_outbox), envia com assinatura HMAC,
 // registra a execução e reagenda falhas com espera crescente.
+import http from 'node:http'
+import https from 'node:https'
 import type { FastifyInstance } from 'fastify'
 import type { Db } from '../../db'
 import { hmacSha256, newId } from '../../lib/crypto'
-import { isWebhookEvent, webhookTargetProblem } from './url'
+import { BLOCKED_PRIVATE_CODE, hostOf, INTERNAL_TARGET_MESSAGE, isWebhookEvent, safeLookup, webhookStrictMode, webhookTargetProblem } from './url'
 
 export const USER_AGENT = 'X2Win-Webhooks/1.0'
 export const DELIVERY_TIMEOUT_MS = 5000
@@ -30,6 +32,66 @@ export interface DeliveryResult {
   error: string | null
 }
 
+/** Mensagens devolvidas ao painel, à auditoria e à fila (sem detalhes de rede de baixo nível). */
+export const DELIVERY_ERRORS = {
+  timeout: `Sem resposta do destino em ${DELIVERY_TIMEOUT_MS / 1000} s.`,
+  connection: 'Falha de conexão com o destino.',
+  internal: INTERNAL_TARGET_MESSAGE,
+} as const
+
+class DeadlineError extends Error {
+  override name = 'TimeoutError'
+}
+
+/** Espera `p`, mas desiste quando o prazo (`signal`) acabar. */
+function withDeadline<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DeadlineError())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DeadlineError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    p.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(v)
+      },
+      (e) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(e)
+      },
+    )
+  })
+}
+
+/**
+ * Um POST com http(s).request. No modo estrito a conexão resolve o nome com `safeLookup`:
+ * o endereço conferido é o mesmo usado na conexão. Redirecionamento nunca é seguido.
+ * Devolve o status HTTP (o corpo da resposta é descartado).
+ */
+function postOnce(url: URL, headers: Record<string, string>, body: string, strict: boolean, signal: AbortSignal): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const client = url.protocol === 'https:' ? https : http
+    const req = client.request(
+      url,
+      {
+        method: 'POST',
+        headers: { ...headers, 'content-length': String(Buffer.byteLength(body)) },
+        // conexão própria a cada envio (nada de socket reaproveitado de outro destino)
+        agent: false,
+        signal,
+        ...(strict ? { lookup: safeLookup } : {}),
+      },
+      (res) => {
+        const status = res.statusCode ?? 0
+        res.on('error', () => undefined)
+        res.destroy()
+        resolve(status)
+      },
+    )
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
 /** Envia de verdade um POST assinado. Nunca lança: falhas voltam em `error`. */
 export async function sendWebhook(
   app: FastifyInstance,
@@ -37,13 +99,21 @@ export async function sendWebhook(
 ): Promise<DeliveryResult> {
   const started = performance.now()
   const elapsed = () => Math.round(performance.now() - started)
-  const blocked = await webhookTargetProblem(opts.url, app.config.NODE_ENV === 'production')
-  if (blocked) return { ok: false, httpStatus: null, durationMs: elapsed(), error: blocked }
+  // um prazo só para tudo: DNS da checagem, conexão, TLS e resposta
+  const signal = AbortSignal.timeout(DELIVERY_TIMEOUT_MS)
+  const strict = webhookStrictMode(app.config)
+  const fail = (error: string): DeliveryResult => ({ ok: false, httpStatus: null, durationMs: elapsed(), error })
+  try {
+    const blocked = await withDeadline(webhookTargetProblem(opts.url, strict), signal)
+    if (blocked) return fail(blocked)
+  } catch {
+    return fail(DELIVERY_ERRORS.timeout)
+  }
   const timestamp = Math.floor(Date.now() / 1000)
   try {
-    const res = await fetch(opts.url.trim(), {
-      method: 'POST',
-      headers: {
+    const status = await postOnce(
+      new URL(opts.url.trim()),
+      {
         'content-type': 'application/json',
         'user-agent': USER_AGENT,
         'x-x2w-event': opts.event,
@@ -51,25 +121,23 @@ export async function sendWebhook(
         'x-x2w-timestamp': String(timestamp),
         'x-x2w-signature': signBody(opts.secret, timestamp, opts.body),
       },
-      body: opts.body,
-      // redirecionamento não é seguido (poderia levar a um endereço interno)
-      redirect: 'manual',
-      signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
-    })
-    await res.body?.cancel().catch(() => undefined)
-    const ok = res.status >= 200 && res.status < 300
-    return { ok, httpStatus: res.status, durationMs: elapsed(), error: ok ? null : `O destino respondeu HTTP ${res.status}.` }
+      opts.body,
+      strict,
+      signal,
+    )
+    const ok = status >= 200 && status < 300
+    return { ok, httpStatus: status, durationMs: elapsed(), error: ok ? null : `O destino respondeu HTTP ${status}.` }
   } catch (e) {
-    const err = e as { name?: string; message?: string; cause?: { code?: string } }
-    const timeout = err.name === 'TimeoutError' || err.name === 'AbortError'
-    return {
-      ok: false,
-      httpStatus: null,
-      durationMs: elapsed(),
-      error: timeout
-        ? `Sem resposta do destino em ${DELIVERY_TIMEOUT_MS / 1000} s.`
-        : `Falha de conexão com o destino${err.cause?.code ? ` (${err.cause.code})` : ''}.`,
+    const err = e as { name?: string; code?: string; cause?: { code?: string } }
+    const code = err.code ?? err.cause?.code
+    if (code === BLOCKED_PRIVATE_CODE) {
+      app.log.warn({ host: hostOf(opts.url) }, 'webhooks: destino resolveu para rede interna na conexão; envio bloqueado')
+      return fail(DELIVERY_ERRORS.internal)
     }
+    if (signal.aborted || err.name === 'TimeoutError' || err.name === 'AbortError') return fail(DELIVERY_ERRORS.timeout)
+    // o código de baixo nível (recusada, TLS, etc.) fica só no log do servidor: no painel viraria um mapa da rede
+    app.log.warn({ host: hostOf(opts.url), code }, 'webhooks: falha de conexão com o destino')
+    return fail(DELIVERY_ERRORS.connection)
   }
 }
 

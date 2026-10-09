@@ -3,7 +3,7 @@
 import { mkdirSync } from 'node:fs'
 import { PGlite } from '@electric-sql/pglite'
 import pg from 'pg'
-import { MIGRATIONS } from './migrations'
+import { MIGRATIONS, RUNTIME_ROLE } from './migrations'
 
 export interface Db {
   kind: 'pglite' | 'postgres'
@@ -134,18 +134,57 @@ export function openDb(url: string): Db {
   throw new Error(`DATABASE_URL não reconhecida: use postgres://, pglite:// ou memory://`)
 }
 
-/** Aplica as migrações pendentes, em ordem, cada uma numa transação. */
+/**
+ * Aplica as migrações pendentes, em ordem, cada uma numa transação. Com o banco em dia não roda nenhum DDL:
+ * assim a API pode conectar com o papel de execução (sem permissão de DDL) e as migrações rodam antes, com o dono
+ * das tabelas (npm run migrate).
+ */
 export async function migrate(db: Db): Promise<string[]> {
-  await db.exec(`create table if not exists schema_migrations (id text primary key, applied_at timestamptz not null default now())`)
+  const table = await db.one<{ t: string | null }>(`select to_regclass('schema_migrations')::text as t`)
+  if (!table?.t) await db.exec(`create table if not exists schema_migrations (id text primary key, applied_at timestamptz not null default now())`)
   const done = new Set((await db.query<{ id: string }>('select id from schema_migrations')).map((r) => r.id))
   const applied: string[] = []
   for (const m of MIGRATIONS) {
     if (done.has(m.id)) continue
-    await db.tx(async (t) => {
-      await t.exec(m.sql)
-      await t.query('insert into schema_migrations (id) values ($1)', [m.id])
-    })
+    try {
+      await db.tx(async (t) => {
+        await t.exec(m.sql)
+        await t.query('insert into schema_migrations (id) values ($1)', [m.id])
+      })
+    } catch (e) {
+      if ((e as { code?: string }).code === '42501') {
+        throw new Error(
+          `Migração ${m.id} pendente e o usuário do banco não pode aplicá-la. Rode "npm run migrate" com o usuário dono das tabelas e suba a API de novo.`,
+          { cause: e },
+        )
+      }
+      throw e
+    }
     applied.push(m.id)
   }
   return applied
+}
+
+/**
+ * Passa a conexão para o papel de execução (RUNTIME_ROLE) depois das migrações.
+ *  - PGlite (desenvolvimento e testes): um só usuário, superusuário; SET ROLE faz o resto da execução rodar com os
+ *    mesmos privilégios da produção (auditoria só com SELECT e INSERT, sem DDL).
+ *  - Postgres: a separação vem da credencial (DATABASE_URL com um usuário do papel, veja deploy/db-init). Nada a fazer.
+ * Devolve se a troca aconteceu.
+ */
+export async function useRuntimeRole(db: Db): Promise<boolean> {
+  if (db.kind !== 'pglite') return false
+  const role = await db.one('select 1 from pg_roles where rolname = $1', [RUNTIME_ROLE])
+  if (!role) return false
+  await db.exec(`set role ${RUNTIME_ROLE}`)
+  return true
+}
+
+/** O usuário da conexão é superusuário ou dono da auditoria (pode apagá-la ou desligar o gatilho)? */
+export async function connectedAsOwner(db: Db): Promise<boolean> {
+  const r = await db.one<{ owner: boolean }>(
+    `select coalesce((select rolsuper from pg_roles where rolname = current_user), false)
+            or pg_has_role(current_user, (select relowner from pg_class where oid = to_regclass('audit_log')), 'USAGE') as owner`,
+  )
+  return !!r?.owner
 }

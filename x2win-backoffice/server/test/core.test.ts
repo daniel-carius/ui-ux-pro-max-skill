@@ -6,7 +6,7 @@ import { api, createTestApp, loginAs, sessionCookie, createUser } from './helper
 describe('banco', () => {
   it('aplica migrações, converte tipos e bloqueia alteração da auditoria', async () => {
     const db = openDb('memory://')
-    expect(await migrate(db)).toEqual(['001_init'])
+    expect(await migrate(db)).toEqual(['001_init', '002_audit_append_only'])
     expect(await migrate(db)).toEqual([])
     await db.query(`insert into roles (id, name, approval_ceiling_cents) values ('r', 'R', 500000)`)
     const r = await db.one<{ approval_ceiling_cents: number; created_at: string }>('select approval_ceiling_cents, created_at from roles')
@@ -15,6 +15,7 @@ describe('banco', () => {
     await db.query(`insert into audit_log (actor_name, action, entity, summary) values ('a','b','c','d')`)
     await expect(db.query('update audit_log set summary = $1', ['x'])).rejects.toThrow(/inclusão/)
     await expect(db.query('delete from audit_log')).rejects.toThrow(/inclusão/)
+    await expect(db.query('truncate audit_log')).rejects.toThrow(/inclusão/)
     await expect(
       db.tx(async (t) => {
         await t.query(`insert into roles (id, name) values ('x', 'X')`)

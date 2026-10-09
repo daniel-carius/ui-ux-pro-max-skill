@@ -1,12 +1,14 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { findKvRule } from '@shared/kv-registry'
-import { effectivePermissions, type Role } from '@shared/permissions'
+import { effectivePermissions, seedRoles, type Role } from '@shared/permissions'
+import { bootstrap, ensureRoles } from '../src/bootstrap'
 import type { KvContext, KvValue } from '../src/kv/types'
+import { totpCode } from '../src/lib/totp'
 import { kvHandlers } from '../src/modules/roles/kv'
 import { getRole } from '../src/services/roles-repo'
 import type { AuthContext } from '../src/types'
-import { createTestApp, createUser } from './helpers'
+import { api, cookieFrom, createTestApp, createUser, loginAs } from './helpers'
 
 const roles = kvHandlers.roles!
 
@@ -136,7 +138,7 @@ describe('cargos.lista', () => {
     expect((await getRole(app.db, 'suporte'))!.permissions).not.toContain('tudo.liberado')
   })
 
-  it('Superadmin não muda (só a exigência de 2FA, por quem concede cargos)', async () => {
+  it('Superadmin não muda e o 2FA dele não pode ser desligado', async () => {
     const sp = (rs: Role[]) => rs.find((r) => r.id === 'superadmin')!
     await expect(save(sa, (rs) => patch(rs, 'superadmin', { permissions: sp(rs).permissions.slice(1) }))).rejects.toMatchObject({ status: 400 })
     await expect(save(sa, (rs) => patch(rs, 'superadmin', { name: 'Dono' }))).rejects.toMatchObject({ status: 400 })
@@ -150,8 +152,17 @@ describe('cargos.lista', () => {
     await expect(save(adm, (rs) => patch(rs, 'superadmin', { require2fa: true }))).rejects.toMatchObject({ status: 403 })
     const saved = await save(sa, (rs) => patch(rs, 'superadmin', { require2fa: true }))
     expect((saved.value as Role[]).find((r) => r.id === 'superadmin')?.require2fa).toBe(true)
+    // 2FA do Superadmin travado: ninguém desliga, nem quem concede cargos
+    await expect(save(sa, (rs) => patch(rs, 'superadmin', { require2fa: false }))).rejects.toMatchObject({
+      status: 400,
+      code: 'dados_invalidos',
+      details: { id: 'superadmin', field: 'require2fa' },
+    })
+    await expect(save(adm, (rs) => patch(rs, 'superadmin', { require2fa: false }))).rejects.toMatchObject({ status: 400 })
+    // reenviar o que já está gravado não é mudança
+    await save(sa, (rs) => patch(rs, 'superadmin', { require2fa: true }))
     const db = await getRole(app.db, 'superadmin')
-    expect(db).toMatchObject({ name: 'Superadmin', approvalCeiling: null })
+    expect(db).toMatchObject({ name: 'Superadmin', approvalCeiling: null, require2fa: true })
   })
 
   it('cargos do sistema não são renomeados nem excluídos', async () => {
@@ -249,5 +260,174 @@ describe('cargos.lista', () => {
     await expect(roles.write!(ctx(app, sa), { nope: true }, cur!.version)).rejects.toThrow()
     await expect(roles.write!(ctx(app, sa), list(cur).map((r) => ({ ...r, require2fa: 'sim' })), cur!.version)).rejects.toThrow()
     await expect(roles.write!(ctx(app, sa), list(cur).map((r) => ({ ...r, color: 'Azul!' })), cur!.version)).rejects.toThrow()
+  })
+})
+
+/** Captura as mensagens de app.log.info/warn enquanto fn roda. */
+async function captureLogs(app: FastifyInstance, fn: () => Promise<unknown>) {
+  const logs: { level: 'info' | 'warn'; text: string }[] = []
+  const fmt = (args: unknown[]) => args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')
+  const info = vi.spyOn(app.log, 'info').mockImplementation(((...args: unknown[]) => logs.push({ level: 'info', text: fmt(args) })) as never)
+  const warn = vi.spyOn(app.log, 'warn').mockImplementation(((...args: unknown[]) => logs.push({ level: 'warn', text: fmt(args) })) as never)
+  try {
+    await fn()
+  } finally {
+    info.mockRestore()
+    warn.mockRestore()
+  }
+  return logs
+}
+
+// Regressão r1-authz-6 / r1-logic-4: ensureRoles roda em toda subida (index.ts -> bootstrap).
+describe('ensureRoles (toda subida da API)', () => {
+  let app: FastifyInstance
+  afterEach(async () => app?.close())
+
+  async function getList(cookie: string) {
+    const r = await api(app, 'GET', '/api/kv/cargos.lista', { cookie })
+    expect(r.statusCode, r.body).toBe(200)
+    return r.json() as { value: Role[]; version: number }
+  }
+
+  it('instalação nova: cria os cargos do sistema e os personalizados da semente', async () => {
+    app = await createTestApp()
+    const rows = await app.db.query<{ id: string }>('select id from roles order by id')
+    expect(rows.map((r) => r.id)).toEqual(['adm', 'administrador', 'financeiro', 'marketing', 'marketing-oficial', 'superadmin', 'suporte'])
+    // subir de novo não muda nada
+    await ensureRoles(app)
+    expect((await app.db.query('select id from roles')).length).toBe(7)
+  })
+
+  it('cargo personalizado da semente excluído não volta na próxima subida', async () => {
+    app = await createTestApp()
+    const { cookie } = await loginAs(app, 'administrador')
+    const cur = await getList(cookie)
+    const put = await api(app, 'PUT', '/api/kv/cargos.lista', { cookie, body: { value: cur.value.filter((r) => r.id !== 'adm'), version: cur.version } })
+    expect(put.statusCode, put.body).toBe(200)
+    expect(await getRole(app.db, 'adm')).toBeNull()
+
+    await ensureRoles(app)
+    await bootstrap(app, {})
+    expect(await getRole(app.db, 'adm')).toBeNull()
+  })
+
+  it('excluir "marketing" e criar outro "Marketing" não impede a próxima subida', async () => {
+    app = await createTestApp()
+    const { cookie } = await loginAs(app, 'administrador')
+    let cur = await getList(cookie)
+    let put = await api(app, 'PUT', '/api/kv/cargos.lista', { cookie, body: { value: cur.value.filter((r) => r.id !== 'marketing'), version: cur.version } })
+    expect(put.statusCode, put.body).toBe(200)
+    cur = await getList(cookie)
+    put = await api(app, 'PUT', '/api/kv/cargos.lista', {
+      cookie,
+      body: {
+        value: [
+          ...cur.value,
+          { id: 'novo', name: 'Marketing', description: 'novo', permissions: ['dashboard.ver'], require2fa: false, approvalCeiling: 0, color: 'rose' },
+        ],
+        version: cur.version,
+      },
+    })
+    expect(put.statusCode, put.body).toBe(200)
+
+    // reinícios seguidos: nenhuma exceção (index.ts faria o processo sair antes do listen)
+    await expect(ensureRoles(app)).resolves.toBeUndefined()
+    await expect(ensureRoles(app)).resolves.toBeUndefined()
+    await expect(bootstrap(app, {})).resolves.toBeUndefined()
+    expect(await getRole(app.db, 'marketing')).toBeNull()
+    const mk = await app.db.query<{ id: string; name: string; system: boolean }>(`select id, name, system from roles where lower(name) = 'marketing'`)
+    expect(mk).toEqual([{ id: expect.stringMatching(/^cargo_/), name: 'Marketing', system: false }])
+  })
+
+  it('cargo do sistema que falta volta; conflito de nome é pulado com aviso, sem derrubar a subida', async () => {
+    app = await createTestApp()
+    // cargo do sistema ausente (ex.: novo numa versão nova) é criado na subida
+    await app.db.query(`delete from roles where id = 'marketing-oficial'`)
+    await ensureRoles(app)
+    expect(await getRole(app.db, 'marketing-oficial')).toMatchObject({ system: true, require2fa: true })
+
+    // um cargo personalizado já usa o nome do cargo do sistema que falta
+    await app.db.query(`delete from roles where id = 'suporte'`)
+    await app.db.query(`insert into roles (id, name, permissions) values ('cargo_x', 'SUPORTE', '{dashboard.ver}')`)
+    let failure: unknown = null
+    const logs = await captureLogs(app, () => ensureRoles(app).catch((e) => (failure = e)))
+    expect(failure).toBeNull()
+    expect(await getRole(app.db, 'suporte')).toBeNull()
+    expect(await getRole(app.db, 'cargo_x')).toMatchObject({ name: 'SUPORTE', system: false })
+    expect(logs.some((l) => l.level === 'warn' && l.text.includes('"Suporte"') && l.text.includes('cargo_x'))).toBe(true)
+  })
+
+  it('Superadmin volta a ter o catálogo todo e a exigir 2FA a cada subida (backup restaurado ou migração)', async () => {
+    app = await createTestApp()
+    await createUser(app, { roleId: 'superadmin' })
+    await app.db.query(`update roles set require_2fa = false, permissions = '{dashboard.ver}', approval_ceiling_cents = 100 where id = 'superadmin'`)
+    await app.db.query(`update roles set require_2fa = false where id in ('administrador', 'financeiro')`)
+    const logs = await captureLogs(app, () => bootstrap(app, {}))
+    const sa = await getRole(app.db, 'superadmin')
+    expect(sa).toMatchObject({ require2fa: true, approvalCeiling: null })
+    expect(sa!.permissions).toEqual(seedRoles().find((r) => r.id === 'superadmin')!.permissions)
+    expect(logs.some((l) => l.level === 'warn' && l.text.includes('Superadmin'))).toBe(true)
+    const a = await app.db.one<{ action: string; entity: string; summary: string; actor_id: string | null }>(
+      'select action, entity, summary, actor_id from audit_log order by id desc limit 1',
+    )
+    expect(a).toMatchObject({ action: 'editar', entity: 'Cargo Superadmin', actor_id: null })
+    expect(a?.summary).toContain('2FA passou a ser exigido')
+    // instalação existente: a decisão da operação sobre os outros cargos fica como está
+    expect((await getRole(app.db, 'administrador'))?.require2fa).toBe(false)
+    expect((await getRole(app.db, 'financeiro'))?.require2fa).toBe(false)
+    // já ligado: nada a fazer, nada a auditar
+    const n = (await app.db.query('select id from audit_log')).length
+    await bootstrap(app, {})
+    expect((await app.db.query('select id from audit_log')).length).toBe(n)
+  })
+})
+
+// Regressão r1-authn-7: o Superadmin criado por ADMIN_EMAIL/ADMIN_PASSWORD não entra só com senha.
+describe('primeiro Superadmin (bootstrap)', () => {
+  const ADMIN_EMAIL = 'primeiro.admin@teste.x2win'
+  const ADMIN_PASSWORD = 'SenhaForteDoTeste2026'
+
+  it('o primeiro login cai no cadastro do 2FA e a API protegida espera o cadastro', async () => {
+    const app = await createTestApp({ ADMIN_EMAIL, ADMIN_PASSWORD })
+    try {
+      const logs = await captureLogs(app, () => bootstrap(app, {}))
+      // o log diz o que a etapa calculada vai pedir (e não há aviso de Superadmin sem 2FA)
+      expect(logs).toContainEqual({ level: 'info', text: 'Superadmin criado a partir de ADMIN_EMAIL. No primeiro login será pedido o 2FA.' })
+      expect(logs.some((l) => l.text.includes('SEM exigência de 2FA'))).toBe(false)
+      const u = await app.db.one<{ role_id: string; totp_enabled: boolean }>('select role_id, totp_enabled from users where email = $1', [ADMIN_EMAIL])
+      expect(u).toEqual({ role_id: 'superadmin', totp_enabled: false })
+      // instalação nova: acesso total e aprovação de saques já exigem 2FA
+      for (const id of ['superadmin', 'administrador', 'financeiro']) expect((await getRole(app.db, id))?.require2fa, id).toBe(true)
+      expect((await getRole(app.db, 'suporte'))?.require2fa).toBe(false)
+
+      const r = await api(app, 'POST', '/api/auth/login', { body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD }, ip: '10.70.0.1' })
+      expect(r.statusCode, r.body).toBe(200)
+      expect(r.json()).toEqual({ stage: 'enroll' })
+      const cookie = cookieFrom(r)!
+      const blocked = await api(app, 'GET', '/api/kv/cargos.lista', { cookie })
+      expect(blocked.statusCode).toBe(403)
+      expect(blocked.json().error.code).toBe('etapa_pendente')
+
+      // depois do cadastro do 2FA a sessão fica completa
+      const setup = await api(app, 'POST', '/api/auth/2fa/setup', { cookie })
+      expect(setup.statusCode, setup.body).toBe(200)
+      const { secret } = setup.json() as { secret: string }
+      const en = await api(app, 'POST', '/api/auth/2fa/enable', { cookie, body: { code: totpCode(secret, Date.now()) } })
+      expect(en.statusCode, en.body).toBe(200)
+      expect(en.json().stage).toBe('active')
+      expect((await api(app, 'GET', '/api/kv/cargos.lista', { cookie })).statusCode).toBe(200)
+
+      // Administrador criado depois também passa pelo cadastro do 2FA
+      const adm = await createUser(app, { roleId: 'administrador' })
+      const ra = await api(app, 'POST', '/api/auth/login', { body: { email: adm.email, password: adm.password }, ip: '10.70.0.2' })
+      expect(ra.statusCode, ra.body).toBe(200)
+      expect(ra.json()).toEqual({ stage: 'enroll' })
+
+      // reinício: nada muda, nenhum Superadmin novo
+      await bootstrap(app, {})
+      expect((await app.db.query(`select id from users where role_id = 'superadmin'`)).length).toBe(1)
+    } finally {
+      await app.close()
+    }
   })
 })

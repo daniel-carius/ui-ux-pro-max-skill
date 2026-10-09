@@ -22,7 +22,7 @@ const NOTICE: Record<LoginReason, { tone: 'info' | 'success' | 'danger'; title: 
 }
 
 export function LoginPage({ reason }: { reason?: LoginReason }) {
-  const { reload } = useAuthApi()
+  const { signedIn } = useAuthApi()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({})
@@ -52,7 +52,7 @@ export function LoginPage({ reason }: { reason?: LoginReason }) {
     try {
       await api<LoginResponse>('POST', '/api/auth/login', { email: email.trim(), password })
       // a sessão segue para a etapa certa (troca de senha, 2FA ou painel)
-      await reload()
+      await signedIn()
     } catch (err) {
       setError(describeAuthError(err, 'login'))
       setPassword('')

@@ -1,5 +1,5 @@
 // Chave cargos.lista (leitura; gravação por diferença validada).
-// Regras: Superadmin não muda (só a exigência de 2FA, por quem concede cargos);
+// Regras: Superadmin não muda e o 2FA dele é sempre exigido (não pode ser desligado);
 // cargos do sistema não são renomeados nem excluídos; permissões precisam
 // existir no catálogo; teto null | 0 | > 0 (guardado em centavos); cargo novo
 // ganha id do servidor; só exclui cargo personalizado sem pessoas ativas ou
@@ -8,7 +8,7 @@
 import { z } from 'zod'
 import { canReadKey, canWriteKey } from '@shared/kv-registry'
 import { brl } from '@shared/money'
-import { isAdminLevelRole, PERMISSION_BY_KEY, PERMISSIONS, type Role } from '@shared/permissions'
+import { isAdminLevelRole, isRequire2faLocked, PERMISSION_BY_KEY, PERMISSIONS, type Role } from '@shared/permissions'
 import type { Db } from '../../db'
 import { Errors } from '../../errors'
 import { newId } from '../../lib/crypto'
@@ -187,11 +187,15 @@ export const kvHandlers: KvHandlers = {
             if (old.id === SUPERADMIN_ROLE_ID) {
               const fields = change.parts.filter((p) => !p.startsWith('2FA'))
               if (fields.length) {
-                throw Errors.invalid('O cargo Superadmin tem acesso total e não pode ser alterado (só a exigência de 2FA).', {
+                throw Errors.invalid('O cargo Superadmin tem acesso total e não pode ser alterado.', {
                   id: old.id,
                   changes: fields,
                 })
               }
+            }
+            // 2FA travado: quem tem acesso total sempre cadastra o segundo fator
+            if (isRequire2faLocked(old) && !change.next.require2fa) {
+              throw Errors.invalid(`O 2FA é sempre exigido no cargo ${old.name} e não pode ser desligado.`, { id: old.id, field: 'require2fa' })
             }
             if (old.system && change.next.name !== old.name) {
               throw Errors.invalid(`Cargos do sistema não podem ser renomeados (${old.name}).`, { id: old.id, field: 'name' })

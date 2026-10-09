@@ -3,7 +3,7 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { ZodError } from 'zod'
 import type { Config } from './config'
-import { migrate, openDb, type Db } from './db'
+import { connectedAsOwner, migrate, openDb, useRuntimeRole, type Db } from './db'
 import { AppError, type ErrorBody } from './errors'
 import { createCipher } from './lib/crypto'
 import securityPlugin from './plugins/security'
@@ -40,6 +40,13 @@ export async function buildApp({ config, db, logger = false }: BuildOptions): Pr
 
   const database = db ?? openDb(config.DATABASE_URL)
   await migrate(database)
+  // depois das migrações a API roda sem ser dona das tabelas (auditoria só com SELECT e INSERT)
+  await useRuntimeRole(database)
+  if (database.kind === 'postgres' && (await connectedAsOwner(database))) {
+    app.log.warn(
+      'A API está conectada ao Postgres com o dono das tabelas ou um superusuário: quem tiver essa credencial pode apagar a auditoria. Conecte com o papel x2win_app (veja deploy/db-init) e rode as migrações à parte.',
+    )
+  }
   app.decorate('db', database)
   app.decorate('config', config)
   app.decorate('cipher', createCipher(config.ENCRYPTION_KEY))

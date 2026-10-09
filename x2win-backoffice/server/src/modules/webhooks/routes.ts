@@ -13,6 +13,12 @@ import { hostOf, WEBHOOK_EVENT_LABEL } from './url'
 const idParams = z.object({ id: z.string().trim().min(1).max(64) })
 
 export default async function routes(app: FastifyInstance) {
+  // respostas com dados sensíveis (e-mails, IPs, chave PIX, resultado de envio): nunca no cache do navegador/proxy
+  app.addHook('onSend', async (_req, reply, payload) => {
+    if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store')
+    return payload
+  })
+
   app.post('/destinations/:id/test', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req): Promise<WebhookTestResponse> => {
     const auth = requirePerm(req, 'webhooks.editar')
     const { id } = idParams.parse(req.params)

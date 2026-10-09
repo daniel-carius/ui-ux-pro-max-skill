@@ -191,4 +191,44 @@ create table webhook_executions (
 create index webhook_exec_at_idx on webhook_executions (at desc);
 `
 
-export const MIGRATIONS: Migration[] = [{ id: '001_init', sql: m001 }]
+/** Papel com que a API roda (não é dono de nenhuma tabela nem superusuário). */
+export const RUNTIME_ROLE = 'x2win_app'
+
+const m002 = `
+-- Auditoria só aceita inclusão também contra TRUNCATE: gatilho por linha não dispara em TRUNCATE.
+create trigger audit_log_no_truncate before truncate on audit_log
+  for each statement execute function audit_log_immutable();
+
+-- Papel de execução da API (${RUNTIME_ROLE}). Quem roda as migrações é o dono das tabelas; a API conecta com um
+-- usuário deste papel, que não é dono de nada: não consegue TRUNCATE, ALTER/DROP TRIGGER nem DROP TABLE.
+-- Tabelas de operação: leitura e escrita. Auditoria: só leitura e inclusão. Controle de migrações: só leitura.
+-- O usuário com login e senha é criado pela implantação (deploy/db-init); aqui, se ainda não existir, o papel
+-- nasce sem login. Sem permissão para criar papéis, a migração segue sem ele (a API continua com o dono).
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = '${RUNTIME_ROLE}') then
+    begin
+      create role ${RUNTIME_ROLE} nologin;
+    exception when insufficient_privilege then
+      raise notice 'sem permissão para criar o papel ${RUNTIME_ROLE}: crie-o (deploy/db-init) e rode as migrações de novo';
+      return;
+    end;
+  end if;
+  grant usage on schema public to ${RUNTIME_ROLE};
+  grant select, insert, update, delete on all tables in schema public to ${RUNTIME_ROLE};
+  grant usage, select on all sequences in schema public to ${RUNTIME_ROLE};
+  revoke all on table audit_log from ${RUNTIME_ROLE};
+  grant select, insert on table audit_log to ${RUNTIME_ROLE};
+  revoke all on table schema_migrations from ${RUNTIME_ROLE};
+  grant select on table schema_migrations to ${RUNTIME_ROLE};
+  -- tabelas das próximas migrações (criadas pelo mesmo dono). Tabela só de inclusão: revogue na migração dela.
+  alter default privileges in schema public grant select, insert, update, delete on tables to ${RUNTIME_ROLE};
+  alter default privileges in schema public grant usage, select on sequences to ${RUNTIME_ROLE};
+end
+$$;
+`
+
+export const MIGRATIONS: Migration[] = [
+  { id: '001_init', sql: m001 },
+  { id: '002_audit_append_only', sql: m002 },
+]

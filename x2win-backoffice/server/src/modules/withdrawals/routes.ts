@@ -33,6 +33,12 @@ async function lockWithdrawal(t: Db, id: string): Promise<WithdrawalRow> {
 }
 
 export default async function routes(app: FastifyInstance) {
+  // respostas com dados sensíveis (e-mails, IPs, chave PIX, resultado de envio): nunca no cache do navegador/proxy
+  app.addHook('onSend', async (_req, reply, payload) => {
+    if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store')
+    return payload
+  })
+
   app.post('/:id/approve', async (req) => {
     const auth = requirePerm(req, 'saques.aprovar')
     if (!canDecideWithdrawals(auth.role)) throw Errors.forbidden(`O cargo ${auth.role.name} não aprova saques.`)

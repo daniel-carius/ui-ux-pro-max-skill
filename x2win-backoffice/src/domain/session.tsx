@@ -17,10 +17,21 @@ import {
   type ReactNode,
 } from 'react'
 import type { AuditEventRequest, MeResponse } from '@shared/api'
-import { canReadKey, findKvRule } from '@shared/kv-registry'
 import { seedAudit, seedTeam, type AuditAction, type AuditEntry, type TeamMember } from '@/data/team'
-import { ApiError, api, isApiMode, onUnauthorized } from '@/lib/api'
+import { api, isApiMode, onUnauthorized } from '@/lib/api'
 import { dbGet, dbSet, prefetchKeys, refreshKey, resetDb, useDb } from '@/lib/store'
+import {
+  focusRecheckDue,
+  hasSession,
+  logoutFailureText,
+  requestLogout,
+  resolveSession,
+  setLogoutPending,
+  transition,
+  type AuthStatus,
+  type FlagStorage,
+  type SessionIo,
+} from './auth-state'
 import { uid } from '@/lib/random'
 import { PAGE_BY_ID } from '@/nav'
 // imports diretos (e não de '@/components/ui') para não criar ciclo com ui/Page
@@ -181,19 +192,13 @@ export function usePageAccess() {
 // Modo API: login, etapas e sessão real
 // ---------------------------------------------------------------------------
 
-/** Por que a tela de entrada apareceu (mostra um aviso no topo do formulário). */
-export type LoginReason = 'expired' | 'logout' | 'ip'
+export type { AuthStatus, LoginReason } from './auth-state'
 
-export type AuthStatus =
-  /** modo demonstração: não há login */
-  | { kind: 'demo' }
-  | { kind: 'loading' }
-  /** sem conexão ao abrir o painel */
-  | { kind: 'offline'; message: string }
-  | { kind: 'login'; reason?: LoginReason }
-  /** login começou, falta uma etapa (troca de senha, cadastro do 2FA ou código) */
-  | { kind: 'step'; me: MeResponse }
-  | { kind: 'active'; me: MeResponse }
+/** Códigos de recuperação recém-gerados, na tela até a pessoa confirmar que guardou. */
+export interface RecoveryCodesView {
+  email: string
+  codes: string[]
+}
 
 export interface AuthApi {
   /** true no modo API */
@@ -203,8 +208,19 @@ export interface AuthApi {
   me: MeResponse | null
   /** relê /api/auth/me e segue para a etapa certa (use depois de cada passo do login) */
   reload: () => Promise<AuthStatus>
-  /** encerra a sessão no servidor, limpa os dados em memória e volta para a entrada */
+  /** depois de POST /api/auth/login: a sessão anterior deste navegador já foi encerrada pelo servidor */
+  signedIn: () => Promise<AuthStatus>
+  /**
+   * Encerra a sessão no servidor, limpa os dados em memória e volta para a entrada.
+   * Se o servidor não confirmar, a sessão continua na tela com um aviso de erro.
+   */
   logout: () => Promise<void>
+  /** códigos de recuperação em exibição (sobrevivem a releituras de /me) */
+  recoveryCodes: RecoveryCodesView | null
+  /** guarda os códigos recém-gerados: a tela deles fica até `releaseRecoveryCodes` */
+  holdRecoveryCodes: (codes: string[]) => void
+  /** a pessoa confirmou que guardou os códigos: segue para o painel */
+  releaseRecoveryCodes: () => Promise<AuthStatus>
 }
 
 const DEMO_AUTH: AuthApi = {
@@ -212,9 +228,13 @@ const DEMO_AUTH: AuthApi = {
   status: { kind: 'demo' },
   me: null,
   reload: async () => ({ kind: 'demo' }),
+  signedIn: async () => ({ kind: 'demo' }),
   logout: async () => {
     toast.info('Sessão encerrada (demonstração)')
   },
+  recoveryCodes: null,
+  holdRecoveryCodes: () => {},
+  releaseRecoveryCodes: async () => ({ kind: 'demo' }),
 }
 
 const AuthContext = createContext<AuthApi | null>(null)
@@ -239,16 +259,26 @@ const SHELL_KEYS = [
   'config.manutencao',
 ]
 
-function sameStatus(a: AuthStatus, b: AuthStatus) {
-  if (a.kind !== b.kind) return false
-  if ((a.kind === 'step' || a.kind === 'active') && (b.kind === 'step' || b.kind === 'active')) return JSON.stringify(a.me) === JSON.stringify(b.me)
-  if (a.kind === 'login' && b.kind === 'login') return a.reason === b.reason
-  if (a.kind === 'offline' && b.kind === 'offline') return a.message === b.message
-  return true
+/** localStorage do navegador (null em modo privado sem armazenamento). */
+function flagStorage(): FlagStorage | null {
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
 }
 
-function hasSession(s: AuthStatus) {
-  return s.kind === 'active' || s.kind === 'step'
+/** /me, logout e a marca de saída pendente (a lógica fica em auth-state.ts) */
+const SESSION_IO: SessionIo = {
+  getMe: () => api<MeResponse>('GET', '/api/auth/me'),
+  postLogout: () => api<void>('POST', '/api/auth/logout'),
+  get storage() {
+    return flagStorage()
+  },
+}
+
+interface RecoveryHold extends RecoveryCodesView {
+  userId: string
 }
 
 function ApiSessionProvider({ children }: { children: ReactNode }) {
@@ -258,54 +288,83 @@ function ApiSessionProvider({ children }: { children: ReactNode }) {
   const seq = useRef(0)
   const rechecking = useRef(false)
   const started = useRef(false)
+  /** última leitura de /me (de qualquer origem): espaça as conferências ao voltar para a aba */
+  const lastCheck = useRef(Date.now())
+  const [hold, setHoldState] = useState<RecoveryHold | null>(null)
+  const holdRef = useRef<RecoveryHold | null>(null)
 
-  const apply = useCallback((next: AuthStatus): AuthStatus => {
-    const cur = statusRef.current
-    // mesma etapa e mesmos dados: mantém o estado (não reinicia formulários)
-    if (sameStatus(cur, next)) return cur
-    if (next.kind === 'active') {
-      const perms = new Set(next.me.permissions ?? [])
-      prefetchKeys(SHELL_KEYS.filter((k) => {
-        const rule = findKvRule(k)
-        return !!rule && canReadKey(rule, perms)
-      }))
-    }
-    statusRef.current = next
-    setStatus(next)
-    return next
+  const setHold = useCallback((next: RecoveryHold | null) => {
+    holdRef.current = next
+    setHoldState(next)
   }, [])
+
+  const apply = useCallback(
+    (next: AuthStatus): AuthStatus => {
+      const cur = statusRef.current
+      // apaga a memória (outra pessoa, nova etapa de login, outro cargo) antes do prefetch e da renderização
+      const result = transition(cur, next, SHELL_KEYS, { resetStore: (o) => resetDb(o), prefetch: prefetchKeys })
+      if (result === cur) return cur
+      // códigos de recuperação são da pessoa que os gerou: somem ao sair ou trocar de pessoa
+      const h = holdRef.current
+      if (h && (!hasSession(next) || next.me.user.id !== h.userId)) setHold(null)
+      statusRef.current = next
+      setStatus(next)
+      return next
+    },
+    [setHold],
+  )
 
   const reload = useCallback(async (): Promise<AuthStatus> => {
     const my = ++seq.current
-    try {
-      const me = await api<MeResponse>('GET', '/api/auth/me')
-      if (my !== seq.current) return statusRef.current
-      return apply(me.stage === 'active' ? { kind: 'active', me } : { kind: 'step', me })
-    } catch (e) {
-      if (my !== seq.current) return statusRef.current
-      const err = e instanceof ApiError ? e : null
-      const cur = statusRef.current
-      if (err?.status === 401) {
-        if (hasSession(cur)) toast.warning('Sua sessão expirou', { description: 'Entre de novo para continuar de onde parou.', duration: 6000 })
-        return apply({ kind: 'login', reason: hasSession(cur) ? 'expired' : cur.kind === 'login' ? cur.reason : undefined })
-      }
-      if (err?.status === 403 && err.code === 'ip_nao_autorizado') return apply({ kind: 'login', reason: 'ip' })
-      // falha de rede com a sessão aberta: segue como está (a próxima chamada tenta de novo)
-      if (hasSession(cur)) return cur
-      return apply({ kind: 'offline', message: err?.message ?? 'Não foi possível falar com o servidor.' })
-    }
+    lastCheck.current = Date.now()
+    const r = await resolveSession(() => statusRef.current, SESSION_IO)
+    if (my !== seq.current) return statusRef.current
+    if (r.loggedOut) toast.clear()
+    if (r.expired) toast.warning('Sua sessão expirou', { description: 'Entre de novo para continuar de onde parou.', duration: 6000 })
+    return apply(r.next)
   }, [apply])
 
+  const signedIn = useCallback(() => {
+    // o login novo encerrou no servidor a sessão anterior deste navegador (inclusive uma saída pendente)
+    setLogoutPending(SESSION_IO.storage, false)
+    return reload()
+  }, [reload])
+
   const logout = useCallback(async () => {
-    seq.current++ // descarta leituras de /me em andamento
-    try {
-      await api<void>('POST', '/api/auth/logout')
-    } catch {
-      /* sai mesmo assim: o cookie expira sozinho */
+    const attempt = async (): Promise<void> => {
+      seq.current++ // descarta leituras de /me em andamento
+      const r = await requestLogout(SESSION_IO)
+      if (r.ended) {
+        toast.clear()
+        apply({ kind: 'login', reason: 'logout' })
+        return
+      }
+      // o cookie é httpOnly: só o servidor encerra a sessão. A tela não diz que saiu; a próxima
+      // leitura de /me (nesta ou em outra aba, ou ao reabrir o painel) tenta sair de novo.
+      toast.error('Não foi possível sair', {
+        description: logoutFailureText(r.error),
+        action: { label: 'Tentar de novo', onClick: () => void attempt() },
+        duration: 12_000,
+      })
     }
-    toast.clear()
-    apply({ kind: 'login', reason: 'logout' })
+    await attempt()
   }, [apply])
+
+  const holdRecoveryCodes = useCallback(
+    (codes: string[]) => {
+      const cur = statusRef.current
+      if (!hasSession(cur)) return
+      setHold({ userId: cur.me.user.id, email: cur.me.user.email, codes })
+    },
+    [setHold],
+  )
+
+  const releaseRecoveryCodes = useCallback(async () => {
+    // relê antes de soltar: a tela dos códigos só sai quando a próxima já está pronta
+    const next = await reload()
+    setHold(null)
+    return next
+  }, [reload, setHold])
 
   // abre a sessão (uma vez, mesmo com StrictMode)
   useEffect(() => {
@@ -328,13 +387,19 @@ function ApiSessionProvider({ children }: { children: ReactNode }) {
     }
   }, [reload])
 
-  // voltou para a aba: confere a sessão (pode ter caído, ou o cargo mudou), no máximo a cada 30 s
+  // voltou para a aba: confere a sessão ativa (pode ter caído, ou o cargo mudou), no máximo a cada 30 s.
+  // Nunca durante uma etapa do login nem com os códigos de recuperação na tela.
   useEffect(() => {
-    let last = Date.now()
     const onVisible = () => {
-      if (document.visibilityState !== 'visible' || !hasSession(statusRef.current) || rechecking.current) return
-      if (Date.now() - last < 30_000) return
-      last = Date.now()
+      const due = focusRecheckDue({
+        status: statusRef.current,
+        visible: document.visibilityState === 'visible',
+        busy: rechecking.current,
+        held: holdRef.current !== null,
+        lastCheck: lastCheck.current,
+        now: Date.now(),
+      })
+      if (!due) return
       rechecking.current = true
       void reload().finally(() => {
         rechecking.current = false
@@ -348,23 +413,30 @@ function ApiSessionProvider({ children }: { children: ReactNode }) {
     }
   }, [reload])
 
-  // saiu da sessão (ou trocou de pessoa): nada da sessão anterior fica em memória
-  const prev = useRef<AuthStatus>(status)
-  useEffect(() => {
-    const was = prev.current
-    prev.current = status
-    const leftSession = hasSession(was) && !hasSession(status)
-    const otherUser = was.kind === 'active' && status.kind === 'active' && was.me.user.id !== status.me.user.id
-    if (leftSession || otherUser) resetDb()
-  }, [status])
-
   const value = useMemo<AuthApi>(
-    () => ({ enabled: true, status, me: hasSession(status) ? (status as { me: MeResponse }).me : null, reload, logout }),
-    [status, reload, logout],
+    () => ({
+      enabled: true,
+      status,
+      me: hasSession(status) ? status.me : null,
+      reload,
+      signedIn,
+      logout,
+      recoveryCodes: hold ? { email: hold.email, codes: hold.codes } : null,
+      holdRecoveryCodes,
+      releaseRecoveryCodes,
+    }),
+    [status, reload, signedIn, logout, hold, holdRecoveryCodes, releaseRecoveryCodes],
   )
 
   let body: ReactNode
-  if (status.kind === 'active') {
+  if (hold || status.kind === 'login' || status.kind === 'step') {
+    // códigos de recuperação na tela: ficam até a pessoa confirmar, qualquer que seja a etapa em /me
+    body = (
+      <Suspense fallback={<SplashScreen />}>
+        <AuthFlow />
+      </Suspense>
+    )
+  } else if (status.kind === 'active') {
     body = (
       <Suspense fallback={<SplashScreen label="Carregando seus dados" />}>
         <ApiActiveSession me={status.me}>{children}</ApiActiveSession>
@@ -372,12 +444,6 @@ function ApiSessionProvider({ children }: { children: ReactNode }) {
     )
   } else if (status.kind === 'offline') {
     body = <OfflineScreen message={status.message} onRetry={reload} />
-  } else if (status.kind === 'login' || status.kind === 'step') {
-    body = (
-      <Suspense fallback={<SplashScreen />}>
-        <AuthFlow />
-      </Suspense>
-    )
   } else {
     body = <SplashScreen />
   }

@@ -1,7 +1,8 @@
 // Endereços de destino dos webhooks: validação ao gravar e proteção contra SSRF
-// no envio (em produção: só https e só hosts públicos).
+// no envio (modo estrito: só https e só hosts públicos, conferidos na própria conexão).
+import dns from 'node:dns'
 import { lookup } from 'node:dns/promises'
-import { isIP } from 'node:net'
+import { isIP, type LookupFunction } from 'node:net'
 
 export const WEBHOOK_EVENTS = ['saque.solicitado', 'saque.pago', 'saque.rejeitado', 'saque.expirado', 'deposito.primeiro'] as const
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number]
@@ -18,9 +19,20 @@ export function isWebhookEvent(v: unknown): v is WebhookEvent {
   return typeof v === 'string' && (WEBHOOK_EVENTS as readonly string[]).includes(v)
 }
 
+/**
+ * Proteção estrita contra SSRF (só https, só host público, DNS conferido na conexão).
+ * Fica LIGADA por padrão: não depende de NODE_ENV=production (que pode faltar num
+ * `npm start` fora do Docker). Só desliga nos testes automatizados (NODE_ENV=test) ou
+ * com a liberação explícita WEBHOOK_ALLOW_LOCAL_TARGETS=true (desenvolvimento local).
+ */
+export function webhookStrictMode(config: { NODE_ENV: string; WEBHOOK_ALLOW_LOCAL_TARGETS?: boolean | string }): boolean {
+  const allowLocal = config.WEBHOOK_ALLOW_LOCAL_TARGETS === true || config.WEBHOOK_ALLOW_LOCAL_TARGETS === 'true'
+  return !(config.NODE_ENV === 'test' || allowLocal)
+}
+
 const stripBrackets = (h: string) => h.replace(/^\[|\]$/g, '')
 
-/** localhost e 127.0.0.1 (aceitos via http fora de produção, para testes). */
+/** localhost e 127.0.0.1 (aceitos via http fora do modo estrito, para testes). */
 export function isLoopbackTestHost(hostname: string): boolean {
   const h = stripBrackets(hostname).toLowerCase()
   return h === 'localhost' || h === '127.0.0.1'
@@ -83,10 +95,10 @@ export function isPrivateHostname(hostname: string): boolean {
 
 /**
  * Valida o endereço do destino. Retorna a mensagem do problema ou null.
- * Produção: só https e host público. Fora de produção: https em qualquer host,
- * ou http apenas para localhost/127.0.0.1 (testes).
+ * Modo estrito (padrão, ver `webhookStrictMode`): só https e host público. Fora dele:
+ * https em qualquer host, ou http apenas para localhost/127.0.0.1 (testes).
  */
-export function webhookUrlProblem(raw: string, production: boolean): string | null {
+export function webhookUrlProblem(raw: string, strict: boolean): string | null {
   const v = (raw ?? '').trim()
   if (!v) return 'Informe o endereço do destino.'
   if (v.length > 500) return 'Endereço longo demais (máximo de 500 caracteres).'
@@ -100,32 +112,63 @@ export function webhookUrlProblem(raw: string, production: boolean): string | nu
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'Comece o endereço com https://'
   if (u.username || u.password) return 'Não coloque usuário e senha no endereço. Use a assinatura HMAC.'
   if (u.hash) return 'O endereço não pode ter âncora (#).'
-  if (production) {
+  if (strict) {
     if (u.protocol !== 'https:') return 'Use https://. Envio por http deixa os dados do jogador expostos na rede.'
     if (isPrivateHostname(u.hostname)) return 'Use um endereço público. Localhost e rede interna não recebem envios.'
   } else if (u.protocol === 'http:' && !isLoopbackTestHost(u.hostname)) {
-    return 'Use https://. http só é aceito para localhost/127.0.0.1 fora de produção.'
+    return 'Use https://. http só é aceito para localhost/127.0.0.1 em ambiente de teste.'
   }
   return null
 }
 
+export const INTERNAL_TARGET_MESSAGE = 'O endereço do destino aponta para rede interna; envio bloqueado.'
+
 /**
- * Checagem no momento do envio. Em produção também resolve o DNS e recusa se o
- * nome apontar para rede interna (evita SSRF por DNS).
+ * Checagem antes do envio. No modo estrito também resolve o DNS e recusa se o
+ * nome apontar para rede interna. Só dá a mensagem clara cedo: quem garante que a
+ * conexão não vai para rede interna é o `safeLookup` usado pela própria conexão
+ * (o DNS pode mudar entre esta checagem e o envio).
  */
-export async function webhookTargetProblem(raw: string, production: boolean): Promise<string | null> {
-  const problem = webhookUrlProblem(raw, production)
-  if (problem || !production) return problem
+export async function webhookTargetProblem(raw: string, strict: boolean): Promise<string | null> {
+  const problem = webhookUrlProblem(raw, strict)
+  if (problem || !strict) return problem
   const host = stripBrackets(new URL(raw.trim()).hostname)
   if (isIP(host)) return null // já conferido acima
   try {
     const addrs = await lookup(host, { all: true, verbatim: true })
     if (!addrs.length) return 'Não foi possível resolver o endereço do destino.'
-    if (addrs.some((a) => isPrivateIp(a.address))) return 'O endereço do destino aponta para rede interna; envio bloqueado.'
+    if (addrs.some((a) => isPrivateIp(a.address))) return INTERNAL_TARGET_MESSAGE
   } catch {
     return 'Não foi possível resolver o endereço do destino.'
   }
   return null
+}
+
+/** Código do erro de `safeLookup` quando o nome resolve para rede interna. */
+export const BLOCKED_PRIVATE_CODE = 'EBLOCKED_PRIVATE'
+
+/**
+ * `lookup` da conexão do envio (net/tls): resolve o nome UMA vez, recusa se qualquer
+ * endereço da resposta for interno e entrega à conexão exatamente os endereços
+ * conferidos. Assim a checagem e a conexão usam o mesmo resultado de DNS (sem
+ * janela para DNS rebinding).
+ */
+export const safeLookup: LookupFunction = (hostname, options, callback) => {
+  // `dns.lookup` lido na hora da chamada (não fixado no import)
+  dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
+    if (err) return callback(err, '', 0)
+    const list = Array.isArray(addresses) ? addresses : []
+    if (!list.length) {
+      const e: NodeJS.ErrnoException = Object.assign(new Error(`Sem endereço para ${hostname}`), { code: 'ENOTFOUND' })
+      return callback(e, '', 0)
+    }
+    if (list.some((a) => isPrivateIp(a.address))) {
+      const e: NodeJS.ErrnoException = Object.assign(new Error(`${hostname} resolve para rede interna`), { code: BLOCKED_PRIVATE_CODE })
+      return callback(e, '', 0)
+    }
+    if (options.all) return callback(null, list)
+    return callback(null, list[0].address, list[0].family)
+  })
 }
 
 /** Só o host (para resumos de auditoria sem expor tokens do caminho). */

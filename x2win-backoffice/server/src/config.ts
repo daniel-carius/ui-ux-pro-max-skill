@@ -1,7 +1,7 @@
 // Configuração lida do ambiente, validada na subida.
 import { z } from 'zod'
 
-const schema = z.object({
+const fields = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3333),
   HOST: z.string().default('0.0.0.0'),
@@ -11,10 +11,9 @@ const schema = z.object({
     .string()
     .refine((v) => Buffer.from(v, 'base64').length === 32, 'ENCRYPTION_KEY precisa ter 32 bytes em base64 (openssl rand -base64 32)'),
   CORS_ORIGIN: z.string().default(''),
-  COOKIE_SECURE: z
-    .enum(['true', 'false'])
-    .default('false')
-    .transform((v) => v === 'true'),
+  /** cookie de sessão só por HTTPS. Sem valor: true em produção, false fora dela. */
+  COOKIE_SECURE: z.enum(['true', 'false']).optional(),
+  /** proxies confiáveis à frente da API. Com COOKIE_SECURE, a API só atende o que o proxy diz ter chegado por HTTPS. */
   TRUST_PROXY: z.coerce.number().int().min(0).default(0),
   ADMIN_NAME: z.string().default('Superadmin'),
   ADMIN_EMAIL: z.string().default(''),
@@ -28,6 +27,19 @@ const schema = z.object({
     .enum(['on', 'off'])
     .default('on'),
 })
+
+const schema = fields
+  .superRefine((c, ctx) => {
+    // em produção o token de sessão nunca trafega sem TLS: sem COOKIE_SECURE=true a API não sobe
+    if (c.NODE_ENV === 'production' && c.COOKIE_SECURE === 'false') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['COOKIE_SECURE'],
+        message: 'em produção o cookie de sessão precisa ser Secure: sirva o painel por HTTPS e use COOKIE_SECURE=true',
+      })
+    }
+  })
+  .transform((c) => ({ ...c, COOKIE_SECURE: c.COOKIE_SECURE === undefined ? c.NODE_ENV === 'production' : c.COOKIE_SECURE === 'true' }))
 
 export type Config = z.infer<typeof schema>
 

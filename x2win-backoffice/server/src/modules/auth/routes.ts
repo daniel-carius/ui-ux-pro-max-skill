@@ -1,5 +1,5 @@
 // Login, 2FA, troca de senha, sessão atual e saída. Prefixo /api/auth.
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import type {
   LoginResponse,
@@ -10,7 +10,7 @@ import type {
 import { SECURITY } from '../../config'
 import { Errors } from '../../errors'
 import { hashPassword, passwordProblem, sha256, verifyPassword } from '../../lib/crypto'
-import { newRecoveryCodes, newTotpSecret, otpauthUrl, verifyTotp } from '../../lib/totp'
+import { newTotpSecret, otpauthUrl, verifyTotp } from '../../lib/totp'
 import { writeAudit } from '../../services/audit'
 import {
   clearSessionCookie,
@@ -20,20 +20,26 @@ import {
   revokeUserSessions,
   setSessionCookie,
 } from '../../services/sessions'
-import type { SessionStage } from '../../types'
+import type { AuthContext, SessionStage } from '../../types'
 import {
   AuthErrors,
+  assertNotLocked,
   clearFailures,
   computeStage,
   consumeSecondFactor,
   findUserByEmail,
+  generateRecoveryCodes,
   hashRecoveryCode,
+  loadStageInputs,
   loadUser,
   recordLogin,
   registerFailure,
   requireStage,
+  stageFor,
   toAuthUser,
+  type UserRow,
 } from './service'
+import { ipBucket, loginThrottleFor } from './throttle'
 
 /** 10 por minuto por IP (a chave do limite é o IP do cliente). */
 const TEN_PER_MINUTE = { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }
@@ -54,34 +60,90 @@ const passwordBody = z.object({
   newPassword: z.string('Informe a nova senha.').max(256, 'Senha longa demais.'),
 })
 
+/** /2fa/setup: com sessão ativa a senha atual é obrigatória (na etapa enroll ela acabou de ser digitada). */
+const setupBody = z
+  .object({ currentPassword: z.string('Senha atual inválida.').max(256, 'Senha longa demais.').optional() })
+  .optional()
+
+/** No máximo 1 aviso de bloqueio de origem por pessoa a cada período de bloqueio (sem inundar a auditoria). */
+const SOURCE_LOCK_AUDIT_MS = SECURITY.lockMinutes * 60_000
+
 export default async function routes(app: FastifyInstance) {
+  const throttle = loginThrottleFor(app.db, app.config.APP_SECRET)
+  const recoveryKeys = { cipher: app.cipher, serverSecret: app.config.APP_SECRET }
+  const lastSourceLockAudit = new Map<string, number>()
+
   // respostas com sessão, segredo do 2FA e códigos de recuperação nunca vão para cache
   app.addHook('onSend', async (_req, reply, payload) => {
     reply.header('cache-control', 'no-store')
     return payload
   })
 
+  /** Registra (sem atrasar a resposta) que uma origem foi bloqueada para uma pessoa ativa. */
+  function auditSourceLock(user: UserRow, ip: string) {
+    const now = Date.now()
+    const last = lastSourceLockAudit.get(user.id)
+    if (last !== undefined && now - last < SOURCE_LOCK_AUDIT_MS) return
+    lastSourceLockAudit.set(user.id, now)
+    if (lastSourceLockAudit.size > 10_000) lastSourceLockAudit.clear()
+    void writeAudit(
+      app.db,
+      { user: toAuthUser(user), ip },
+      {
+        action: 'bloquear',
+        entity: 'Acesso ao painel',
+        summary:
+          `Login bloqueado por ${SECURITY.lockMinutes} min para a origem ${ipBucket(ip)} após ${SECURITY.maxFailedLogins} ` +
+          'senhas erradas seguidas (as outras origens continuam entrando)',
+      },
+    ).catch((err) => app.log.error({ err }, 'falha ao auditar bloqueio de origem no login'))
+  }
+
+  /**
+   * Senha atual exigida de uma sessão ativa (troca de senha, cadastro do 2FA). O erro conta para o
+   * bloqueio da conta; o erro que bloqueia também encerra esta sessão (um cookie roubado não vira um
+   * oráculo de senha).
+   */
+  async function confirmCurrentPassword(req: FastifyRequest, auth: AuthContext, user: UserRow, currentPassword: string | undefined, reason: string) {
+    if (!currentPassword) throw Errors.invalid('Informe a senha atual.')
+    if (user.locked && user.locked_until) throw AuthErrors.locked(user.locked_until)
+    if (await verifyPassword(currentPassword, user.password_hash)) return
+    const lock = await registerFailure(app.db, user, req.clientIp, reason)
+    if (lock) {
+      await revokeSession(app.db, auth.sessionId)
+      throw lock
+    }
+    throw AuthErrors.badCurrentPassword()
+  }
+
   // ---------- POST /login ----------
   app.post('/login', TEN_PER_MINUTE, async (req, reply) => {
     const body = loginBody.parse(req.body ?? {})
-    const user = await findUserByEmail(app.db, body.email.toLowerCase())
+    const email = body.email.toLowerCase()
+    const user = await findUserByEmail(app.db, email)
     const usable = !!user && user.status === 'ativo'
-    if (usable && user.locked && user.locked_until) throw AuthErrors.locked(user.locked_until)
 
-    // sempre calcula o hash (mesmo sem pessoa) para o tempo de resposta não revelar quem existe
+    // sempre calcula o hash (mesmo sem pessoa e com a origem bloqueada): o tempo de resposta não revela
+    // quem existe nem o estado do bloqueio
     const ok = await verifyPassword(body.password, user?.password_hash ?? null)
-    if (!usable || !ok) {
-      if (usable) {
-        const lock = await registerFailure(app.db, user, req.clientIp)
-        if (lock) throw lock
-      }
-      throw AuthErrors.badCredentials()
+
+    // freio por (e-mail, origem), decidido depois do hash e sem await entre ler e gravar
+    const outcome = throttle.settle(throttle.key(email, req.clientIp), usable && ok)
+    if (outcome.kind === 'locked') {
+      if (outcome.justLocked && usable) auditSourceLock(user, req.clientIp)
+      throw AuthErrors.locked(outcome.until)
     }
+    if (outcome.kind === 'failed' || !usable) throw AuthErrors.badCredentials()
 
     const previous = req.cookies[SECURITY.sessionCookie]
     const { stage, token } = await app.db.tx(async (db) => {
-      await clearFailures(db, user.id)
-      const stage = await computeStage(db, user.id)
+      // conta bloqueada por erros depois da senha (código do 2FA, senha atual): só quem acertou a senha vê
+      await assertNotLocked(db, user.id)
+      const inputs = await loadStageInputs(db, user.id)
+      const stage = stageFor(inputs)
+      // com 2FA a contagem só zera quando o código é aceito (/2fa/verify): acertar só a senha não
+      // devolve as tentativas do código
+      if (!inputs.totp_enabled) await clearFailures(db, user.id)
       // mesmo navegador: a sessão anterior deixa de valer
       if (previous) await revokeSession(db, sha256(previous))
       const s = await createSession(db, user.id, stage, { ip: req.clientIp, userAgent: req.headers['user-agent'] })
@@ -102,7 +164,9 @@ export default async function routes(app: FastifyInstance) {
     if (user.locked && user.locked_until) throw AuthErrors.locked(user.locked_until)
 
     const accepted = await app.db.tx(async (db) => {
-      const kind = await consumeSecondFactor(db, app.cipher, user, code)
+      // de novo, com a linha travada: um erro de outra requisição pode ter bloqueado a conta agora
+      await assertNotLocked(db, user.id)
+      const kind = await consumeSecondFactor(db, recoveryKeys, user, code)
       if (!kind) return null
       await clearFailures(db, user.id)
       await promoteSession(db, auth.sessionId, 'active')
@@ -111,7 +175,7 @@ export default async function routes(app: FastifyInstance) {
     })
     if (!accepted) {
       // fora da transação: a tentativa errada precisa ficar registrada
-      const lock = await registerFailure(app.db, user, req.clientIp)
+      const lock = await registerFailure(app.db, user, req.clientIp, 'Código do 2FA incorreto depois da senha correta')
       if (lock) throw lock
       throw AuthErrors.badCode()
     }
@@ -120,27 +184,41 @@ export default async function routes(app: FastifyInstance) {
   })
 
   // ---------- POST /2fa/setup ----------
-  app.post('/2fa/setup', async (req) => {
+  app.post('/2fa/setup', TEN_PER_MINUTE, async (req) => {
     const auth = requireStage(req, 'enroll', 'active')
+    const body = setupBody.parse(req.body ?? undefined)
+    const user = await loadUser(app.db, auth.user.id)
+    if (!user) throw Errors.unauthenticated()
+    if (user.totp_enabled) throw AuthErrors.alreadyConfigured()
+    // sessão ativa: reautenticação antes de ligar um autenticador (um cookie roubado não cadastra o
+    // aplicativo de outra pessoa nem leva os códigos de recuperação)
+    if (auth.stage === 'active') {
+      await confirmCurrentPassword(req, auth, user, body?.currentPassword, 'Senha atual incorreta ao cadastrar o 2FA')
+    }
     const secret = newTotpSecret()
-    const row = await app.db.one(
-      `update users set totp_pending_enc = $2, updated_at = now()
-        where id = $1 and totp_enabled = false
-        returning id`,
-      [auth.user.id, app.cipher.encrypt(secret)],
-    )
+    const row = await app.db.tx(async (db) => {
+      await assertNotLocked(db, user.id)
+      if (auth.stage === 'active') await clearFailures(db, user.id)
+      return db.one(
+        `update users set totp_pending_enc = $2, updated_at = now()
+          where id = $1 and totp_enabled = false
+          returning id`,
+        [user.id, app.cipher.encrypt(secret)],
+      )
+    })
     if (!row) throw AuthErrors.alreadyConfigured()
     const res: TwoFactorSetupResponse = { secret, otpauthUrl: otpauthUrl(secret, auth.user.email) }
     return res
   })
 
   // ---------- POST /2fa/enable ----------
-  app.post('/2fa/enable', async (req) => {
+  app.post('/2fa/enable', TEN_PER_MINUTE, async (req) => {
     const auth = requireStage(req, 'enroll', 'active')
     const { code } = codeBody.parse(req.body ?? {})
     const user = await loadUser(app.db, auth.user.id)
     if (!user) throw Errors.unauthenticated()
     if (user.totp_enabled) throw AuthErrors.alreadyConfigured()
+    if (user.locked && user.locked_until) throw AuthErrors.locked(user.locked_until)
     if (!user.totp_pending_enc) throw Errors.invalid('Gere o QR code do 2FA antes de confirmar o código.')
     let secret: string
     try {
@@ -149,11 +227,20 @@ export default async function routes(app: FastifyInstance) {
       throw Errors.invalid('Não foi possível ler o QR code gerado. Gere um novo e tente de novo.')
     }
     const counter = verifyTotp(secret, code)
-    if (counter === null) throw AuthErrors.badCode()
+    if (counter === null) {
+      // código errado conta para o bloqueio (impede adivinhar o código do segredo pendente)
+      const lock = await registerFailure(app.db, user, req.clientIp, 'Código incorreto ao confirmar o cadastro do 2FA')
+      if (lock) {
+        if (auth.stage === 'active') await revokeSession(app.db, auth.sessionId)
+        throw lock
+      }
+      throw AuthErrors.badCode()
+    }
 
-    const recoveryCodes = newRecoveryCodes(RECOVERY_CODES)
+    const recoveryCodes = generateRecoveryCodes(RECOVERY_CODES)
     const stage: SessionStage = auth.stage === 'enroll' ? 'active' : auth.stage
     await app.db.tx(async (db) => {
+      await assertNotLocked(db, user.id)
       const row = await db.one(
         `update users set
             totp_secret_enc = totp_pending_enc,
@@ -164,7 +251,7 @@ export default async function routes(app: FastifyInstance) {
             updated_at = now()
           where id = $1 and totp_enabled = false and totp_pending_enc = $4
           returning id`,
-        [user.id, counter, recoveryCodes.map(hashRecoveryCode), user.totp_pending_enc],
+        [user.id, counter, recoveryCodes.map((c) => hashRecoveryCode(app.config.APP_SECRET, user.id, c)), user.totp_pending_enc],
       )
       if (!row) {
         // outra requisição ligou o 2FA ou gerou outro QR code no meio do caminho
@@ -172,11 +259,12 @@ export default async function routes(app: FastifyInstance) {
         if (now?.totp_enabled) throw AuthErrors.alreadyConfigured()
         throw Errors.invalid('O QR code mudou. Leia o código mais recente e tente de novo.')
       }
-      await writeAudit(
-        db,
-        { user: auth.user, ip: req.clientIp },
-        { action: 'ligar', entity: '2FA', summary: `Ligou o 2FA com aplicativo autenticador e gerou ${RECOVERY_CODES} códigos de recuperação` },
-      )
+      await clearFailures(db, user.id)
+      // o novo fator vale a partir de agora: as outras sessões (abertas sem ele) caem
+      const revoked = await revokeUserSessions(db, user.id, auth.sessionId)
+      const parts = [`Ligou o 2FA com aplicativo autenticador e gerou ${RECOVERY_CODES} códigos de recuperação`]
+      if (revoked > 0) parts.push(`${revoked} ${revoked === 1 ? 'outra sessão encerrada' : 'outras sessões encerradas'}`)
+      await writeAudit(db, { user: auth.user, ip: req.clientIp }, { action: 'ligar', entity: '2FA', summary: parts.join('; ') })
       if (auth.stage === 'enroll') {
         await promoteSession(db, auth.sessionId, 'active')
         await recordLogin(db, auth.user, req.clientIp, 'Login com 2FA')
@@ -192,16 +280,18 @@ export default async function routes(app: FastifyInstance) {
     const body = passwordBody.parse(req.body ?? {})
     const user = await loadUser(app.db, auth.user.id)
     if (!user) throw Errors.unauthenticated()
-    if (auth.stage === 'active') {
-      if (!body.currentPassword) throw Errors.invalid('Informe a senha atual.')
-      if (!(await verifyPassword(body.currentPassword, user.password_hash))) throw AuthErrors.badCurrentPassword()
-    }
+    // com sessão ativa a senha atual é obrigatória e o erro conta para o bloqueio da conta
+    if (auth.stage === 'active') await confirmCurrentPassword(req, auth, user, body.currentPassword, 'Senha atual incorreta ao trocar a senha')
     const problem = passwordProblem(body.newPassword, SECURITY.passwordMinLength)
     if (problem) throw Errors.invalid(problem)
     if (await verifyPassword(body.newPassword, user.password_hash)) throw Errors.invalid('A nova senha precisa ser diferente da atual.')
 
     const hash = await hashPassword(body.newPassword)
     const stage = await app.db.tx(async (db) => {
+      if (auth.stage === 'active') {
+        await assertNotLocked(db, user.id)
+        await clearFailures(db, user.id)
+      }
       await db.query(
         `update users set password_hash = $2, must_change_password = false, updated_at = now() where id = $1`,
         [user.id, hash],

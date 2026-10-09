@@ -1,11 +1,11 @@
 // Regras do login: etapa da sessão, bloqueio por tentativas erradas, segundo
 // fator (TOTP e códigos de recuperação) e registro do acesso completo.
+import { randomBytes } from 'node:crypto'
 import type { FastifyRequest } from 'fastify'
 import { SECURITY } from '../../config'
 import type { Db } from '../../db'
 import { AppError, Errors } from '../../errors'
-import type { Cipher } from '../../lib/crypto'
-import { sha256 } from '../../lib/crypto'
+import { hmacSha256, type Cipher } from '../../lib/crypto'
 import { verifyTotp } from '../../lib/totp'
 import { writeAudit } from '../../services/audit'
 import type { AuthContext, AuthUser, SessionStage } from '../../types'
@@ -101,8 +101,8 @@ export function stageFor(s: StageInputs): SessionStage {
   return 'active'
 }
 
-/** Calcula a etapa com o estado atual da pessoa, do cargo e da segurança do painel. */
-export async function computeStage(db: Db, userId: string): Promise<SessionStage> {
+/** Estado atual da pessoa, do cargo e da segurança do painel que decide a etapa. */
+export async function loadStageInputs(db: Db, userId: string): Promise<StageInputs> {
   const r = await db.one<StageInputs>(
     `select u.must_change_password, u.totp_enabled, r.require_2fa,
             coalesce((select enforce_2fa_all from panel_security where id = 1), false) as enforce_all
@@ -112,45 +112,88 @@ export async function computeStage(db: Db, userId: string): Promise<SessionStage
     [userId],
   )
   if (!r) throw Errors.unauthenticated()
-  return stageFor(r)
+  return r
 }
 
-// ---------- Bloqueio por tentativas erradas ----------
+/** Calcula a etapa com o estado atual da pessoa, do cargo e da segurança do painel. */
+export async function computeStage(db: Db, userId: string): Promise<SessionStage> {
+  return stageFor(await loadStageInputs(db, userId))
+}
+
+// ---------- Bloqueio da conta (erros depois da senha) ----------
+//
+// users.failed_logins / locked_until contam só erros de quem JÁ passou da senha ou tem uma sessão:
+// código do 2FA errado (/2fa/verify e /2fa/enable) e senha atual errada com sessão ativa (/password e
+// /2fa/setup). Senha errada no /login não entra aqui: vai para o freio por (e-mail, origem) de
+// throttle.ts, que responde igual exista ou não a pessoa.
+// A contagem só volta a zero com um acesso completo (2FA aceito, ou senha certa de quem não tem 2FA):
+// acertar só a senha de quem tem 2FA não zera os erros do código.
 
 /**
- * Conta uma tentativa errada (senha ou código). Ao chegar em
- * SECURITY.maxFailedLogins bloqueia por SECURITY.lockMinutes e zera a contagem.
- * Devolve o erro 423 quando esta tentativa causou o bloqueio; senão null.
+ * Conta um erro. Ao chegar em SECURITY.maxFailedLogins bloqueia por SECURITY.lockMinutes; durante o
+ * bloqueio os erros seguem somando sem estender o prazo; depois do prazo a contagem recomeça em 1.
+ * Todo erro vai para a auditoria (quem erra aqui já sabe a senha ou tem uma sessão): 'recusar' com o
+ * motivo, ou 'bloquear' na tentativa que bloqueia.
+ * Devolve o erro 423 se a conta está bloqueada depois deste erro; senão null.
  * Não rode dentro de uma transação que vai ser desfeita (a contagem precisa ficar).
  */
-export async function registerFailure(db: Db, user: UserRow, ip: string): Promise<AppError | null> {
-  const r = await db.one<{ locked_until: string | null; locked: boolean }>(
-    `update users set
-        failed_logins = case when failed_logins + 1 >= $2 then 0 else failed_logins + 1 end,
-        locked_until = case when failed_logins + 1 >= $2 then now() + ($3 || ' minutes')::interval else locked_until end,
+export async function registerFailure(db: Db, user: UserRow, ip: string, reason: string): Promise<AppError | null> {
+  const r = await db.one<{ failed_logins: number; locked_until: string | null; locked: boolean; was_locked: boolean }>(
+    `with prev as (
+       select id, coalesce(locked_until > now(), false) as was_locked from users where id = $1 for update
+     )
+     update users u set
+        failed_logins = case when u.locked_until is not null and u.locked_until <= now() then 1 else u.failed_logins + 1 end,
+        locked_until = case
+          when u.locked_until > now() then u.locked_until
+          when (case when u.locked_until is not null then 1 else u.failed_logins + 1 end) >= $2
+            then now() + ($3 || ' minutes')::interval
+          else null end,
         updated_at = now()
-      where id = $1
-      returning locked_until, (locked_until is not null and locked_until > now()) as locked`,
+       from prev
+      where u.id = prev.id
+      returning u.failed_logins, u.locked_until, coalesce(u.locked_until > now(), false) as locked, prev.was_locked`,
     [user.id, SECURITY.maxFailedLogins, String(SECURITY.lockMinutes)],
   )
-  if (!r?.locked || !r.locked_until) return null
+  if (!r) return null
+  const justLocked = r.locked && !r.was_locked
   await writeAudit(
     db,
     { user: toAuthUser(user), ip },
-    {
-      action: 'bloquear',
-      entity: 'Acesso ao painel',
-      summary: `Acesso bloqueado por ${SECURITY.lockMinutes} min após ${SECURITY.maxFailedLogins} tentativas erradas`,
-    },
+    justLocked
+      ? {
+          action: 'bloquear',
+          entity: 'Acesso ao painel',
+          summary: `Acesso bloqueado por ${SECURITY.lockMinutes} min após ${SECURITY.maxFailedLogins} tentativas erradas seguidas (${reason})`,
+        }
+      : {
+          action: 'recusar',
+          entity: 'Acesso ao painel',
+          summary: `${reason} (${r.locked ? 'acesso já bloqueado' : `tentativa ${r.failed_logins} de ${SECURITY.maxFailedLogins}`})`,
+        },
   )
-  return AuthErrors.locked(r.locked_until)
+  return r.locked && r.locked_until ? AuthErrors.locked(r.locked_until) : null
 }
 
-/** Acerto: zera a contagem de erros e o bloqueio vencido. */
+/**
+ * Dentro da transação que concede o acesso: trava a linha da pessoa e recusa se a conta está bloqueada.
+ * Um erro registrado durante a conferência lenta (scrypt/TOTP) de outra requisição é visto aqui, então
+ * um acerto não passa nem limpa um bloqueio que acabou de ser aplicado.
+ */
+export async function assertNotLocked(db: Db, userId: string): Promise<void> {
+  const r = await db.one<{ locked_until: string | null; locked: boolean }>(
+    `select locked_until, coalesce(locked_until > now(), false) as locked from users where id = $1 for update`,
+    [userId],
+  )
+  if (r?.locked && r.locked_until) throw AuthErrors.locked(r.locked_until)
+}
+
+/** Acesso completo: zera a contagem de erros e o bloqueio vencido. */
 export async function clearFailures(db: Db, userId: string) {
   await db.query(
     `update users set failed_logins = 0, locked_until = null
-      where id = $1 and (failed_logins <> 0 or locked_until is not null)`,
+      where id = $1 and (failed_logins <> 0 or locked_until is not null)
+        and (locked_until is null or locked_until <= now())`,
     [userId],
   )
 }
@@ -165,16 +208,43 @@ export async function recordLogin(db: Db, user: AuthUser, ip: string, summary: s
 
 // ---------- Segundo fator ----------
 
-const RECOVERY_RE = /^([0-9A-F]{5})-?([0-9A-F]{5})$/
+// Códigos de recuperação: 20 caracteres Crockford base32 (sem I, L, O, U) = 100 bits cada, em grupos
+// de 5 ("7K3QF-2M9XD-HV0TC-8BN4R"). Busca exaustiva fora de alcance mesmo com o hash vazado.
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+const RECOVERY_CHARS = 20
+export const RECOVERY_CODE_BITS = RECOVERY_CHARS * 5
+const RECOVERY_RE = /^[0-9A-HJKMNP-TV-Z]{20}$/
 
-/** "abcde-12345", "ABCDE12345" ou com espaços → "ABCDE-12345"; formato errado → null. */
-export function normalizeRecoveryCode(input: string): string | null {
-  const m = input.replace(/\s+/g, '').toUpperCase().match(RECOVERY_RE)
-  return m ? `${m[1]}-${m[2]}` : null
+const groupsOf5 = (s: string) => s.match(/.{5}/g)!.join('-')
+
+/** Códigos de recuperação de uso único (mostrados uma vez). */
+export function generateRecoveryCodes(count = 8): string[] {
+  return Array.from({ length: count }, () => {
+    // 1 byte por caractere; 256 é múltiplo de 32, então "& 31" não enviesa
+    const bytes = randomBytes(RECOVERY_CHARS)
+    let s = ''
+    for (const b of bytes) s += CROCKFORD[b & 31]
+    return groupsOf5(s)
+  })
 }
 
-export function hashRecoveryCode(code: string): string {
-  return sha256(code)
+/**
+ * Aceita minúsculas, espaços e hífens em qualquer lugar e as trocas comuns ao ler do papel
+ * (O→0, I/L→1). Devolve "XXXXX-XXXXX-XXXXX-XXXXX" ou null se o formato não confere.
+ */
+export function normalizeRecoveryCode(input: string): string | null {
+  const clean = input.replace(/[\s-]+/g, '').toUpperCase().replace(/O/g, '0').replace(/[IL]/g, '1')
+  return RECOVERY_RE.test(clean) ? groupsOf5(clean) : null
+}
+
+/**
+ * Hash guardado no banco: HMAC-SHA256 com um segredo do servidor (APP_SECRET, fora do banco) e o id da
+ * pessoa. Sem o segredo, um backup do banco não permite testar códigos; com o id, o mesmo código de
+ * duas pessoas dá hashes diferentes (nenhuma tabela pronta cobre todo mundo).
+ * O prefixo "v2$" separa do formato antigo (sha256 puro de 40 bits), que não é mais aceito.
+ */
+export function hashRecoveryCode(serverSecret: string, userId: string, code: string): string {
+  return `v2$${hmacSha256(serverSecret, `x2w-recovery-code|v2|${userId}|${code}`)}`
 }
 
 /**
@@ -183,14 +253,19 @@ export function hashRecoveryCode(code: string): string {
  *  - código de recuperação: remove o hash (uso único).
  * Devolve o tipo aceito ou null.
  */
-export async function consumeSecondFactor(db: Db, cipher: Cipher, user: UserRow, input: string): Promise<'totp' | 'recovery' | null> {
+export async function consumeSecondFactor(
+  db: Db,
+  keys: { cipher: Cipher; serverSecret: string },
+  user: UserRow,
+  input: string,
+): Promise<'totp' | 'recovery' | null> {
   if (!user.totp_enabled) return null
   const digits = input.replace(/\s+/g, '')
   if (/^\d{6}$/.test(digits)) {
     if (!user.totp_secret_enc) return null
     let secret: string
     try {
-      secret = cipher.decrypt(user.totp_secret_enc)
+      secret = keys.cipher.decrypt(user.totp_secret_enc)
     } catch {
       return null
     }
@@ -210,7 +285,7 @@ export async function consumeSecondFactor(db: Db, cipher: Cipher, user: UserRow,
     `update users set recovery_codes = array_remove(recovery_codes, $2::text)
       where id = $1 and totp_enabled and $2::text = any(recovery_codes)
       returning id`,
-    [user.id, hashRecoveryCode(code)],
+    [user.id, hashRecoveryCode(keys.serverSecret, user.id, code)],
   )
   return row ? 'recovery' : null
 }

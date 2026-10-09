@@ -404,6 +404,7 @@ describe('kv: dados pessoais (rule.pii)', () => {
   let app: FastifyInstance
   let admin: string
   let marketing: string
+  let comissoes: string
   let gerente: string
   const KEY = 'crescimento.afiliados'
   const list = [
@@ -414,6 +415,8 @@ describe('kv: dados pessoais (rule.pii)', () => {
     app = await createTestApp()
     admin = (await loginAs(app, 'administrador')).cookie
     marketing = (await loginAs(app, 'marketing')).cookie
+    await customRole(app, 'comissoes-leitura', ['comissoes.ver'])
+    comissoes = (await loginAs(app, 'comissoes-leitura')).cookie
     await customRole(app, 'gerente-afiliados', ['afiliados-gerentes.ver', 'afiliados-gerentes.editar'])
     gerente = (await loginAs(app, 'gerente-afiliados')).cookie
   })
@@ -430,8 +433,9 @@ describe('kv: dados pessoais (rule.pii)', () => {
     expect((await get(app, admin, KEY)).json().value).toEqual(list)
   })
 
-  it('quem não tem a permissão recebe mascarado', async () => {
-    const r = await get(app, marketing, KEY)
+  it('quem não tem a permissão recebe mascarado; quem não vê nenhuma tela de afiliados não lê', async () => {
+    expect((await get(app, marketing, KEY)).statusCode).toBe(403)
+    const r = await get(app, comissoes, KEY)
     expect(r.statusCode).toBe(200)
     const [a1, a2] = r.json().value
     expect(a1).toEqual({
@@ -655,8 +659,9 @@ describe('kv: jogadores (geral.jogadores)', () => {
     expect((await lastAudit(app)).summary).toBe(`${KEY} — Base inicial com 2 jogadores`)
   })
 
-  it('leitura mascara dados pessoais para quem não tem usuarios.ver-dados', async () => {
-    const m = await current(marketing)
+  it('leitura mascara dados pessoais para quem não tem usuarios.ver-dados; quem não vê as telas de jogadores não lê', async () => {
+    expect((await get(app, marketing, KEY)).statusCode).toBe(403)
+    const m = await current(suporte)
     expect(m.value[0]).toMatchObject({
       name: 'Joana Lima',
       email: 'jo***@exemplo.com',
@@ -670,22 +675,25 @@ describe('kv: jogadores (geral.jogadores)', () => {
     expect(a.value).toEqual(players)
   })
 
-  it('usuarios.editar muda status, saldos, moedas e etiquetas; dados pessoais mascarados são preservados', async () => {
+  it('usuarios.editar muda status, moedas e etiquetas; saldo enviado é ignorado; dados pessoais mascarados são preservados', async () => {
     const cur = await current(suporte)
     const next = structuredClone(cur.value)
     Object.assign(next[0], { status: 'bloqueado', balanceReal: 120.5, balanceBonus: 5, coins: 15, tags: ['novo', 'vip'] })
     const w = await put(app, suporte, KEY, next, cur.version)
     expect(w.statusCode).toBe(200)
     expect(w.json().value[0].cpf).toBe('123.***.***-09')
+    // o saldo é do servidor (muda só pelo extrato): a resposta e o gravado mantêm o saldo anterior
+    expect(w.json().value[0]).toMatchObject({ balanceReal: 100, balanceBonus: 0 })
     const stored = (await storedPlain(app, KEY)) as typeof players
-    expect(stored[0]).toEqual({ ...players[0], status: 'bloqueado', balanceReal: 120.5, balanceBonus: 5, coins: 15, tags: ['novo', 'vip'] })
+    expect(stored[0]).toEqual({ ...players[0], status: 'bloqueado', coins: 15, tags: ['novo', 'vip'] })
     expect(stored[1]).toEqual(players[1])
     const a = await lastAudit(app)
     expect(a.action).toBe('editar')
     expect(a.entity).toBe('Dados · Usuários')
     expect(a.summary).toContain('Jogadores alterados (1): p1 (')
     expect(a.summary).toContain('status: ativo → bloqueado')
-    expect(a.summary).toContain('saldo real: R$ 100,00 → R$ 120,50')
+    expect(a.summary).not.toContain('saldo real: R$ 100,00')
+    expect(a.summary).toContain('saldo enviado ignorado (o saldo só muda por lançamento no extrato): p1')
     expect(a.summary).toContain('etiquetas: +vip')
     expect(a.summary).not.toContain('12345678909')
   })
@@ -729,7 +737,8 @@ describe('kv: jogadores (geral.jogadores)', () => {
     const t = await put(app, antifraude, KEY, tags, cur2.version)
     expect(t.statusCode).toBe(403)
     expect(t.json().error.code).toBe('campo_nao_permitido')
-    expect(t.json().error.details.fields).toEqual(['balanceReal', 'tags'])
+    // saldo é do servidor: não conta como campo alterado (é ignorado)
+    expect(t.json().error.details.fields).toEqual(['tags'])
   })
 
   it('incluir ou remover jogador → 403', async () => {
@@ -746,9 +755,8 @@ describe('kv: jogadores (geral.jogadores)', () => {
     const cur = await current(admin)
     const cases: [string, unknown][] = [
       ['status', 'sumido'],
-      ['balanceReal', -1],
-      ['balanceBonus', 1.234],
       ['coins', 1.5],
+      ['coins', -1],
       ['tags', ['ok', '']],
       ['tags', 'vip'],
     ]
@@ -814,9 +822,14 @@ describe('kv: transações (geral.transacoes)', () => {
     reference: `EST-${of}`,
     ...extra,
   })
+  const playerBase = [
+    { id: 'p1', name: 'Joana', email: 'joana@exemplo.com', status: 'ativo', balanceReal: 75, balanceBonus: 0, coins: 0, tags: [] },
+    { id: 'p9', name: 'Outro', email: 'outro@exemplo.com', status: 'ativo', balanceReal: 0, balanceBonus: 0, coins: 0, tags: [] },
+  ]
   beforeAll(async () => {
     app = await createTestApp()
     admin = (await loginAs(app)).cookie
+    expect((await put(app, admin, 'geral.jogadores', playerBase)).statusCode).toBe(200)
     suporte = (await loginAs(app, 'suporte')).cookie
     financeiro = (await loginAs(app, 'financeiro')).cookie
     marketing = (await loginAs(app, 'marketing')).cookie
@@ -835,7 +848,11 @@ describe('kv: transações (geral.transacoes)', () => {
     const w = await put(app, admin, KEY, base)
     expect(w.statusCode).toBe(200)
     expect(w.json()).toMatchObject({ value: base, version: 1 })
-    expect((await rawRow(app, KEY))?.value).toEqual(base)
+    // tem e-mail de jogador: cifrado em repouso
+    const row = await rawRow(app, KEY)
+    expect(row?.value).toBeNull()
+    expect(JSON.stringify(row)).not.toContain('j@x.com')
+    expect(await storedPlain(app, KEY)).toEqual(base)
     expect((await lastAudit(app)).summary).toBe(`${KEY} — Base inicial do extrato com 3 transações`)
     expect((await get(app, financeiro, KEY)).statusCode).toBe(200)
   })
@@ -855,7 +872,9 @@ describe('kv: transações (geral.transacoes)', () => {
     const a = await lastAudit(app)
     expect(a.action).toBe('creditar')
     expect(a.entity).toBe('Dados · Transações')
-    expect(a.summary).toContain('Creditação de R$ 50,00 na carteira real do jogador p1 · TX10')
+    expect(a.summary).toContain('Creditação de R$ 50,00 na carteira real do jogador p1 · TX10 (saldo real: R$ 75,00 → R$ 125,00)')
+    // saldo do jogador aplicado pelo servidor
+    expect(((await storedPlain(app, 'geral.jogadores')) as { balanceReal: number }[])[0].balanceReal).toBe(125)
     const cur2 = await current(suporte)
     const w2 = await put(app, suporte, KEY, [...cur2.value, manual('TX11', 'debito_manual', -10)], cur2.version)
     expect(w2.statusCode).toBe(200)
@@ -873,9 +892,11 @@ describe('kv: transações (geral.transacoes)', () => {
     const r = await put(app, admin, KEY, removed, cur.version)
     expect(r.statusCode).toBe(403)
     expect(r.json().error).toMatchObject({ code: 'campo_nao_permitido', details: { removed: ['TX2'] } })
-    // reordenar é aceito (nada mudou nos itens)
+    // reordenar é aceito (nada mudou nos itens), mas a ordem gravada não muda
     const reordered = [...cur.value].reverse()
-    expect((await put(app, admin, KEY, reordered, cur.version)).statusCode).toBe(200)
+    const ro = await put(app, admin, KEY, reordered, cur.version)
+    expect(ro.statusCode).toBe(200)
+    expect((ro.json().value as { id: string }[]).map((t) => t.id)).toEqual(cur.value.map((t) => t.id))
     expect((await lastAudit(app)).summary).toBe(`${KEY} — Extrato salvo sem lançamentos novos`)
   })
 
@@ -902,16 +923,20 @@ describe('kv: transações (geral.transacoes)', () => {
       manual('TX32', 'credito_manual', 5000.01),
       manual('TX33', 'credito_manual', 10.123),
       manual('TX34', 'credito_manual', 10, { wallet: 'cripto' }),
-      manual('TX35', 'credito_manual', 10, { at: 'ontem' }),
+      manual('TX35', 'credito_manual', 10, { playerId: 'nao-existe' }),
       manual('TX36', 'credito_manual', 10, { reference: '' }),
       manual('TX37', 'credito_manual', 10, { note: 'x'.repeat(501) }),
+      // débito maior que o saldo
+      manual('TX39', 'debito_manual', -5000, { playerId: 'p9' }),
+      // TX10 (R$ 50) já lançado hoje para p1: R$ 4.950,01 passa do limite de 24 h
+      manual('TX40', 'credito_manual', 4950.01),
     ]
     for (const tx of bad) {
       const r = await put(app, admin, KEY, [tx, ...cur.value], cur.version)
       expect(r.statusCode, tx.id).toBe(400)
       expect(r.json().error.code, tx.id).toBe('dados_invalidos')
     }
-    expect((await put(app, admin, KEY, [manual('TX38', 'credito_manual', 5000), ...cur.value], cur.version)).statusCode).toBe(200)
+    expect((await put(app, admin, KEY, [manual('TX38', 'credito_manual', 4950), ...cur.value], cur.version)).statusCode).toBe(200)
   })
 
   it('estorno: só de aposta/subtração existente, valor igual, uma vez, no prazo', async () => {

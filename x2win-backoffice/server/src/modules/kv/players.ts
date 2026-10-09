@@ -2,8 +2,14 @@
 // lida com dados pessoais mascarados (a rota aplica a máscara) e gravada por
 // diferença, comparando por id com o gravado:
 //  - incluir ou remover jogador → 403 campo_nao_permitido (vêm da plataforma);
-//  - usuarios.editar muda tags, status, balanceReal, balanceBonus e coins;
+//  - usuarios.editar muda tags, status e coins;
 //  - antifraude.banir muda status;
+//  - saldos (balanceReal, balanceBonus) são do servidor: só mudam por lançamento
+//    no extrato (transactions.ts, na mesma transação); o valor enviado é ignorado;
+//  - status segue as regras de jogo responsável (player-status.ts): autoexclusão
+//    não muda pelo painel, pausa pedida pelo jogador só termina no prazo, e cada
+//    permissão só faz as transições dela → 403 transicao_nao_permitida;
+//  - jogador autoexcluído não recebe moedas;
 //  - qualquer outro campo alterado → 403 campo_nao_permitido (details.fields);
 //  - primeira gravação (nada gravado) aceita a lista inteira como base.
 // Dados pessoais que voltam mascarados são restaurados do gravado.
@@ -14,18 +20,22 @@ import { AppError, Errors } from '../../errors'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { writeAudit } from '../../services/audit'
 import { auditEntity, genericHandler } from './generic'
-import { deepEqual, hasOwn, isPlainObject, MISSING, type JsonObject } from './json'
+import { deepEqual, hasOwn, isPlainObject, MISSING, setOwn, type JsonObject } from './json'
+import { applyPauseRules, checkTransition, PAUSES_KEY, PLAYER_STATUSES, PLAYERS_KEY, STATUS_HISTORY_KEY, toPauseStore } from './player-status'
 import { restoreMasked, writePolicy } from './redact'
 import { assertVersion, loadRow, saveRow, storedValue } from './store'
 
+export { PLAYER_STATUSES }
 export const MAX_PLAYERS = 100_000
-export const PLAYER_STATUSES = ['ativo', 'bloqueado', 'autoexcluido', 'pausa'] as const
 
 /** Campos que cada permissão pode mudar num jogador já gravado. */
 export const PLAYER_FIELD_POLICY: Record<string, readonly string[]> = {
-  'usuarios.editar': ['tags', 'status', 'balanceReal', 'balanceBonus', 'coins'],
+  'usuarios.editar': ['tags', 'status', 'coins'],
   'antifraude.banir': ['status'],
 }
+
+/** Campos do servidor: o valor gravado prevalece (o saldo muda só pelo extrato). */
+export const PLAYER_SERVER_FIELDS = ['balanceReal', 'balanceBonus'] as const
 
 const FIELD_LABEL: Record<string, string> = {
   status: 'status',
@@ -35,22 +45,12 @@ const FIELD_LABEL: Record<string, string> = {
   coins: 'moedas',
 }
 
-const twoDecimals = (v: number) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-6
-
-const money = z
-  .number('Saldo inválido.')
-  .min(0, 'O saldo não pode ser negativo.')
-  .max(1_000_000_000, 'Saldo acima do permitido.')
-  .refine(twoDecimals, 'Use no máximo duas casas decimais no saldo.')
-
 /** Validação dos campos editáveis (só quando mudam). */
 const FIELD_SCHEMA: Record<string, z.ZodType> = {
   status: z.enum(PLAYER_STATUSES, { error: 'Status de jogador inválido.' }),
   tags: z
     .array(z.string('Etiqueta inválida.').min(1, 'Etiqueta vazia.').max(40, 'Etiqueta com mais de 40 caracteres.'), 'Etiquetas inválidas.')
     .max(50, 'No máximo 50 etiquetas por jogador.'),
-  balanceReal: money,
-  balanceBonus: money,
   coins: z.number('Moedas inválidas.').int('Moedas precisam ser um número inteiro.').min(0, 'Moedas não podem ser negativas.').max(1e12, 'Moedas acima do permitido.'),
 }
 
@@ -98,6 +98,8 @@ export const kvHandlers: KvHandlers = {
     async write(ctx: KvContext, value: unknown, expectedVersion: number | undefined): Promise<KvValue> {
       const { app, auth, key, rule } = ctx
       if (!canWriteKey(rule, auth.perms)) throw Errors.forbidden()
+      // as regras de status/saldo valem para a lista de jogadores; chave filha não é gravável
+      if (key !== PLAYERS_KEY) throw Errors.forbidden('Estes dados não podem ser alterados pela tela.')
       const list = playerList.parse(value) as JsonObject[]
       const ids = list.map((p) => p.id as string)
       const idSet = new Set<string>()
@@ -135,6 +137,21 @@ export const kvHandlers: KvHandlers = {
         }
 
         const next = restoreMasked(list, stored, writePolicy(rule)) as JsonObject[]
+        // saldos: vale o gravado (o painel manda o saldo junto, às vezes antes do extrato chegar)
+        const ignoredBalance: string[] = []
+        for (const p of next) {
+          const old = oldById.get(p.id as string)!
+          let differs = false
+          for (const f of PLAYER_SERVER_FIELDS) {
+            const before = hasOwn(old, f) ? old[f] : undefined
+            const after = hasOwn(p, f) ? p[f] : undefined
+            if (deepEqual(before, after)) continue
+            differs = true
+            if (hasOwn(old, f)) setOwn(p, f, old[f])
+            else delete p[f]
+          }
+          if (differs) ignoredBalance.push(p.id as string)
+        }
         const allowed = editablePlayerFields(auth.perms)
         const denied = new Set<string>()
         const deniedPlayers: string[] = []
@@ -168,6 +185,35 @@ export const kvHandlers: KvHandlers = {
           }
         }
 
+        // jogo responsável: autoexcluído não recebe moedas; status segue as transições e pausas
+        for (const c of changes) {
+          if (c.before.status === 'autoexcluido' && c.fields.includes('coins')) {
+            const b = typeof c.before.coins === 'number' ? c.before.coins : 0
+            const a = typeof c.after.coins === 'number' ? c.after.coins : 0
+            if (a > b) {
+              throw new AppError(403, 'transicao_nao_permitida', `Jogador ${c.id}: jogador autoexcluído não recebe moedas.`, { id: c.id, field: 'coins' })
+            }
+          }
+        }
+        const statusChanges = changes.filter((c) => c.fields.includes('status'))
+        if (statusChanges.length) {
+          const pausesRow = await loadRow(t, PAUSES_KEY, true)
+          const pausesStored = storedValue(pausesRow, app.cipher)
+          const pauses = toPauseStore(pausesStored === MISSING ? {} : pausesStored)
+          const historyRow = await loadRow(t, STATUS_HISTORY_KEY)
+          const historyStored = storedValue(historyRow, app.cipher)
+          const history = (Array.isArray(historyStored) ? historyStored : []).filter(isPlainObject)
+          const now = Date.now()
+          const actor = { id: auth.user.id, name: auth.user.name }
+          let pausesChanged = false
+          for (const c of statusChanges) {
+            const to = c.after.status as (typeof PLAYER_STATUSES)[number]
+            checkTransition(c.id, c.before.status, to, auth.perms)
+            if (applyPauseRules(c.id, c.before.status, to, pauses, history, actor, now)) pausesChanged = true
+          }
+          if (pausesChanged) await saveRow(t, app.cipher, PAUSES_KEY, pauses, false, pausesRow, auth.user.id)
+        }
+
         const saved = await saveRow(t, app.cipher, key, next, true, row, auth.user.id)
         if (changes.length) {
           const shown = changes
@@ -177,6 +223,9 @@ export const kvHandlers: KvHandlers = {
           summary = `Jogadores alterados (${changes.length}): ${shown.join('; ')}${more}`
         } else {
           summary = 'Salvo sem alterações'
+        }
+        if (ignoredBalance.length) {
+          summary += `; saldo enviado ignorado (o saldo só muda por lançamento no extrato): ${clipIds(ignoredBalance).join(', ')}`
         }
         await writeAudit(t, auth, { action: 'editar', entity: auditEntity(rule.page), summary: `${key} — ${summary}` })
         return { value: next, version: saved.version, updatedAt: saved.updatedAt }

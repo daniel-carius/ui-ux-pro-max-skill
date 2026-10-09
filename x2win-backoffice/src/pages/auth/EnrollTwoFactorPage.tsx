@@ -39,14 +39,13 @@ function downloadCodes(codes: string[], email: string) {
 }
 
 export function EnrollTwoFactorPage({ me }: { me: MeResponse }) {
-  const { reload, logout } = useAuthApi()
+  const { reload, logout, holdRecoveryCodes } = useAuthApi()
   const [setup, setSetup] = useState<Setup | null>(null)
   const [setupError, setSetupError] = useState<AuthErrorView | null>(null)
   const [alreadyOn, setAlreadyOn] = useState(false)
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<AuthErrorView | null>(null)
-  const [codes, setCodes] = useState<string[] | null>(null)
   const reqId = useRef(0)
   const busyRef = useRef(false)
 
@@ -88,7 +87,9 @@ export function EnrollTwoFactorPage({ me }: { me: MeResponse }) {
     setError(null)
     try {
       const res = await api<TwoFactorEnableResponse>('POST', '/api/auth/2fa/enable', { code: value })
-      setCodes(res.recoveryCodes)
+      // o servidor já promoveu a sessão: os códigos ficam no provedor da sessão (AuthFlow os mostra),
+      // para uma releitura de /me (ex.: voltar para a aba) não tirá-los da tela antes da confirmação
+      holdRecoveryCodes(res.recoveryCodes)
     } catch (e) {
       if (e instanceof ApiError && e.code === 'ja_configurado') setAlreadyOn(true)
       else setError(describeAuthError(e, 'code'))
@@ -100,8 +101,6 @@ export function EnrollTwoFactorPage({ me }: { me: MeResponse }) {
   }
 
   const footer = <SignedInAs email={me.user.email} onLogout={() => void logout()} />
-
-  if (codes) return <RecoveryCodes codes={codes} email={me.user.email} onContinue={reload} />
 
   if (alreadyOn) {
     return (
@@ -212,7 +211,8 @@ function StepNumber({ n }: { n: number }) {
   )
 }
 
-function RecoveryCodes({ codes, email, onContinue }: { codes: string[]; email: string; onContinue: () => Promise<unknown> }) {
+/** Mostrada pelo AuthFlow enquanto useAuthApi().recoveryCodes estiver guardado. */
+export function RecoveryCodes({ codes, email, onContinue }: { codes: string[]; email: string; onContinue: () => Promise<unknown> }) {
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   return (

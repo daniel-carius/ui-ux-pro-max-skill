@@ -3,11 +3,18 @@ FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY . .
+# só o que o build usa: deploy/certs (certificado e chave privada do TLS) não entra em nenhuma camada
+COPY index.html vite.config.ts tsconfig.json postcss.config.js tailwind.config.js ./
+COPY public ./public
+COPY shared ./shared
+COPY src ./src
 ENV VITE_API_MODE=1
 RUN npx vite build
 
 FROM nginx:1.27-alpine
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+# cabeçalhos de segurança, incluídos pelo nginx.conf em cada location (fora de conf.d: não é carregado sozinho)
+COPY deploy/security-headers.conf /etc/nginx/snippets/x2win-security-headers.conf
 COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
+# 80 só redireciona; o painel e a API ficam em 443 (certificado montado em /etc/nginx/certs)
+EXPOSE 80 443

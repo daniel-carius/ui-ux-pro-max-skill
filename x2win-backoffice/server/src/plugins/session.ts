@@ -6,6 +6,7 @@ import { effectivePermissions } from '@shared/permissions'
 import { SECURITY } from '../config'
 import { sha256 } from '../lib/crypto'
 import { rowToRole, type RoleRow } from '../services/roles-repo'
+import { revokeSession } from '../services/sessions'
 import type { AuthContext, SessionStage } from '../types'
 import fp from './fp'
 
@@ -22,6 +23,7 @@ interface SessionJoin {
   must_change_password: boolean
   role: RoleRow
   timeout: number
+  enforce_all: boolean
 }
 
 export default fp(async function session(app: FastifyInstance) {
@@ -36,7 +38,8 @@ export default fp(async function session(app: FastifyInstance) {
       `select s.id as session_id, s.stage, s.last_seen_at, s.expires_at,
               u.id as user_id, u.name, u.email, u.status, u.totp_enabled, u.must_change_password,
               to_jsonb(r.*) as role,
-              (select session_timeout_minutes from panel_security where id = 1) as timeout
+              (select session_timeout_minutes from panel_security where id = 1) as timeout,
+              coalesce((select enforce_2fa_all from panel_security where id = 1), false) as enforce_all
          from sessions s
          join users u on u.id = s.user_id
          join roles r on r.id = u.role_id
@@ -46,10 +49,19 @@ export default fp(async function session(app: FastifyInstance) {
     if (!row || row.status !== 'ativo') return
     // inatividade: sessão ativa parada além do tempo configurado cai
     if (row.stage === 'active' && Date.now() - new Date(row.last_seen_at).getTime() > row.timeout * 60_000) {
-      await app.db.query('update sessions set revoked_at = now() where id = $1', [id])
+      await revokeSession(app.db, id)
       return
     }
     const role = rowToRole(row.role)
+    // exigência de 2FA conferida a cada requisição, não só no login: se ela passou a valer depois que a
+    // sessão ficou ativa (troca de cargo, "Exigir 2FA" no cargo, "2FA para todos", cargo forçado na
+    // subida) e a pessoa não tem 2FA, a sessão cai. Encerrar, e não rebaixar para 'enroll': uma sessão
+    // rebaixada cadastraria o autenticador sem a senha, então um cookie roubado ficaria com o fator.
+    // No próximo login (senha conferida de novo) a pessoa cai no cadastro do 2FA.
+    if (row.stage === 'active' && !row.totp_enabled && (role.require2fa || row.enforce_all)) {
+      await revokeSession(app.db, id)
+      return
+    }
     const ctx: AuthContext = {
       user: {
         id: row.user_id,

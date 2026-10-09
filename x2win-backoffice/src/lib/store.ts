@@ -79,10 +79,17 @@ function subscribe(key: string, cb: () => void) {
  * Demonstração: apaga tudo o que foi alterado e volta aos dados de demonstração.
  * Modo API: limpa só o que está em memória e as chaves locais deste navegador
  * (nunca apaga dados do servidor). Usado ao sair ou quando a sessão cai.
+ *
+ * Opções (modo API):
+ *  - `notify: false`: não avisa as telas abertas. Use quando elas vão ser
+ *    desmontadas (a sessão foi para a entrada ou para uma etapa do login): se
+ *    relessem agora, buscariam as chaves com a sessão de transição (403/401).
+ *  - `serverDataOnly: true`: descarta só o que veio do servidor e mantém as
+ *    preferências locais deste navegador (ao abrir uma sessão).
  */
-export function resetDb() {
+export function resetDb(opts: { notify?: boolean; serverDataOnly?: boolean } = {}) {
   if (API) {
-    resetRemote()
+    resetRemote(opts.notify ?? true, opts.serverDataOnly ?? false)
     return
   }
   try {
@@ -405,19 +412,24 @@ async function refetchNow(key: string) {
   emit(key)
 }
 
-function resetRemote() {
+function resetRemote(notify: boolean, serverDataOnly: boolean) {
   generation++
-  try {
-    Object.keys(localStorage)
-      .filter((k) => k.startsWith(PREFIX) && isLocalOnlyKey(k.slice(PREFIX.length)))
-      .forEach((k) => localStorage.removeItem(k))
-  } catch {
-    /* ignore */
+  if (!serverDataOnly) {
+    try {
+      Object.keys(localStorage)
+        .filter((k) => k.startsWith(PREFIX) && isLocalOnlyKey(k.slice(PREFIX.length)))
+        .forEach((k) => localStorage.removeItem(k))
+    } catch {
+      /* ignore */
+    }
   }
-  const keys = new Set([...cache.keys(), ...placeholders.keys()])
-  for (const m of [cache, versions, confirmed, pending, outcomes, seeds, placeholders, queues, inflight, epochs]) m.clear()
+  // preferências locais (só com serverDataOnly) continuam no cache: espelham o localStorage
+  const keys = [...new Set([...cache.keys(), ...placeholders.keys()])].filter((k) => !serverDataOnly || isRemote(k))
+  for (const m of [versions, confirmed, pending, outcomes, seeds, placeholders, queues, inflight, epochs]) m.clear()
+  if (serverDataOnly) keys.forEach((k) => cache.delete(k))
+  else cache.clear()
   forbidden.clear()
-  keys.forEach(emit)
+  if (notify) keys.forEach(emit)
 }
 
 /**

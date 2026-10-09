@@ -4,7 +4,9 @@ import { SECURITY } from '../src/config'
 import { requireActive } from '../src/http'
 import { sha256 } from '../src/lib/crypto'
 import { totpCode } from '../src/lib/totp'
-import { api, cookieFrom, createTestApp, createUser, sessionCookie } from './helpers'
+import { hashRecoveryCode } from '../src/modules/auth/service'
+import { loginThrottleFor } from '../src/modules/auth/throttle'
+import { TEST_ENV, api, cookieFrom, createTestApp, createUser, sessionCookie } from './helpers'
 
 // cada chamada de login usa um IP próprio para não esbarrar no limite de 10/min por IP
 let ipSeq = 0
@@ -25,6 +27,8 @@ const verify = (app: FastifyInstance, cookie: string, code: string, ip?: string)
 const me = (app: FastifyInstance, cookie?: string) => api(app, 'GET', '/api/auth/me', { cookie })
 
 const probe = (app: FastifyInstance, cookie?: string) => api(app, 'GET', PROBE, { cookie })
+
+const RECOVERY_FORMAT = /^[0-9A-HJKMNP-TV-Z]{5}(-[0-9A-HJKMNP-TV-Z]{5}){3}$/
 
 /** Código de 6 dígitos garantidamente diferente do atual. */
 const wrongCode = (secret: string) => String((Number(totpCode(secret, Date.now())) + 500_000) % 1_000_000).padStart(6, '0')
@@ -134,9 +138,10 @@ describe('autenticação — /api/auth', () => {
       })
       for (const b of bodies) expect(b).toEqual(bodies[0])
       expect(bodies[0].error.message).toBe('E-mail ou senha incorretos.')
-      // tentativas em pessoa inativa não contam bloqueio (nada muda para ela)
+      // senha errada no login não mexe na conta de ninguém: o freio é por (e-mail, origem) e vale igual
+      // para e-mail existente, inexistente, convidado ou desligado
       expect((await userRow(app, desligado.id)).failed_logins).toBe(0)
-      expect((await userRow(app, ativo.id)).failed_logins).toBe(1)
+      expect((await userRow(app, ativo.id)).failed_logins).toBe(0)
     })
 
     it('valida o corpo e exige o cabeçalho de segurança', async () => {
@@ -157,40 +162,58 @@ describe('autenticação — /api/auth', () => {
       )
     })
 
-    it('5 erros seguidos bloqueiam por 15 min (423) e o acesso volta depois do prazo', async () => {
-      const u = await createUser(app)
-      for (let i = 0; i < SECURITY.maxFailedLogins - 1; i++) expectError(await login(app, u.email, 'SenhaErrada999'), 401, 'credenciais_invalidas')
+    it('5 erros seguidos da mesma origem bloqueiam essa origem por 15 min (423); outra origem entra; volta depois do prazo', async () => {
+      const u = await createUser(app, { roleId: 'suporte' })
+      // IPs diferentes da mesma faixa /24 contam juntos
+      const ip = (n: number) => `10.123.45.${n}`
+      for (let i = 0; i < SECURITY.maxFailedLogins - 1; i++) {
+        expectError(await login(app, u.email, 'SenhaErrada999', { ip: ip(i + 1) }), 401, 'credenciais_invalidas')
+      }
       const t0 = Date.now()
-      const fifth = await login(app, u.email, 'SenhaErrada999')
+      const fifth = await login(app, u.email, 'SenhaErrada999', { ip: ip(5) })
       expectError(fifth, 423, 'conta_bloqueada')
       const until = new Date(fifth.json().error.details.until).getTime()
       expect(until - t0).toBeGreaterThan((SECURITY.lockMinutes - 1) * 60_000)
       expect(until - t0).toBeLessThanOrEqual(SECURITY.lockMinutes * 60_000 + 5_000)
       expect(fifth.json().error.message).toMatch(/bloqueado/)
 
-      // senha certa também é recusada enquanto durar o bloqueio
-      const blocked = await login(app, u.email, u.password)
+      // senha certa da mesma origem também é recusada enquanto durar o bloqueio
+      const blocked = await login(app, u.email, u.password, { ip: ip(6) })
       expectError(blocked, 423, 'conta_bloqueada')
       expect(blocked.json().error.details.until).toBe(fifth.json().error.details.until)
       expect(cookieFrom(blocked)).toBeNull()
-      expect((await audits(app, u.id, 'bloquear')).length).toBe(1)
+      const bloquear = await audits(app, u.id, 'bloquear')
+      expect(bloquear).toHaveLength(1)
+      expect(bloquear[0].summary).toContain('10.123.45.0/24')
 
-      // passa o prazo
-      await app.db.query(`update users set locked_until = now() - interval '1 minute' where id = $1`, [u.id])
-      const ok = await login(app, u.email, u.password)
-      expect(ok.statusCode, ok.body).toBe(200)
-      expect(ok.json()).toEqual({ stage: 'active' })
+      // a conta não fica trancada: a pessoa entra de outra rede
+      const other = await login(app, u.email, u.password, { ip: '10.124.0.1' })
+      expect(other.statusCode, other.body).toBe(200)
+      expect(other.json()).toEqual({ stage: 'active' })
       const row = await userRow(app, u.id)
       expect(row.failed_logins).toBe(0)
       expect(row.locked_until).toBeNull()
+
+      // passa o prazo: a origem volta a entrar
+      const throttle = loginThrottleFor(app.db, TEST_ENV.APP_SECRET)
+      throttle.clock = () => Date.now() + (SECURITY.lockMinutes + 1) * 60_000
+      try {
+        const ok = await login(app, u.email, u.password, { ip: ip(7) })
+        expect(ok.statusCode, ok.body).toBe(200)
+        expect(ok.json()).toEqual({ stage: 'active' })
+      } finally {
+        throttle.clock = () => Date.now()
+      }
     })
 
-    it('acerto zera a contagem: só erros seguidos bloqueiam', async () => {
-      const u = await createUser(app)
-      for (let i = 0; i < 4; i++) expectError(await login(app, u.email, 'SenhaErrada999'), 401, 'credenciais_invalidas')
-      expect((await login(app, u.email, u.password)).statusCode).toBe(200)
-      for (let i = 0; i < 4; i++) expectError(await login(app, u.email, 'SenhaErrada999'), 401, 'credenciais_invalidas')
-      expect((await userRow(app, u.id)).failed_logins).toBe(4)
+    it('acerto zera a contagem da origem: só erros seguidos bloqueiam', async () => {
+      const u = await createUser(app, { roleId: 'suporte' })
+      const ip = (n: number) => `10.125.0.${n}`
+      for (let i = 0; i < 4; i++) expectError(await login(app, u.email, 'SenhaErrada999', { ip: ip(i + 1) }), 401, 'credenciais_invalidas')
+      expect((await login(app, u.email, u.password, { ip: ip(5) })).statusCode).toBe(200)
+      for (let i = 0; i < 4; i++) expectError(await login(app, u.email, 'SenhaErrada999', { ip: ip(i + 6) }), 401, 'credenciais_invalidas')
+      const throttle = loginThrottleFor(app.db, TEST_ENV.APP_SECRET)
+      expect(throttle.peek(throttle.key(u.email, ip(1)))).toEqual({ failures: 4, lockedUntil: null })
     })
 
     it('novo login no mesmo navegador encerra a sessão anterior', async () => {
@@ -289,8 +312,12 @@ describe('autenticação — /api/auth', () => {
       expectError(fifth, 423, 'conta_bloqueada')
       expect(typeof fifth.json().error.details.until).toBe('string')
       expectError(await verify(app, cookie, totpCode(u.totpSecret!, Date.now())), 423, 'conta_bloqueada')
+      // quem acerta a senha vê o bloqueio da conta; a contagem não volta a zero com a senha
       expectError(await login(app, u.email, u.password), 423, 'conta_bloqueada')
       expectError(await probe(app, cookie), 403, 'etapa_pendente')
+      // cada erro do código fica na auditoria; o que bloqueia vira 'bloquear'
+      expect(await audits(app, u.id, 'bloquear')).toHaveLength(1)
+      expect((await audits(app, u.id, 'recusar')).length).toBeGreaterThanOrEqual(SECURITY.maxFailedLogins - 1)
     })
 
     it('limite de 10 tentativas por minuto por IP', async () => {
@@ -346,8 +373,9 @@ describe('autenticação — /api/auth', () => {
       expect(row.totp_pending_enc).not.toContain(secret)
       expect(app.cipher.decrypt(row.totp_pending_enc!)).toBe(secret)
 
-      // código do segredo antigo, código errado e corpo vazio
+      // código do segredo antigo, código errado e corpo vazio (o erro conta para o bloqueio)
       expectError(await api(app, 'POST', '/api/auth/2fa/enable', { cookie, body: { code: wrongCode(secret) } }), 401, 'credenciais_invalidas')
+      expect((await userRow(app, u.id)).failed_logins).toBe(1)
       expectError(await api(app, 'POST', '/api/auth/2fa/enable', { cookie, body: { code: '' } }), 400, 'dados_invalidos')
       expectError(await probe(app, cookie), 403, 'etapa_pendente')
 
@@ -359,15 +387,17 @@ describe('autenticação — /api/auth', () => {
       expect(stage).toBe('active')
       expect(recoveryCodes).toHaveLength(8)
       expect(new Set(recoveryCodes).size).toBe(8)
-      for (const rc of recoveryCodes) expect(rc).toMatch(/^[0-9A-F]{5}-[0-9A-F]{5}$/)
+      for (const rc of recoveryCodes) expect(rc).toMatch(RECOVERY_FORMAT)
       expect((await probe(app, cookie)).statusCode).toBe(200)
 
       row = await userRow(app, u.id)
       expect(row.totp_enabled).toBe(true)
       expect(row.totp_pending_enc).toBeNull()
       expect(app.cipher.decrypt(row.totp_secret_enc!)).toBe(secret)
-      // só os hashes ficam no banco
-      expect([...row.recovery_codes].sort()).toEqual(recoveryCodes.map((c) => sha256(c)).sort())
+      expect(row.failed_logins).toBe(0)
+      // só os hashes (HMAC com segredo do servidor + id da pessoa) ficam no banco
+      expect([...row.recovery_codes].sort()).toEqual(recoveryCodes.map((c) => hashRecoveryCode(TEST_ENV.APP_SECRET, u.id, c)).sort())
+      for (const c of recoveryCodes) expect(row.recovery_codes).not.toContain(sha256(c))
       expect(JSON.stringify(row.recovery_codes)).not.toContain(recoveryCodes[0])
       expect(row.last_ip).toBe('10.7.7.7')
 
@@ -399,7 +429,7 @@ describe('autenticação — /api/auth', () => {
       await api(app, 'POST', '/api/auth/logout', { cookie: c2 })
       const c3 = cookieFrom(await login(app, u.email, u.password))!
       expectError(await verify(app, c3, recoveryCodes[0]), 401, 'credenciais_invalidas')
-      expect((await verify(app, c3, recoveryCodes[1].replace('-', ''))).statusCode).toBe(200)
+      expect((await verify(app, c3, recoveryCodes[1].replace(/-/g, ''))).statusCode).toBe(200)
       expect((await userRow(app, u.id)).recovery_codes).toHaveLength(6)
     })
 
@@ -416,23 +446,39 @@ describe('autenticação — /api/auth', () => {
       } finally {
         await app.db.query('update panel_security set enforce_2fa_all = false where id = 1')
       }
-      const livre = await createUser(app, { roleId: 'superadmin' })
+      const livre = await createUser(app, { roleId: 'suporte' })
       expect((await login(app, livre.email, livre.password)).json()).toEqual({ stage: 'active' })
     })
 
-    it('ligar o 2FA por vontade própria mantém a sessão ativa', async () => {
+    it('ligar o 2FA por vontade própria pede a senha atual, mantém a sessão e encerra as outras', async () => {
       const u = await createUser(app, { roleId: 'suporte' })
       const cookie = cookieFrom(await login(app, u.email, u.password))!
-      const { secret } = (await api(app, 'POST', '/api/auth/2fa/setup', { cookie })).json() as { secret: string }
+      const outra = await sessionCookie(app, u.id, 'active')
+      const setup = (body?: unknown) => api(app, 'POST', '/api/auth/2fa/setup', { cookie, body, ip: nextIp() })
+      const sem = await setup()
+      expectError(sem, 400, 'dados_invalidos')
+      expect(sem.json().error.message).toMatch(/senha atual/)
+      expectError(await setup({ currentPassword: 'SenhaErrada999' }), 401, 'credenciais_invalidas')
+      expect((await userRow(app, u.id)).failed_logins).toBe(1)
+      expect((await userRow(app, u.id)).totp_pending_enc).toBeNull()
+
+      const ok = await setup({ currentPassword: u.password })
+      expect(ok.statusCode, ok.body).toBe(200)
+      expect((await userRow(app, u.id)).failed_logins).toBe(0)
+      const { secret } = ok.json() as { secret: string }
       const en = await api(app, 'POST', '/api/auth/2fa/enable', { cookie, body: { code: totpCode(secret, Date.now()) } })
       expect(en.statusCode, en.body).toBe(200)
       expect(en.json().stage).toBe('active')
       expect(en.json().recoveryCodes).toHaveLength(8)
       expect((await probe(app, cookie)).statusCode).toBe(200)
       expect((await me(app, cookie)).json().user.twoFactor).toBe(true)
+      // a sessão aberta sem o fator cai
+      expectError(await me(app, outra), 401, 'nao_autenticado')
       // só o login com senha foi registrado como acesso
       expect((await audits(app, u.id, 'login')).map((l) => l.summary)).toEqual(['Login com senha'])
-      expect(await audits(app, u.id, 'ligar')).toHaveLength(1)
+      const ligar = await audits(app, u.id, 'ligar')
+      expect(ligar).toHaveLength(1)
+      expect(ligar[0].summary).toContain('1 outra sessão encerrada')
     })
 
     it('etapas erradas e sem sessão', async () => {
@@ -450,7 +496,7 @@ describe('autenticação — /api/auth', () => {
   // ---------------------------------------------------------------- senha
   describe('POST /password', () => {
     it('troca obrigatória: etapa password, regras da senha, depois active', async () => {
-      const u = await createUser(app, { mustChangePassword: true })
+      const u = await createUser(app, { roleId: 'suporte', mustChangePassword: true })
       const outra = await sessionCookie(app, u.id, 'active')
       const r = await login(app, u.email, u.password)
       expect(r.json()).toEqual({ stage: 'password' })
@@ -518,7 +564,7 @@ describe('autenticação — /api/auth', () => {
     })
 
     it('com sessão ativa exige a senha atual e encerra as outras sessões', async () => {
-      const u = await createUser(app)
+      const u = await createUser(app, { roleId: 'suporte' })
       const cookie = cookieFrom(await login(app, u.email, u.password))!
       const outra = await sessionCookie(app, u.id, 'active')
       const pendente = await sessionCookie(app, u.id, '2fa')
@@ -530,13 +576,16 @@ describe('autenticação — /api/auth', () => {
       expectError(await pw({ currentPassword: 'SenhaErrada999', newPassword: 'NovaSenhaForte456' }), 401, 'credenciais_invalidas')
       expectError(await pw({ currentPassword: u.password, newPassword: 'fraca' }), 400, 'dados_invalidos')
       expectError(await pw({ currentPassword: u.password, newPassword: u.password }), 400, 'dados_invalidos')
-      // senha atual errada não derruba a sessão nem bloqueia o login
+      // um erro da senha atual conta para o bloqueio, mas sozinho não derruba a sessão nem bloqueia o login
+      expect((await userRow(app, u.id)).failed_logins).toBe(1)
+      expect((await audits(app, u.id, 'recusar')).map((a) => a.summary)).toEqual(['Senha atual incorreta ao trocar a senha (tentativa 1 de 5)'])
       expect((await probe(app, cookie)).statusCode).toBe(200)
       expect((await me(app, outra)).statusCode).toBe(200)
 
       const ok = await pw({ currentPassword: u.password, newPassword: 'NovaSenhaForte456' })
       expect(ok.statusCode, ok.body).toBe(200)
       expect(ok.json()).toEqual({ stage: 'active' })
+      expect((await userRow(app, u.id)).failed_logins).toBe(0)
       expect((await probe(app, cookie)).statusCode).toBe(200)
       expectError(await me(app, outra), 401, 'nao_autenticado')
       expectError(await me(app, pendente), 401, 'nao_autenticado')

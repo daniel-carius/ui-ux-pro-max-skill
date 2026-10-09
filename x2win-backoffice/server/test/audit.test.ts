@@ -339,3 +339,39 @@ describe('kv auditoria.registros', () => {
     await expect(kvHandlers.audit!.read(kvCtx(app, await authFor(app, 'financeiro')))).rejects.toMatchObject({ status: 403 })
   })
 })
+
+// Regressão r1-exposure-9: a resposta da auditoria (e-mails, IPs, nomes de jogadores) não pode ficar
+// no cache em disco do navegador da pessoa da equipe depois do logout.
+describe('Cache-Control: no-store nas rotas /api/audit', () => {
+  it('GET /api/audit (com e-mail e IP nos dados) sai com no-store', async () => {
+    const probe = await createTestApp()
+    const { cookie } = await loginAs(probe, 'superadmin')
+    const ev = await api(probe, 'POST', '/api/audit/events', {
+      cookie,
+      body: { action: 'editar', entity: 'Jogador #42', summary: 'E-mail do jogador alterado para maria.silva@gmail.com' },
+    })
+    expect(ev.statusCode).toBe(201)
+    expect(String(ev.headers['cache-control'] ?? '')).toContain('no-store')
+
+    const res = await api(probe, 'GET', '/api/audit', { cookie, ip: '203.0.113.7' })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('maria.silva@gmail.com')
+    expect(res.body).toContain('127.0.0.1') // IP de quem gravou o evento
+    expect(String(res.headers['cache-control'] ?? '')).toContain('no-store')
+
+    // respostas de erro da mesma rota também
+    const fin = await loginAs(probe, 'financeiro')
+    const denied = await api(probe, 'GET', '/api/audit', { cookie: fin.cookie })
+    expect(denied.statusCode).toBe(403)
+    expect(String(denied.headers['cache-control'] ?? '')).toContain('no-store')
+    const bad = await api(probe, 'GET', '/api/audit?pageSize=999', { cookie })
+    expect(bad.statusCode).toBe(400)
+    expect(String(bad.headers['cache-control'] ?? '')).toContain('no-store')
+
+    // a exportação mantém o próprio cabeçalho
+    const csv = await api(probe, 'GET', '/api/audit/export.csv', { cookie })
+    expect(csv.statusCode).toBe(200)
+    expect(csv.headers['cache-control']).toBe('no-store')
+    await probe.close()
+  })
+})

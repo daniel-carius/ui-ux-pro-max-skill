@@ -13,6 +13,8 @@ import { genericHandler } from './generic'
 import { assertStorableJson } from './json'
 import { kvHandlers as playersKv } from './players'
 import { readPolicy, redact } from './redact'
+import { kvHandlers as statusHistoryKv } from './status-history'
+import { encryptAtRest, encryptPlainRows } from './store'
 import { kvHandlers as transactionsKv } from './transactions'
 
 /** Formato aceito de chave: segmentos [A-Za-z0-9_-] separados por ponto. */
@@ -53,8 +55,21 @@ function respond(key: string, out: KvValue, rule: KvRule, auth: AuthContext): Kv
 }
 
 export default async function routes(app: FastifyInstance, opts: { handlers?: KvHandlers }) {
-  // players/transactions são deste módulo; os demais domínios vêm de app.ts
-  const handlers: KvHandlers = { ...playersKv, ...transactionsKv, ...(opts.handlers ?? {}) }
+  // players/transactions/player-status são deste módulo; os demais domínios vêm de app.ts
+  const handlers: KvHandlers = { ...playersKv, ...transactionsKv, ...statusHistoryKv, ...(opts.handlers ?? {}) }
+
+  // chaves que passaram a exigir cifra (ganharam `pii`/`secrets`) e ainda têm linhas em claro
+  app.addHook('onReady', async () => {
+    try {
+      const n = await encryptPlainRows(app.db, app.cipher, (key) => {
+        const rule = findKvRule(key)
+        return !!rule && encryptAtRest(rule)
+      })
+      if (n) app.log.info({ rows: n }, 'kv: linhas em claro cifradas em repouso')
+    } catch (err) {
+      app.log.error({ err }, 'kv: falha ao cifrar linhas em claro')
+    }
+  })
 
   const handlerFor = (rule: KvRule): KvHandler => {
     if (!rule.domain) return genericHandler
