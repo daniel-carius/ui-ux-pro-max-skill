@@ -176,7 +176,7 @@ export default function Estatisticas() {
           </Alert>
         )}
 
-        <section aria-label="Resumo das execuções" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <section aria-label="Resumo das execuções" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label="Execuções"
             icon={Send}
@@ -216,7 +216,7 @@ export default function Estatisticas() {
           />
         </section>
 
-        <div className="grid gap-5 xl:grid-cols-5">
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-5">
           <Card className="xl:col-span-3">
             <CardHeader icon={Activity} title="Execuções por dia" description={`${rangeLabel(range)}${range.preset !== 'custom' ? ' · janela móvel' : ''}`} />
             <CardBody>

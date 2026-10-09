@@ -170,7 +170,7 @@ export function AudiencePicker({
 
   return (
     <div className="space-y-3">
-      <div role="radiogroup" aria-label="Público" className={cn('grid gap-2 sm:grid-cols-2', narrow && 'lg:grid-cols-1')}>
+      <div role="radiogroup" aria-label="Público" className={cn('grid grid-cols-1 gap-2 sm:grid-cols-2', narrow && 'lg:grid-cols-1')}>
         {kinds.map((k) => {
           const Icon = AUDIENCE_ICON[k]
           const active = value.kind === k

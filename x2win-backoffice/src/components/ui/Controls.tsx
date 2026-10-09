@@ -202,6 +202,7 @@ export function Segmented<V extends string>({
   size = 'md',
   className,
   ariaLabel,
+  disabled,
 }: {
   value: V
   onChange: (v: V) => void
@@ -209,6 +210,7 @@ export function Segmented<V extends string>({
   size?: 'sm' | 'md'
   className?: string
   ariaLabel?: string
+  disabled?: boolean
 }) {
   return (
     <div
@@ -225,9 +227,10 @@ export function Segmented<V extends string>({
             type="button"
             role="radio"
             aria-checked={active}
+            disabled={disabled}
             onClick={() => onChange(o.value)}
             className={cn(
-              'inline-flex items-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-colors duration-150',
+              'inline-flex items-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50',
               size === 'sm' ? 'h-7 px-2.5 text-xs' : 'h-8 px-3 text-[13px]',
               active ? 'bg-surface text-fg shadow-sm ring-1 ring-line' : 'text-fg-3 hover:text-fg',
             )}

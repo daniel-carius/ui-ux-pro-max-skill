@@ -347,7 +347,7 @@ export default function Jornadas() {
         </div>
       ) : (
         <div className="space-y-5">
-          <section aria-label="Resumo das jornadas" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <section aria-label="Resumo das jornadas" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <KpiCard label="Jornadas ativas" icon={Route} value={`${num(active.length)} de ${num(rows.length)}`} hint={`${num(rows.filter((r) => r.status === 'rascunho').length)} rascunhos · ${num(rows.filter((r) => r.status === 'pausada').length)} pausadas`} />
             <KpiCard label="Entradas" icon={Users} tone="info" value={num(entered)} hint={`${num(rows.reduce((s, r) => s + r.m.inProgress, 0))} no meio da jornada`} />
             <KpiCard label="Concluíram" icon={Flag} tone="success" value={num(completed)} hint={`${pct(entered ? completed / entered : 0, 0)} das entradas`} />
@@ -417,7 +417,7 @@ function TemplateGrid({ onUse, disabled, compact }: { onUse: (t: JourneyTemplate
       <h2 className="mb-3 flex items-center gap-2 text-[15px] font-semibold text-fg">
         <Sparkles size={16} className="text-primary-text" aria-hidden /> {compact ? 'Começar de um template' : 'Ou comece de um template'}
       </h2>
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {JOURNEY_TEMPLATES.map((t) => {
           const Icon = TEMPLATE_ICON[t.id]
           const steps = t.build(false)
@@ -866,7 +866,7 @@ function StepCard({
                 />
               </Field>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div className="flex items-center gap-2 rounded-lg bg-success/10 px-3 py-2 text-xs font-medium text-success">
                 <CheckCircle2 size={13} aria-hidden />
                 {s.continueIf === 'depositou' ? 'Depositou' : 'Não depositou'} → segue para a próxima etapa

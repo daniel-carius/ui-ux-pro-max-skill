@@ -138,6 +138,8 @@ export function MoneyInput({
   disabled,
   invalid,
   placeholder,
+  className,
+  ariaLabel,
 }: {
   value: number
   onValueChange: (v: number) => void
@@ -147,10 +149,13 @@ export function MoneyInput({
   disabled?: boolean
   invalid?: boolean
   placeholder?: string
+  className?: string
+  ariaLabel?: string
 }) {
   return (
     <Input
       id={id}
+      aria-label={ariaLabel}
       prefix="R$"
       type="number"
       inputMode="decimal"
@@ -161,7 +166,7 @@ export function MoneyInput({
       placeholder={placeholder}
       value={Number.isFinite(value) ? value : ''}
       onChange={(e) => onValueChange(e.target.value === '' ? 0 : Number(e.target.value))}
-      className="tnum"
+      className={cn('tnum', className)}
     />
   )
 }
@@ -177,6 +182,8 @@ export function NumberInput({
   step = 1,
   disabled,
   invalid,
+  className,
+  ariaLabel,
 }: {
   value: number
   onValueChange: (v: number) => void
@@ -187,10 +194,13 @@ export function NumberInput({
   step?: number
   disabled?: boolean
   invalid?: boolean
+  className?: string
+  ariaLabel?: string
 }) {
   return (
     <Input
       id={id}
+      aria-label={ariaLabel}
       type="number"
       inputMode="decimal"
       min={min}
@@ -201,7 +211,7 @@ export function NumberInput({
       suffix={suffix}
       value={Number.isFinite(value) ? value : ''}
       onChange={(e) => onValueChange(e.target.value === '' ? 0 : Number(e.target.value))}
-      className="tnum"
+      className={cn('tnum', className)}
     />
   )
 }

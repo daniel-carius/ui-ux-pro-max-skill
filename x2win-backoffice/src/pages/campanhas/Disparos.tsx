@@ -376,7 +376,7 @@ export default function Disparos() {
         }
       />
       <div className="space-y-5">
-        <section aria-label="Resumo dos disparos" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <section aria-label="Resumo dos disparos" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard label="Enviados em 30 dias" icon={Send} value={num(sent)} hint={`${num(last30.length)} disparos`} />
           <KpiCard label="Taxa de entrega" icon={MailCheck} tone="info" value={pct(sent ? delivered / sent : 0)} hint={`${num(sent - delivered)} não entregues`} formula="Mensagens aceitas pelo provedor do jogador ÷ enviadas. Abaixo de 95% indica lista suja ou bloqueio." />
           <KpiCard label="Taxa de abertura" icon={MailOpen} tone="success" value={pct(openBase ? opened / openBase : 0)} hint={`${num(opened)} aberturas`} formula="Aberturas ÷ entregues, só em e-mail e RCS. SMS não informa abertura." />
@@ -398,7 +398,7 @@ export default function Disparos() {
           </Alert>
         )}
 
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
           <Card>
             <CardHeader icon={Send} title="Novo disparo" description="Mensagem única para um público. Para envios automáticos por evento, use Jornadas." />
             <fieldset disabled={!canEdit} className="min-w-0">

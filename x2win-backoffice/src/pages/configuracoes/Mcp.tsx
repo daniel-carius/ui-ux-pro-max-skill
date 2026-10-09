@@ -120,7 +120,7 @@ export default function Mcp() {
     })
     if (!ok) return
     keys.update(k.id, { revokedAt: new Date().toISOString(), revokedBy: user.name })
-    audit('desativar', `Chave MCP "${k.name}"`, `Chave revogada (criada por ${k.createdByName}, ${MCP_SCOPE_LABEL[k.scope].toLowerCase()})`)
+    audit('revogar', `Chave MCP "${k.name}"`, `Chave revogada (criada por ${k.createdByName}, ${MCP_SCOPE_LABEL[k.scope].toLowerCase()})`)
     toast.success('Chave revogada', { description: `"${k.name}" não funciona mais.` })
   }
 
@@ -144,7 +144,7 @@ export default function Mcp() {
     if (!ok) return
     const at = new Date().toISOString()
     weak.forEach((k) => keys.update(k.id, { revokedAt: at, revokedBy: user.name }))
-    audit('desativar', 'Chaves MCP', `${plural(weak.length, 'chave revogada', 'chaves revogadas')} por criador sem 2FA: ${weak.map((k) => k.name).join(', ')}`)
+    audit('revogar', 'Chaves MCP', `${plural(weak.length, 'chave revogada', 'chaves revogadas')} por criador sem 2FA: ${weak.map((k) => k.name).join(', ')}`)
     toast.success('Chaves revogadas')
   }
 

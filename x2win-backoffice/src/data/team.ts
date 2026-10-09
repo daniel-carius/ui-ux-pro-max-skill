@@ -110,6 +110,10 @@ export type AuditAction =
   | 'banir'
   | 'bloquear'
   | 'revelar'
+  | 'revogar'
+  | 'desbloquear'
+  | 'creditar'
+  | 'estornar'
 
 export const AUDIT_ACTION_LABEL: Record<AuditAction, string> = {
   login: 'Entrou no painel',
@@ -129,6 +133,10 @@ export const AUDIT_ACTION_LABEL: Record<AuditAction, string> = {
   banir: 'Baniu',
   bloquear: 'Bloqueou',
   revelar: 'Revelou dado sensível',
+  revogar: 'Revogou',
+  desbloquear: 'Desbloqueou',
+  creditar: 'Ajustou saldo',
+  estornar: 'Estornou',
 }
 
 export interface AuditEntry {

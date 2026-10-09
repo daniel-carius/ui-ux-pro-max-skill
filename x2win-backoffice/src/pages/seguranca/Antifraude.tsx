@@ -253,7 +253,7 @@ export default function Antifraude() {
     if (!ok) return
     restore.forEach((id) => players.update(id, { status: b.previousStatuses[id] ?? 'ativo' }))
     blocks.remove(b.id)
-    audit('excluir', isNet ? `Bloqueio da rede ${b.value}` : `Bloqueio do IP ${b.value}`, isNet ? `Banimento desfeito: ${restore.length} contas reativadas` : 'IP desbloqueado no site')
+    audit('desbloquear', isNet ? `Bloqueio da rede ${b.value}` : `Bloqueio do IP ${b.value}`, isNet ? `Banimento desfeito: ${restore.length} contas reativadas` : 'IP desbloqueado no site')
     toast.success(isNet ? 'Banimento desfeito' : 'IP desbloqueado')
   }
 

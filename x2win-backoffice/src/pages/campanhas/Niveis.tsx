@@ -151,7 +151,7 @@ export default function Niveis() {
       />
 
       <div className="space-y-5">
-        <section aria-label="Resumo da trilha" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <section aria-label="Resumo da trilha" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard label="Níveis na trilha" icon={Layers} value={num(levels.length)} hint={`de ${levels[0]?.name || '—'} a ${top?.name || '—'}`} />
           <KpiCard
             label="Acima do 1º nível"
@@ -240,7 +240,7 @@ export default function Niveis() {
           </Card>
         </FormFieldset>
 
-        <div className="grid gap-5 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
           <Card>
             <CardHeader icon={TrendingUp} title="Curva de XP" description="XP acumulado para alcançar cada nível (rascunho)" />
             <CardBody>
@@ -556,7 +556,7 @@ function LevelCard({ levels, xp, eventName, compact }: { levels: Level[]; xp: nu
         <>
           <p className="mt-4 text-[11px] font-semibold uppercase tracking-wide text-fg-3">Seus benefícios</p>
           {perks.length ? (
-            <ul className="mt-2 grid gap-1.5 sm:grid-cols-2">
+            <ul className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
               {perks.map((pk) => {
                 const Icon = PERK_ICON[pk.key as keyof typeof PERK_ICON] ?? Award
                 return (
@@ -619,7 +619,7 @@ function PlayerPreview({ config }: { config: LevelsConfig }) {
           </Button>
         }
       />
-      <CardBody className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+      <CardBody className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
         <div className="space-y-4">
           <FormGrid>
             <Field label="XP atual do jogador" htmlFor="sim-xp" hint={`Hoje no nível ${levels[before]?.name ?? '—'}.`}>

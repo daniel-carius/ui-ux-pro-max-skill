@@ -151,7 +151,7 @@ export default function Transacoes() {
     const est = buildReversalTx(t, p, r.value, user.name)
     txs.add(est)
     if (p) players.update(p.id, walletPatch(t.wallet, est.balanceAfter))
-    audit('editar', `Transação #${t.id}`, `Estorno de ${brl(amount)} para ${t.playerName} (${est.id}). Motivo: ${r.value}`)
+    audit('estornar', `Transação #${t.id}`, `Estorno de ${brl(amount)} para ${t.playerName} (${est.id}). Motivo: ${r.value}`)
     toast.success('Estorno lançado', { description: `${est.id} devolveu ${brl(amount)} ao saldo ${t.wallet === 'real' ? 'real' : 'bônus'}.` })
   }
 

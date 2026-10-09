@@ -100,7 +100,7 @@ export default function Cashback() {
       />
 
       <div className="space-y-5">
-        <section aria-label="Resumo" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <section aria-label="Resumo" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label="Pago no último ciclo"
             icon={HandCoins}
@@ -364,7 +364,7 @@ function LevelPctTable({ levels, enabled }: { levels: { id: string; name: string
       {!enabled && (
         <p className="border-b border-line bg-warning/5 px-3.5 py-2 text-xs text-warning">O programa de níveis está desligado: com ele desligado, ninguém recebe cashback por nível.</p>
       )}
-      <ul className="grid gap-x-6 gap-y-2 p-3.5 sm:grid-cols-2">
+      <ul className="grid grid-cols-1 gap-x-6 gap-y-2 p-3.5 sm:grid-cols-2">
         {levels.map((l) => (
           <li key={l.id} className="grid grid-cols-[minmax(0,96px)_minmax(0,1fr)_44px] items-center gap-2.5 text-[13px]">
             <span className="flex min-w-0 items-center gap-1.5 text-fg-2">
@@ -406,7 +406,7 @@ function Simulator({ config }: { config: CashbackConfig }) {
           </Button>
         }
       />
-      <CardBody className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+      <CardBody className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
         <div className="space-y-4">
           <FormGrid>
             <Field label={`Apostado ${PERIOD_IN[config.cashback.period]}`} htmlFor="sim-bets">

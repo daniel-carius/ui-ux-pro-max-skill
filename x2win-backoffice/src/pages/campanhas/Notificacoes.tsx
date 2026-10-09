@@ -300,7 +300,7 @@ export default function Notificacoes() {
     <>
       <PageHeader />
       <div className="space-y-5">
-        <section aria-label="Resumo" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <section aria-label="Resumo" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard label="Enviadas em 30 dias" icon={BellRing} value={num(last30.length)} hint={`${num(sentTotal)} entregas no sino`} />
           <KpiCard
             label="Taxa de leitura"
@@ -329,7 +329,7 @@ export default function Notificacoes() {
           />
         </section>
 
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_400px]">
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_400px]">
           <Card>
             <CardHeader icon={Bell} title="Nova notificação" description="Aparece no sino do jogador, no site e no app. Não precisa de consentimento de marketing." />
             <fieldset disabled={!canEdit} className="min-w-0">

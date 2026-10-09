@@ -301,7 +301,7 @@ function PopupsTab({ popups, onEdit }: { popups: ReturnType<typeof useCollection
 
   return (
     <div className="space-y-5">
-      <section aria-label="Resumo dos popups" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section aria-label="Resumo dos popups" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="Ativos agora" icon={Megaphone} value={num(counts.ativo ?? 0)} hint={`${num(counts.agendado ?? 0)} agendados · ${num(counts.pausado ?? 0)} pausados`} onClick={() => setFilter('ativo')} active={filter === 'ativo'} />
         <KpiCard label="Visualizações" icon={Eye} tone="info" value={num(views)} hint="soma de todos os popups" />
         <KpiCard label="CTR médio" icon={MousePointerClick} tone="success" value={pct(views ? clicks / views : 0)} hint={`${num(clicks)} cliques no botão`} formula="Cliques no botão ÷ visualizações, somando todos os popups." />
@@ -379,7 +379,7 @@ function PopupSimulator({ popups }: { popups: Popup[] }) {
   return (
     <Card>
       <CardHeader icon={FlaskConical} title="Qual popup aparece?" description="Escolha a página e o perfil do jogador. O simulador aplica a regra do site e mostra por que os outros perderam." />
-      <CardBody className="grid gap-6 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+      <CardBody className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
         <div className="space-y-4">
           <FormGrid>
             <Field label="Página" htmlFor="sim-page">
@@ -580,7 +580,7 @@ function PopupEditor({ initial, all, onClose, onSave }: { initial: Popup | null;
         </>
       }
     >
-      <fieldset disabled={!canEdit} className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_260px]">
+      <fieldset disabled={!canEdit} className="grid grid-cols-1 min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_260px]">
         <div className="min-w-0 space-y-5">
           <Field label="Título" htmlFor="pp-title" required error={show('title')} labelAside={<CharCounter value={d.title} max={POPUP_LIMITS.title} />}>
             <Input id="pp-title" data-autofocus value={d.title} onChange={(e) => set('title', e.target.value)} invalid={!!show('title')} placeholder="Ex.: Deposite 50 e ganhe o dobro" />
@@ -779,7 +779,7 @@ function InboxTab({ inbox, onCompose }: { inbox: ReturnType<typeof useCollection
 
   return (
     <div className="space-y-5">
-      <section aria-label="Resumo da inbox" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section aria-label="Resumo da inbox" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="Mensagens enviadas" icon={Send} value={num(sent.length)} hint={`${num(delivered)} entregas`} />
         <KpiCard label="Taxa de leitura" icon={MailOpen} tone="success" value={pct(delivered ? reads / delivered : 0)} hint={`${num(reads)} abertas`} formula="Mensagens abertas ÷ entregues, em todas as mensagens enviadas." />
         <KpiCard label="Agendadas" icon={CalendarClock} tone="info" value={num(scheduled.length)} hint={scheduled[0] ? `próxima ${dateTime(scheduled[0].sendAt)}` : 'nenhuma na fila'} />
@@ -955,7 +955,7 @@ function InboxComposer({ onClose, onSend }: { onClose: () => void; onSend: (m: I
         </>
       }
     >
-      <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+      <div className="grid grid-cols-1 min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="min-w-0 space-y-5">
           <Field label="Assunto" htmlFor="ib-subject" required error={errors.subject} labelAside={<CharCounter value={subject} max={INBOX_LIMITS.subject} />}>
             <Input id="ib-subject" data-autofocus value={subject} onChange={(e) => setSubject(e.target.value)} invalid={!!errors.subject} />

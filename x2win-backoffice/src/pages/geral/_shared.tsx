@@ -552,7 +552,7 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
     const tx = buildManualTx(adj, p, user.name)
     txs.add(tx)
     players.update(p.id, walletPatch(adj.wallet, tx.balanceAfter))
-    audit('editar', `Jogador #${p.id}`, `${adj.kind === 'credito' ? 'Creditação' : 'Subtração'} de ${brl(adj.amount)} no saldo ${adj.wallet === 'real' ? 'real' : 'bônus'} (${tx.id}). Motivo: ${tx.note}`)
+    audit('creditar', `Jogador #${p.id}`, `${adj.kind === 'credito' ? 'Creditação' : 'Subtração'} de ${brl(adj.amount)} no saldo ${adj.wallet === 'real' ? 'real' : 'bônus'} (${tx.id}). Motivo: ${tx.note}`)
     toast.success(adj.kind === 'credito' ? 'Crédito lançado' : 'Débito lançado', { description: `${tx.id} · novo saldo ${brl(tx.balanceAfter)}.` })
     setAdj(blank)
     setTouched(false)
