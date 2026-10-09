@@ -167,7 +167,7 @@
 
 @layer components {
   .card {
-    @apply rounded-xl border border-line bg-surface shadow-card;
+    @apply min-w-0 rounded-xl border border-line bg-surface shadow-card;
   }
   .tnum {
     font-variant-numeric: tabular-nums;

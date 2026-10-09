@@ -190,6 +190,16 @@ function build() {
     })
   }
 
+  // códigos de indicação únicos
+  const seen = new Set<string>()
+  for (const p of players) {
+    let code = p.refCode
+    let k = 2
+    while (seen.has(code.toUpperCase())) code = `${p.refCode}${k++}`
+    seen.add(code.toUpperCase())
+    p.refCode = code
+  }
+
   // Afiliados: os primeiros 34 jogadores
   const affiliates: Affiliate[] = players.slice(0, 34).map((p, i) => {
     const type: AffiliateType = i < 4 ? 'Manager' : i < 14 ? 'Influencer' : 'Organic'

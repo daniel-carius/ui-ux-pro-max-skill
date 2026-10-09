@@ -245,7 +245,7 @@ export function DataTable<T>({
         </div>
       )}
 
-      <div className="overflow-x-auto">
+      <div className="relative overflow-x-auto">
         <table className="w-full border-collapse text-sm">
           {caption && <caption className="sr-only">{caption}</caption>}
           <thead>

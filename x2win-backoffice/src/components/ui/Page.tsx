@@ -122,20 +122,27 @@ const KPI_TONE = {
 
 /** Indicador: rótulo, valor, variação, fórmula e sparkline. */
 export function KpiCard({ label, value, icon: Icon, delta, goodWhenUp = true, hint, formula, chart, tone = 'primary', loading, className, onClick, active }: KpiCardProps) {
-  const Comp = onClick ? 'button' : 'div'
+  // Cartão clicável: um botão cobre o cartão inteiro e o botão da fórmula fica por cima,
+  // evitando botão dentro de botão.
   return (
-    <Comp
-      type={onClick ? 'button' : undefined}
-      onClick={onClick}
-      aria-pressed={onClick ? !!active : undefined}
+    <div
       className={cn(
-        'card flex min-w-0 flex-col p-4 text-left',
+        'card relative flex min-w-0 flex-col p-4 text-left',
         onClick && 'transition-[border-color,box-shadow] duration-150 hover:border-line-strong',
         active && 'border-primary shadow-ring',
         className,
       )}
     >
-      <div className="flex items-start justify-between gap-2">
+      {onClick && (
+        <button
+          type="button"
+          onClick={onClick}
+          aria-pressed={!!active}
+          aria-label={`Filtrar por ${label}`}
+          className="absolute inset-0 rounded-xl"
+        />
+      )}
+      <div className="pointer-events-none relative flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           {Icon && (
             <span className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-lg', KPI_TONE[tone])}>
@@ -144,21 +151,25 @@ export function KpiCard({ label, value, icon: Icon, delta, goodWhenUp = true, hi
           )}
           <span className="text-[13px] font-medium leading-tight text-fg-2">{label}</span>
         </div>
-        {formula && <Formula title={label}>{formula}</Formula>}
+        {formula && (
+          <span className="pointer-events-auto">
+            <Formula title={label}>{formula}</Formula>
+          </span>
+        )}
       </div>
       {loading ? (
         <Skeleton className="mt-3 h-8 w-32" />
       ) : (
-        <div className="mt-2.5 truncate font-display text-[26px] font-bold leading-8 tracking-tight text-fg">{value}</div>
+        <div className="pointer-events-none relative mt-2.5 truncate font-display text-[26px] font-bold leading-8 tracking-tight text-fg">{value}</div>
       )}
       {(delta !== undefined || hint) && (
-        <div className="mt-1 flex min-h-[18px] flex-wrap items-center gap-x-1.5 text-xs text-fg-3">
+        <div className="pointer-events-none relative mt-1 flex min-h-[18px] flex-wrap items-center gap-x-1.5 text-xs text-fg-3">
           {delta !== undefined && <Delta value={delta} goodWhenUp={goodWhenUp} />}
           {hint && <span className="truncate">{hint}</span>}
         </div>
       )}
-      {chart && <div className="mt-3 h-10">{chart}</div>}
-    </Comp>
+      {chart && <div className="relative mt-3 h-10">{chart}</div>}
+    </div>
   )
 }
 

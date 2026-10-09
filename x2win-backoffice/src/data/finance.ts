@@ -121,8 +121,8 @@ export function seedTransactions(): Transaction[] {
   const balances = new Map<string, number>()
   let t = NOW.getTime() - 30 * DAY
   let n = 0
-  while (t < NOW.getTime() && n < 1400) {
-    t += rng.int(1, 40) * MIN
+  while (t < NOW.getTime() && n < 3000) {
+    t += rng.int(2, 38) * MIN
     const p = rng.pick(players)
     const type = rng.weighted([
       ['aposta', 46],
@@ -149,7 +149,7 @@ export function seedTransactions(): Transaction[] {
         amount = -rng.pick([0.4, 0.8, 1, 2, 2.5, 4, 5, 10, 20, 50])
         break
       case 'ganho':
-        amount = rng.money(0.5, 900)
+        amount = rng.money(0.2, 60)
         break
       case 'bonus':
         amount = rng.pick([10, 20, 50, 100])
@@ -229,7 +229,7 @@ export function seedDeposits(): Deposit[] {
       isFirst: rng.bool(0.18),
       bonusCampaign: rng.bool(0.15) ? 'Deposite 50 e ganhe o dobro' : null,
       createdAt: iso(created),
-      updatedAt: iso(new Date(created.getTime() + rng.int(1, 30) * MIN)),
+      updatedAt: iso(new Date(Math.min(NOW.getTime(), created.getTime() + rng.int(1, 30) * MIN))),
     })
   }
   _deposits = list.sort((a, b) => b.createdAt.localeCompare(a.createdAt))

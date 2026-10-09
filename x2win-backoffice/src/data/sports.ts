@@ -132,17 +132,27 @@ export function seedSportsBets(): SportsBet[] {
     const stake = rng.pick([2, 5, 5, 10, 10, 20, 25, 50, 100, 200, 500])
     const potential = Math.round(stake * odd * 100) / 100
     const settled = hoursAgo > 30 || rng.bool(0.45)
+    // chance de ganhar coerente com a odd (margem da casa de ~8%)
+    const roll = rng.next()
     const status: SportsBetStatus = !settled
       ? 'aberta'
-      : rng.weighted([
-          ['perdida', 55],
-          ['ganha', 33],
-          ['cashout', 6],
-          ['cancelada', 3],
-          ['reembolsada', 3],
-        ] as const)
+      : roll < 0.03
+        ? 'cancelada'
+        : roll < 0.06
+          ? 'reembolsada'
+          : roll < 0.11
+            ? 'cashout'
+            : rng.bool(0.92 / odd)
+              ? 'ganha'
+              : 'perdida'
     const paid =
-      status === 'ganha' ? potential : status === 'cashout' ? Math.round(stake * rng.float(0.5, 1.8) * 100) / 100 : status === 'cancelada' || status === 'reembolsada' ? stake : 0
+      status === 'ganha'
+        ? potential
+        : status === 'cashout'
+          ? Math.round(stake * rng.float(0.6, 0.95) * 100) / 100
+          : status === 'cancelada' || status === 'reembolsada'
+            ? stake
+            : 0
     out.push({
       id: `SB${String(330100 + i * 9)}`,
       at: iso(at),
