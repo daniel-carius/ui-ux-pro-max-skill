@@ -1,0 +1,38 @@
+{
+  "name": "x2win-backoffice-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "API do backoffice X2Win: autenticação com 2FA, permissões, saques, auditoria e webhooks.",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "esbuild src/index.ts src/seed.ts --bundle --platform=node --format=esm --target=node20 --outdir=dist --packages=external --sourcemap",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run",
+    "seed": "tsx src/seed.ts",
+    "migrate": "tsx src/migrate.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@fastify/cookie": "11.1.2",
+    "@fastify/cors": "11.3.0",
+    "@fastify/helmet": "13.1.1",
+    "@fastify/rate-limit": "11.2.0",
+    "fastify": "5.12.5",
+    "pg": "8.23.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.8",
+    "@types/pg": "8.23.1",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vite": "6.4.4",
+    "vitest": "5.0.1"
+  }
+}

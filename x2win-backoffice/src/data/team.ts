@@ -92,63 +92,10 @@ export function seedTeam(): TeamMember[] {
   ]
 }
 
-export type AuditAction =
-  | 'login'
-  | 'criar'
-  | 'editar'
-  | 'excluir'
-  | 'aprovar'
-  | 'recusar'
-  | 'exportar'
-  | 'ligar'
-  | 'desligar'
-  | 'convidar'
-  | 'desativar'
-  | 'enviar'
-  | 'testar'
-  | 'sincronizar'
-  | 'banir'
-  | 'bloquear'
-  | 'revelar'
-  | 'revogar'
-  | 'desbloquear'
-  | 'creditar'
-  | 'estornar'
+export { AUDIT_ACTION_LABEL, type AuditAction, type AuditEntry } from '@shared/audit'
+import type { AuditAction, AuditEntry } from '@shared/audit'
 
-export const AUDIT_ACTION_LABEL: Record<AuditAction, string> = {
-  login: 'Entrou no painel',
-  criar: 'Criou',
-  editar: 'Editou',
-  excluir: 'Excluiu',
-  aprovar: 'Aprovou',
-  recusar: 'Recusou',
-  exportar: 'Exportou',
-  ligar: 'Ligou',
-  desligar: 'Desligou',
-  convidar: 'Convidou',
-  desativar: 'Desativou',
-  enviar: 'Enviou',
-  testar: 'Testou',
-  sincronizar: 'Sincronizou',
-  banir: 'Baniu',
-  bloquear: 'Bloqueou',
-  revelar: 'Revelou dado sensível',
-  revogar: 'Revogou',
-  desbloquear: 'Desbloqueou',
-  creditar: 'Ajustou saldo',
-  estornar: 'Estornou',
-}
 
-export interface AuditEntry {
-  id: string
-  at: string
-  actorId: string
-  actorName: string
-  action: AuditAction
-  entity: string
-  summary: string
-  ip: string
-}
 
 export function seedAudit(): AuditEntry[] {
   const rng = createRng(7070)

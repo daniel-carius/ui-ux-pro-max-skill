@@ -10,6 +10,7 @@ const listeners = new Map<string, Set<() => void>>()
 const allListeners = new Set<() => void>()
 
 function read<T>(key: string, seed: T | (() => T)): T {
+  if (import.meta.env.DEV) ((window as unknown as { __X2W_KEYS__?: Set<string> }).__X2W_KEYS__ ??= new Set()).add(key)
   if (cache.has(key)) return cache.get(key) as T
   let value: T | undefined
   try {
@@ -109,4 +110,23 @@ export function useCollection<T extends { id: string }>(key: string, seed: T[] |
     replace: (next) => setItems(next),
     get: (id) => items.find((it) => it.id === id),
   }
+}
+
+/**
+ * Recarrega a chave do servidor (modo API). No modo demonstração não faz nada.
+ * Implementação do modo API: ver adaptador neste arquivo.
+ */
+export async function refreshKey(_key: string): Promise<void> {
+  // modo demonstração: dados já estão no navegador
+}
+
+/**
+ * Atualiza o valor em memória sem gravar no servidor (ex.: depois de uma ação
+ * de domínio como aprovar saque, que o servidor já gravou).
+ */
+export function patchCache<T>(key: string, next: T | ((prev: T) => T), seed?: T | (() => T)) {
+  const prev = read<T>(key, seed as T)
+  const value = typeof next === 'function' ? (next as (p: T) => T)(prev) : next
+  cache.set(key, value)
+  emit(key)
 }
