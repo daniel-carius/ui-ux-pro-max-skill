@@ -199,10 +199,11 @@ export default function Faturas() {
     {
       id: 'acoes',
       header: '',
-      label: 'Ações',
+      label: 'Itens',
       pinned: true,
       align: 'right',
-      csv: () => '',
+      // na tela é a coluna de ações; no CSV vira o detalhamento dos itens
+      csv: (i) => i.items.map((it) => `${it.description}: ${brl(it.amount)}`).join(' | '),
       cell: (i) => (
         <div className="flex justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
           {!i.paid && (

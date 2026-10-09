@@ -265,8 +265,8 @@ export default function Webhooks() {
                   <span className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-lg', meta.tone)}>
                     <meta.icon size={18} aria-hidden />
                   </span>
-                  <div className="min-w-0 flex-1">
-                    <h2 className="flex flex-wrap items-center gap-2 text-[15px] font-semibold text-fg">
+                  <div className="min-w-[180px] flex-1">
+                    <h2 className="flex flex-wrap items-center gap-x-2 text-[15px] font-semibold text-fg">
                       {WEBHOOK_EVENT_LABEL[ev]}
                       <Mono className="text-[11.5px] font-normal text-fg-3">{ev}</Mono>
                     </h2>

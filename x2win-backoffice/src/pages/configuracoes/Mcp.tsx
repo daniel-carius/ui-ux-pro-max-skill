@@ -390,9 +390,9 @@ function UsageCard({ usage, keys, className }: { usage: McpUsage[]; keys: McpKey
                         {u.keyName} · exige <span className="font-mono">{u.permission}</span> · {u.ip} · {num(u.ms)} ms
                       </p>
                     </div>
-                    <Tooltip content={dateTime(u.at)}>
-                      <span className="shrink-0 whitespace-nowrap text-xs text-fg-3">{relative(u.at)}</span>
-                    </Tooltip>
+                    <time dateTime={u.at} title={dateTime(u.at)} className="shrink-0 whitespace-nowrap text-xs text-fg-3">
+                      {relative(u.at)}
+                    </time>
                   </li>
                 )
               })}

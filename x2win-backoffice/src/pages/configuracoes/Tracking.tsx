@@ -19,7 +19,6 @@ import {
   Select,
   SettingsSection,
   Switch,
-  Tooltip,
   confirm,
   toast,
   useSettingsForm,
@@ -341,9 +340,9 @@ function TestPanel({ config, dirty, canEdit }: { config: TrackingConfig; dirty: 
                         <pre className="mt-1 overflow-x-auto rounded-lg bg-surface-2 p-2 font-mono text-[11.5px] text-fg-2">{JSON.stringify(JSON.parse(t.payload), null, 2)}</pre>
                       </details>
                     </div>
-                    <Tooltip content={dateTime(t.at)}>
-                      <span className="shrink-0 text-xs text-fg-3 tnum">{time(t.at)}</span>
-                    </Tooltip>
+                    <time dateTime={t.at} title={dateTime(t.at)} className="shrink-0 text-xs text-fg-3 tnum">
+                      {time(t.at)}
+                    </time>
                   </li>
                 )
               })}

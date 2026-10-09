@@ -253,8 +253,7 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
             </div>
 
             <CardBody className="space-y-4">
-              <FormFieldset readOnly={!canEdit}>
-                <div className="grid gap-4 rounded-xl border border-line p-4 md:grid-cols-2">
+              <div className="grid gap-4 rounded-xl border border-line p-4 md:grid-cols-2">
                 <div className="md:col-span-2 flex items-center justify-between gap-2">
                   <p className="text-[13px] font-semibold text-fg">Cadastro do gateway</p>
                   <span className="text-xs text-fg-3">usado pela conta principal</span>
@@ -264,21 +263,20 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
                     <div className="input-base flex min-w-0 items-center bg-surface-2">
                       <Mono className="truncate text-fg">{g.clientId}</Mono>
                     </div>
-                    <Button icon={Pencil} onClick={() => editClientId(g)}>
+                    <Button icon={Pencil} onClick={() => editClientId(g)} disabled={!canEdit}>
                       Trocar
                     </Button>
                   </div>
                 </Field>
-                <SecretField label="Segredo (client secret)" value={g.secret} onChange={(v) => replaceSecret(g, 'secret', v)} />
-                <SecretField label="Segredo do webhook" value={g.webhookSecret} onChange={(v) => replaceSecret(g, 'webhookSecret', v)} hint="Valida a assinatura dos callbacks. Cifrado no servidor." />
+                <SecretField label="Segredo (client secret)" value={g.secret} disabled={!canEdit} onChange={(v) => replaceSecret(g, 'secret', v)} />
+                <SecretField label="Segredo do webhook" value={g.webhookSecret} disabled={!canEdit} onChange={(v) => replaceSecret(g, 'webhookSecret', v)} hint="Valida a assinatura dos callbacks. Cifrado no servidor." />
                 <Field label="Callback da conta principal" hint="Cadastre este endereço no painel do gateway.">
                   <div className="flex items-center gap-1 rounded-lg border border-line bg-surface-2 py-1 pl-3 pr-1">
-                    <Mono className="min-w-0 flex-1 truncate">{callbackUrlFor(g.id, '', true)}</Mono>
+                    <Mono className="min-w-0 flex-1 truncate text-left [direction:rtl]">{callbackUrlFor(g.id, '', true)}</Mono>
                     <CopyButton value={callbackUrlFor(g.id, '', true)} label="Copiar callback" />
                   </div>
                 </Field>
-                </div>
-              </FormFieldset>
+              </div>
 
               <ul className="divide-y divide-line rounded-xl border border-line">
                 {list.map((a) => {
@@ -436,7 +434,7 @@ function AccountModal({
         )}
         <Field label="Endereço de callback" hint={main ? 'O mesmo do cadastro do gateway.' : 'Exclusivo desta conta. Cadastre no painel do gateway.'}>
           <div className="flex items-center gap-1 rounded-lg border border-line bg-surface-2 py-1 pl-3 pr-1">
-            <Mono className="min-w-0 flex-1 truncate">{callback}</Mono>
+            <Mono className="min-w-0 flex-1 truncate text-left [direction:rtl]">{callback}</Mono>
             <CopyButton value={callback} label="Copiar callback" />
           </div>
         </Field>

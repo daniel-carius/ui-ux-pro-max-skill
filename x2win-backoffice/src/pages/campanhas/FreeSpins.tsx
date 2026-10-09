@@ -490,10 +490,10 @@ function order(s: FsCampaignStatus) {
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="min-w-0 px-4 py-2.5">
-      <dt className="truncate text-xs text-fg-3">{label}</dt>
-      <dd className="truncate text-sm font-bold text-fg tnum">{value}</dd>
-      {hint && <dd className="truncate text-[11px] text-fg-3">{hint}</dd>}
+    <div className="min-w-0 px-3 py-2.5 sm:px-4">
+      <dt className="text-xs leading-4 text-fg-3">{label}</dt>
+      <dd className="mt-0.5 text-[13px] font-bold text-fg tnum sm:text-sm">{value}</dd>
+      {hint && <dd className="text-[11px] text-fg-3">{hint}</dd>}
     </div>
   )
 }

@@ -48,7 +48,7 @@ import {
   useSettingsForm,
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
-import { brl, mult, num, pct } from '@/lib/format'
+import { brl, mult, pct, plural } from '@/lib/format'
 import { uid } from '@/lib/random'
 import { useCollection, useDb } from '@/lib/store'
 import { useGames, useProviders } from '@/data/hooks'
@@ -234,7 +234,7 @@ function RolloverForm() {
                         <p className="truncate text-xs text-fg-3">
                           {cat === 'esportes'
                             ? 'Bilhetes do sportsbook, conta na liquidação'
-                            : `${num(list.length)} jogos · ${list
+                            : `${plural(list.length, 'jogo', 'jogos')} · ${list
                                 .slice(0, 2)
                                 .map((g) => g.name)
                                 .join(', ')}${list.length > 2 ? '…' : ''}`}
@@ -466,7 +466,7 @@ function Simulator({ cfg, games }: { cfg: RolloverConfig; games: Game[] }) {
         }
       />
       <CardBody className="space-y-4">
-        <div className="overflow-x-auto rounded-xl border border-line">
+        <div className="relative overflow-x-auto rounded-xl border border-line">
           <table className="w-full min-w-[900px] text-sm">
             <caption className="sr-only">Apostas simuladas e quanto contam para o rollover</caption>
             <thead>
