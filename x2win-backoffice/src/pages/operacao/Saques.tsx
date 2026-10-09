@@ -493,6 +493,16 @@ function Rules() {
   const form = useSettingsForm<WithdrawalRules>(WITHDRAWAL_KEYS.rules, DEFAULT_WITHDRAWAL_RULES, {
     entity: 'Regras de saque',
     successMessage: 'Regras de saque salvas',
+    fieldLabels: {
+      min: 'valor mínimo',
+      maxPerRequest: 'valor máximo',
+      rolloverPct: 'rollover exigido',
+      fee: 'taxa fixa',
+      dailyLimit: 'limite diário',
+      autoApproveMax: 'aprovação automática',
+      rolloverMode: 'modo de contagem',
+      rolloverBets: 'apostas que contam',
+    },
     validate: (v) => {
       if (v.min <= 0) return 'O valor mínimo precisa ser maior que zero.'
       if (v.maxPerRequest < v.min) return 'O valor máximo precisa ser maior que o mínimo.'

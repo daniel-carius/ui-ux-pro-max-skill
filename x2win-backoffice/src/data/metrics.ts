@@ -227,7 +227,7 @@ export function gameStatsForPeriod(totalCasinoBets: number, totalCasinoWins: num
   const weights = games.map((g) => Math.pow(g.highlight, 1.8) * (g.active ? 1 : 0.1) * (0.6 + rng.next() * 0.8))
   const wsum = weights.reduce((a, b) => a + b, 0)
   const holdBase = totalCasinoBets > 0 ? (totalCasinoBets - totalCasinoWins) / totalCasinoBets : 0.05
-  return games
+  const raw = games
     .map((g, i) => {
       const bets = (totalCasinoBets * weights[i]) / wsum
       const hold = holdBase * (0.4 + rng.next() * 1.3)
@@ -244,5 +244,11 @@ export function gameStatsForPeriod(totalCasinoBets: number, totalCasinoWins: num
         players: Math.max(1, Math.round(bets / (180 + rng.next() * 400))),
       }
     })
+  // ajusta para que a soma por jogo bata com o GGR de cassino do período
+  const target = totalCasinoBets - totalCasinoWins
+  const current = raw.reduce((s, x) => s + x.ggr, 0)
+  const k = current ? target / current : 1
+  return raw
+    .map((s) => ({ ...s, ggr: s.ggr * k, wins: s.bets - s.ggr * k }))
     .sort((a, b) => b.ggr - a.ggr)
 }

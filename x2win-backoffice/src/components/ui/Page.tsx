@@ -250,6 +250,8 @@ export function useSettingsForm<T>(
     validate?: (v: T) => string | null
     onSaved?: (v: T, prev: T) => void
     successMessage?: string
+    /** nomes legíveis dos campos para o resumo da auditoria */
+    fieldLabels?: Partial<Record<keyof T & string, string>>
   },
 ): SettingsForm<T> {
   const [saved, setSaved] = useDb<T>(key, defaults)
@@ -297,7 +299,9 @@ export function useSettingsForm<T>(
                 (k) => stableStringify((values as Record<string, unknown>)[k]) !== stableStringify((prev as Record<string, unknown>)[k]),
               )
             : []
-        audit('editar', opts.entity, changed.length ? `Campos alterados: ${changed.join(', ')}` : 'Configuração salva')
+        const labels = opts.fieldLabels as Record<string, string> | undefined
+        const names = changed.map((k) => labels?.[k] ?? k)
+        audit('editar', opts.entity, names.length ? `Campos alterados: ${names.join(', ')}` : 'Configuração salva')
         opts.onSaved?.(values, prev)
         setSaving(false)
         toast.success(opts.successMessage ?? 'Alterações salvas', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
