@@ -52,7 +52,6 @@ import {
   type Column,
   type Tone,
 } from '@/components/ui'
-import { BrandMark } from '@/components/layout/Brand'
 import { cn } from '@/lib/cn'
 import { date, dateTime, num, pct, relative } from '@/lib/format'
 import { useCollection } from '@/lib/store'
@@ -85,7 +84,7 @@ import {
   type SitePage,
   type VisitKind,
 } from '@/domain/campanhas3-mensagens'
-import { AUDIENCE_ICON, AudiencePicker, CharCounter, PhoneFrame, RateBar, ScheduleField, SiteHeaderMock, SiteSkeleton, TableFrame, useAudienceContext, useAudienceEstimate } from './_shared-c3'
+import { AUDIENCE_ICON, AudiencePicker, CharCounter, PhoneFrame, RateBar, ScheduleField, SiteHeaderMock, SiteSkeleton, TableFrame, useAudienceContext, useAudienceEstimate, MiniMark } from './_shared-c3'
 
 const KEY = 'campanhas.popups-inbox'
 
@@ -857,7 +856,7 @@ function InboxTab({ inbox, onCompose }: { inbox: ReturnType<typeof useCollection
 
 function InboxPhone({ subject, body, when }: { subject: string; body: string; when: string }) {
   return (
-    <PhoneFrame title="Caixa de mensagens" subtitle="X2Win" avatar={<BrandMark size={26} />}>
+    <PhoneFrame title="Caixa de mensagens" subtitle="X2Win" avatar={<MiniMark size={26} />}>
       <div className="space-y-2">
         <div className="rounded-xl border border-primary/30 bg-surface p-3 shadow-sm">
           <div className="flex items-center justify-between gap-2">

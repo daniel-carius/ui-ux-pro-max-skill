@@ -14,9 +14,11 @@ export interface SwitchProps {
   className?: string
   /** só o botão, sem texto (exige ariaLabel) */
   ariaLabel?: string
+  /** dica ao passar o mouse (ex.: por que está desabilitado) */
+  title?: string
 }
 
-export function Switch({ checked, onChange, label, description, disabled, size = 'md', id, className, ariaLabel }: SwitchProps) {
+export function Switch({ checked, onChange, label, description, disabled, size = 'md', id, className, ariaLabel, title }: SwitchProps) {
   const autoId = useId()
   const sid = id ?? `sw-${autoId.replace(/:/g, '')}`
   const btn = (
@@ -26,6 +28,7 @@ export function Switch({ checked, onChange, label, description, disabled, size =
       role="switch"
       aria-checked={checked}
       aria-label={ariaLabel}
+      title={title}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(

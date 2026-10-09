@@ -120,7 +120,7 @@ export function TrendChart({
   showLegend,
   ariaLabel,
 }: {
-  data: Record<string, unknown>[]
+  data: readonly object[]
   xKey: string
   series: SeriesDef[]
   format?: ValueFormat
@@ -205,7 +205,7 @@ export function BarsChart({
   showLegend,
   categoryWidth = 120,
 }: {
-  data: Record<string, unknown>[]
+  data: readonly object[]
   xKey: string
   series: SeriesDef[]
   format?: ValueFormat

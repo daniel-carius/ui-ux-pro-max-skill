@@ -21,7 +21,6 @@ import {
   Users,
 } from 'lucide-react'
 import { FunnelChart } from '@/components/charts'
-import { BrandMark } from '@/components/layout/Brand'
 import {
   Alert,
   Badge,
@@ -79,7 +78,7 @@ import {
   type TemplateVarKey,
 } from '@/domain/campanhas3-disparos'
 import { defaultScheduleAt, scheduleError, scheduleIso, type Schedule } from '@/domain/campanhas3-mensagens'
-import { AudiencePicker, CharCounter, EmailFrame, PhoneFrame, RateBar, ScheduleField, SiteLogo, TableFrame, VarChips, useAudienceContext, useAudienceEstimate } from './_shared-c3'
+import { AudiencePicker, CharCounter, EmailFrame, PhoneFrame, RateBar, ScheduleField, SiteLogo, TableFrame, VarChips, useAudienceContext, useAudienceEstimate, MiniMark } from './_shared-c3'
 
 const KEY = 'campanhas.disparos'
 
@@ -741,7 +740,7 @@ function ChannelPreview({
         </span>
       }
       subtitle="Mensagem RCS · empresa verificada"
-      avatar={<BrandMark size={26} />}
+      avatar={<MiniMark size={26} />}
     >
       <p className="mb-2 text-center text-[10.5px] text-fg-3">Hoje 9:41</p>
       <div className="max-w-[92%] overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">

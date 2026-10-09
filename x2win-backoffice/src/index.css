@@ -176,7 +176,7 @@
     @apply h-10 w-full rounded-lg border border-line-strong/80 bg-surface px-3 text-sm text-fg placeholder:text-fg-3
       transition-[border-color,box-shadow] duration-150
       hover:border-line-strong focus:border-primary focus:shadow-ring focus:outline-none
-      disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-fg-3;
+      disabled:cursor-not-allowed disabled:bg-surface-3/50 disabled:text-fg-3;
   }
   .link {
     @apply font-medium text-primary-text underline-offset-2 hover:underline;

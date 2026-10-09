@@ -32,9 +32,9 @@ import {
   Award,
   Search,
   Archive,
+  X,
 } from 'lucide-react'
 import { Field, Input, NumberInput, Segmented, Select, Textarea } from '@/components/ui'
-import { BrandMark } from '@/components/layout/Brand'
 import { cn } from '@/lib/cn'
 import { num, pct } from '@/lib/format'
 import { useDeposits, usePlayers } from '@/data/hooks'
@@ -473,11 +473,28 @@ export function PhoneFrame({ children, title, subtitle, className, avatar }: { c
   )
 }
 
+/**
+ * Marca da X2Win para as prévias. Não usa o BrandMark do layout: o SVG dele tem
+ * id de gradiente fixo e some quando a primeira cópia (barra lateral) está oculta.
+ */
+export function MiniMark({ size = 22 }: { size?: number }) {
+  return (
+    <span
+      className="relative inline-flex shrink-0 items-center justify-center bg-gradient-to-br from-primary to-primary/70 text-primary-fg"
+      style={{ width: size, height: size, borderRadius: Math.round(size * 0.27) }}
+      aria-hidden
+    >
+      <X size={Math.round(size * 0.62)} strokeWidth={3} />
+      <span className="absolute rounded-full bg-gold" style={{ width: Math.max(3, size * 0.14), height: Math.max(3, size * 0.14), top: size * 0.12, right: size * 0.12 }} />
+    </span>
+  )
+}
+
 /** Logotipo da X2Win em miniatura para as prévias. */
 export function SiteLogo({ size = 22 }: { size?: number }) {
   return (
     <span className="inline-flex items-center gap-1.5">
-      <BrandMark size={size} />
+      <MiniMark size={size} />
       <span className="font-display text-[13px] font-extrabold tracking-tight text-fg">
         X2<span className="text-primary-text">WIN</span>
       </span>
@@ -541,7 +558,7 @@ export function EmailFrame({
       </div>
       {/* linha da caixa de entrada */}
       <div className="flex items-start gap-2.5 border-b border-line bg-primary/[0.04] px-3 py-2.5">
-        <BrandMark size={28} />
+        <MiniMark size={28} />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2">
             <p className="truncate text-[13px] font-bold text-fg">{fromName}</p>

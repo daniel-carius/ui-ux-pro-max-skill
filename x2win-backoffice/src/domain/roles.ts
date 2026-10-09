@@ -77,6 +77,7 @@ export function seedRoles(): Role[] {
         'gateways.ver',
         'faturas.ver',
         'ggr.ver',
+        'ggr.apurar',
       ),
       require2fa: false,
       approvalCeiling: 5000,

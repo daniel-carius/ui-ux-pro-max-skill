@@ -139,10 +139,10 @@ export interface Settlement {
 }
 
 /**
- * Permissão usada para fechar e pagar apurações. A tela de GGR é só leitura no
- * catálogo de permissões, então usamos a permissão financeira de aprovar pagamentos.
+ * Permissão usada para fechar e pagar apurações (especial da tela de GGR,
+ * concedida a Financeiro, Administrador e Superadmin).
  */
-export const SETTLEMENT_PERMISSION = 'saques.aprovar'
+export const SETTLEMENT_PERMISSION = 'ggr.apurar'
 
 export function dueDateFor(month: string) {
   const [y, m] = month.split('-').map(Number)
