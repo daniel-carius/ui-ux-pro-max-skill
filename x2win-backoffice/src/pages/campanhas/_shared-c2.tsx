@@ -280,7 +280,7 @@ export function GamePicker({ value, onChange, disabled, invalid, id }: { value: 
           disabled={disabled}
           onChange={(e) => setCat(e.target.value as GameCategory | 'todas')}
           aria-label="Categoria"
-          className="input-base h-9 sm:w-40"
+          className="input-base h-9 sm:w-52"
         >
           <option value="todas">Todas as categorias</option>
           {cats.map((c) => (

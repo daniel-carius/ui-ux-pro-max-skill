@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Activity,
   ArrowDownToLine,
@@ -50,7 +50,7 @@ import {
   attackDefenses,
   autoOffLabel,
   operationStatus,
-  shouldAutoOff,
+  runAttackAutoOff,
   simulateTraffic,
   trafficSummary,
 } from '@/domain/seguranca'
@@ -126,19 +126,12 @@ export default function ModoAtaque() {
   const [refreshing, setRefreshing] = useState(false)
 
   // relógio (cronômetro e contagem regressiva) + desligamento automático
-  const attackRef = useRef(attack)
-  attackRef.current = attack
-  const autoOffDone = useRef<string | null>(null)
   useEffect(() => {
     const tick = () => {
       const t = Date.now()
       setNow(t)
-      const cur = attackRef.current
-      if (shouldAutoOff(cur, t) && cur.since && autoOffDone.current !== cur.since) {
-        autoOffDone.current = cur.since
-        const minutes = cur.autoOffMinutes
-        setAttack((prev) => (shouldAutoOff(prev, t) ? { ...prev, ...OFF_STATE } : prev))
-        audit('desligar', 'Modo de ataque', `Desligado automaticamente após ${autoOffLabel(minutes)}`)
+      const minutes = runAttackAutoOff(t)
+      if (minutes) {
         toast.info('Modo de ataque desligado automaticamente', { description: `Passou o tempo escolhido (${autoOffLabel(minutes)}). Cadastro, limites e anti-robô voltaram ao normal.` })
       }
     }

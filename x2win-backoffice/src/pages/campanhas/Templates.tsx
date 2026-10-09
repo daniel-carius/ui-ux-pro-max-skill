@@ -577,7 +577,7 @@ function TemplateEditor({
             <Textarea
               id="tp-body"
               ref={ref}
-              rows={14}
+              rows={12}
               value={body}
               spellCheck={false}
               autoCapitalize="off"

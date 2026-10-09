@@ -24,7 +24,10 @@ import { brl, date, relative } from '@/lib/format'
 import { useTheme } from '@/lib/theme'
 import { resetDb } from '@/lib/store'
 import { useRoles, useSession, useTeam } from '@/domain/session'
-import { OPEN_INVOICE, useAttackMode, useMaintenance, usePanelSecurity } from '@/domain/system'
+import { useAttackMode, useMaintenance, usePanelSecurity } from '@/domain/system'
+import { INVOICES_KEY, type Invoice } from '@/domain/config1-faturas'
+import { seedInvoices } from '@/data/config1-faturas'
+import { useCollection } from '@/lib/store'
 import { useWithdrawals } from '@/data/hooks'
 import { Avatar, IconButton, Menu, Popover, confirm, toast, type MenuEntry } from '@/components/ui'
 
@@ -42,6 +45,7 @@ function useNotices(): Notice[] {
   const [team] = useTeam()
   const [panel] = usePanelSecurity()
   const { can } = useSession()
+  const { items: invoices } = useCollection<Invoice>(INVOICES_KEY, seedInvoices)
   return useMemo(() => {
     const out: Notice[] = []
     const late = withdrawals.filter((w) => w.status === 'em_analise' || (w.status === 'pendente' && Date.now() - new Date(w.createdAt).getTime() > 24 * 3600_000))
@@ -52,10 +56,21 @@ function useNotices(): Notice[] {
       out.push({ id: '2fa', icon: KeyRound, tone: 'danger', title: `${admins.length} ${admins.length === 1 ? 'pessoa' : 'pessoas'} com acesso amplo sem 2FA`, detail: admins.map((a) => a.name).join(', '), to: '/settings/equipe' })
     if (!panel.allowlist.length && can('seguranca-painel.ver'))
       out.push({ id: 'ip', icon: ShieldAlert, tone: 'warning', title: 'Painel aceita login de qualquer IP', detail: 'Cadastre os IPs da equipe em Segurança do painel.', to: '/settings/seguranca' })
-    if (can('faturas.ver'))
-      out.push({ id: 'fatura', icon: Receipt, tone: 'info', title: `Fatura de ${brl(OPEN_INVOICE.openAmount)} em aberto`, detail: `Vence em ${date(OPEN_INVOICE.dueDate)}.`, to: '/faturas' })
+    const open = invoices.filter((i) => !i.paid).sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+    if (open.length && can('faturas.ver')) {
+      const total = open.reduce((s, i) => s + i.total, 0)
+      const overdue = new Date(open[0].dueDate).getTime() < Date.now()
+      out.push({
+        id: 'fatura',
+        icon: Receipt,
+        tone: overdue ? 'danger' : 'info',
+        title: `${open.length === 1 ? 'Fatura' : `${open.length} faturas`} de ${brl(total)} em aberto`,
+        detail: `${overdue ? 'Venceu' : 'Vence'} em ${date(open[0].dueDate)}.`,
+        to: '/faturas',
+      })
+    }
     return out
-  }, [withdrawals, team, panel, can])
+  }, [withdrawals, team, panel, can, invoices])
 }
 
 function StatusPill() {

@@ -107,6 +107,11 @@ function blankWheel(): Wheel {
   }
 }
 
+/** Entidade da auditoria sem repetir "Roleta" quando o nome já começa assim. */
+function wheelEntity(name: string) {
+  return /^roleta\b/i.test(name.trim()) ? name.trim() : `Roleta ${name.trim()}`
+}
+
 function spinCost(s: Pick<WheelSpin, 'kind' | 'value'>, coin: Pick<CoinInfo, 'refValue'>) {
   return prizeCost(s, coin)
 }
@@ -141,10 +146,10 @@ export default function Roleta() {
         })
         if (!ok) return
         wheels.update(other.id, { active: false, updatedAt: new Date().toISOString() })
-        audit('desligar', `Roleta ${other.name}`, `Desativada ao ativar ${w.name} no grupo ${WHEEL_GROUP_LABEL[w.group]}`)
+        audit('desligar', wheelEntity(other.name), `Desativada ao ativar ${w.name} no grupo ${WHEEL_GROUP_LABEL[w.group]}`)
       }
       wheels.update(w.id, { active: true, updatedAt: new Date().toISOString() })
-      audit('ligar', `Roleta ${w.name}`, `Roleta ativada para o grupo ${WHEEL_GROUP_LABEL[w.group]}`)
+      audit('ligar', wheelEntity(w.name), `Roleta ativada para o grupo ${WHEEL_GROUP_LABEL[w.group]}`)
       toast.success('Roleta ativada', { description: `${w.name} já aparece para o grupo ${WHEEL_GROUP_LABEL[w.group]}.` })
     } else {
       const ok = await confirm({
@@ -155,7 +160,7 @@ export default function Roleta() {
       })
       if (!ok) return
       wheels.update(w.id, { active: false, updatedAt: new Date().toISOString() })
-      audit('desligar', `Roleta ${w.name}`, 'Roleta desativada')
+      audit('desligar', wheelEntity(w.name), 'Roleta desativada')
       toast.success('Roleta desativada')
     }
   }
@@ -171,7 +176,7 @@ export default function Roleta() {
     if (!ok) return
     wheels.remove(w.id)
     if (selectedId === w.id) setSelectedId(null)
-    audit('excluir', `Roleta ${w.name}`, `Roleta do grupo ${WHEEL_GROUP_LABEL[w.group]} com ${w.prizes.length} prêmios excluída`)
+    audit('excluir', wheelEntity(w.name), `Roleta do grupo ${WHEEL_GROUP_LABEL[w.group]} com ${w.prizes.length} prêmios excluída`)
     toast.success('Roleta excluída')
   }
 
@@ -180,7 +185,7 @@ export default function Roleta() {
     const copy: Wheel = { ...w, id: uid('rl-'), name: `${w.name} (cópia)`, active: false, createdAt: now, updatedAt: now, prizes: w.prizes.map((p) => ({ ...p, id: uid('p') })) }
     wheels.add(copy, 'end')
     setSelectedId(copy.id)
-    audit('criar', `Roleta ${copy.name}`, `Cópia de ${w.name}, criada desativada`)
+    audit('criar', wheelEntity(copy.name), `Cópia de ${w.name}, criada desativada`)
     toast.success('Roleta duplicada', { description: 'A cópia começa desativada.' })
   }
 
@@ -195,7 +200,7 @@ export default function Roleta() {
       })
       if (!ok) return false
       wheels.update(other.id, { active: false, updatedAt: new Date().toISOString() })
-      audit('desligar', `Roleta ${other.name}`, `Desativada ao ativar ${w.name}`)
+      audit('desligar', wheelEntity(other.name), `Desativada ao ativar ${w.name}`)
     }
     const next = { ...w, name: w.name.trim(), updatedAt: new Date().toISOString() }
     if (isNew) wheels.add(next, 'end')
@@ -203,7 +208,7 @@ export default function Roleta() {
     setSelectedId(next.id)
     audit(
       isNew ? 'criar' : 'editar',
-      `Roleta ${next.name}`,
+      wheelEntity(next.name),
       `${next.prizes.length} prêmios · ${WHEEL_GROUP_LABEL[next.group]} · ${next.spinsPerDay} giro(s)/dia · ${next.costCoins ? `${next.costCoins} ${coin.symbol}` : 'grátis'}${next.active ? ' · ativa' : ''}`,
     )
     toast.success(isNew ? 'Roleta criada' : 'Roleta salva', { description: next.active ? 'Já vale no site.' : 'Ela está desativada. Ative quando quiser publicar.' })

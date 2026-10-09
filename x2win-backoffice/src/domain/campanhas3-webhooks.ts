@@ -102,7 +102,19 @@ export function prettyJson(raw: string) {
 
 /** Faixa de tempo de resposta. */
 export function latencyTone(ms: number): 'success' | 'warning' | 'danger' {
-  if (ms < 400) return 'success'
-  if (ms < 1000) return 'warning'
+  if (ms < 800) return 'success'
+  if (ms < 2000) return 'warning'
   return 'danger'
+}
+
+const PRESET_DAYS: Record<string, number> = { '7d': 7, '30d': 30, '90d': 90 }
+
+/**
+ * Atalhos "7/30/90 dias" como janela móvel (N × 24 h até agora), igual à
+ * contagem do serviço de webhooks ("134 execuções nos últimos 30 dias").
+ */
+export function rollingRange<R extends { from: Date; to: Date; preset: string }>(r: R, now: number = Date.now()): R {
+  const days = PRESET_DAYS[r.preset]
+  if (!days) return r
+  return { ...r, from: new Date(now - days * 86_400_000) }
 }

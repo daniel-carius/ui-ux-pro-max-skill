@@ -6,7 +6,9 @@ import type { Affiliate, Player, PlayerStatus } from '@/data/players'
 import type { Block, IdentitySignal, LinkKind, SignalKind, SignalSource } from '@/data/seguranca'
 import { createRng } from '@/lib/random'
 import { brl, pct } from '@/lib/format'
-import type { AttackModeState } from './system'
+import { dbGet, dbSet } from '@/lib/store'
+import { audit } from './session'
+import { DEFAULT_ATTACK_MODE, SYSTEM_KEYS, type AttackModeState } from './system'
 
 // ---------- Anti-fraude: ligações entre contas ----------
 
@@ -561,4 +563,18 @@ export function validateMaintenance(v: { message: string; returnAt: string | nul
     else if (t <= now) errors.returnAt = 'A previsão de volta precisa ser no futuro.'
   }
   return errors
+}
+
+/**
+ * Desliga o modo de ataque quando o tempo escolhido acabou. Roda no painel inteiro
+ * (não só na tela de Modo de ataque). Retorna os minutos configurados quando
+ * desligou agora, ou null. No servidor real, isto seria um job agendado.
+ */
+export function runAttackAutoOff(now: number = Date.now()): number | null {
+  const cur = dbGet<AttackModeState>(SYSTEM_KEYS.attackMode, DEFAULT_ATTACK_MODE)
+  if (!shouldAutoOff(cur, now)) return null
+  const minutes = cur.autoOffMinutes
+  dbSet<AttackModeState>(SYSTEM_KEYS.attackMode, (prev) => ({ ...prev, active: false, since: null, activatedBy: null }), DEFAULT_ATTACK_MODE)
+  audit('desligar', 'Modo de ataque', `Desligado automaticamente após ${autoOffLabel(minutes)}`)
+  return minutes
 }

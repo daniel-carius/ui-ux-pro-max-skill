@@ -412,15 +412,15 @@ function PositionMark({ position }: { position: number }) {
 }
 
 function LiveCard({ t, players, now, coin, gameName, onOpen }: { t: Tournament; players: Player[]; now: Date; coin: CoinCtx; gameName: Map<string, string>; onOpen: () => void }) {
-  const board = useMemo(() => buildLeaderboard(t, players, now, 3), [t, players, now])
+  const board = useMemo(() => buildLeaderboard(t, players, now).slice(0, 3), [t, players, now])
   const total = new Date(t.endsAt).getTime() - new Date(t.startsAt).getTime()
   const elapsed = Math.min(1, Math.max(0, (now.getTime() - new Date(t.startsAt).getTime()) / total))
   return (
     <article className="card relative overflow-hidden border-success/30">
       <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-success/10 to-transparent" aria-hidden />
       <div className="relative p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
             <span className="inline-flex items-center gap-1.5 rounded-full bg-success/15 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-success">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60 motion-reduce:hidden" />
@@ -434,7 +434,7 @@ function LiveCard({ t, players, now, coin, gameName, onOpen }: { t: Tournament; 
               {t.gameIds.length > 3 ? ` e mais ${t.gameIds.length - 3}` : ''}
             </p>
           </div>
-          <div className="text-right">
+          <div className="shrink-0 text-right">
             <p className="text-xs text-fg-3">Termina em</p>
             <p className="font-display text-lg font-bold text-fg tnum">{timeUntil(t.endsAt, now)}</p>
           </div>

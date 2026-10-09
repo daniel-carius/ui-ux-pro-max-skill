@@ -531,7 +531,7 @@ function Purchases({
 }: {
   purchases: Collection<ShopPurchase>
   items: Collection<ShopItem>
-  coin: CoinInfo
+  coin: CoinCtx
   canEdit: boolean
 }) {
   const [filter, setFilter] = useState<'todas' | PurchaseStatus>('todas')
@@ -646,7 +646,7 @@ function Purchases({
                         <div className="h-full rounded-full" style={{ width: `${(t.n / maxTop) * 100}%`, background: 'var(--chart-4)' }} />
                       </div>
                       <p className="mt-1 flex items-center gap-1 text-[11px] text-fg-3 tnum">
-                        <CoinGlyph size={11} src={null} /> {num(t.coins)} {coin.symbol}
+                        <CoinGlyph size={11} src={coin.icon} /> {num(t.coins)} {coin.symbol}
                       </p>
                     </div>
                   </li>

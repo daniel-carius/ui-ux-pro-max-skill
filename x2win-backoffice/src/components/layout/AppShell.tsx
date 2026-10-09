@@ -3,7 +3,8 @@ import { createPortal } from 'react-dom'
 import { useLocation } from 'react-router-dom'
 import { cn } from '@/lib/cn'
 import { pageByPath } from '@/nav'
-import { ConfirmHost, Skeleton, ToastHost } from '@/components/ui'
+import { ConfirmHost, Skeleton, ToastHost, toast } from '@/components/ui'
+import { autoOffLabel, runAttackAutoOff } from '@/domain/seguranca'
 import { CommandPalette, pushRecent } from './CommandPalette'
 import { Sidebar } from './Sidebar'
 import { Topbar } from './Topbar'
@@ -30,6 +31,17 @@ export function AppShell({ children }: { children: ReactNode }) {
       /* ignore */
     }
   }, [collapsed])
+
+  // modo de ataque com desligamento automático vale em qualquer tela
+  useEffect(() => {
+    const check = () => {
+      const minutes = runAttackAutoOff()
+      if (minutes) toast.info('Modo de ataque desligado automaticamente', { description: `Passou o tempo escolhido (${autoOffLabel(minutes)}).` })
+    }
+    check()
+    const id = setInterval(check, 30_000)
+    return () => clearInterval(id)
+  }, [])
 
   // Ctrl/Cmd + K abre a busca de páginas
   useEffect(() => {

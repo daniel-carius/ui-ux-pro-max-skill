@@ -105,7 +105,7 @@ export const COMPANY_KEY = 'config.empresa'
 export const DEFAULT_COMPANY: CompanyState = {
   legalName: 'X2Win Entretenimento Digital Ltda.',
   tradeName: 'X2Win',
-  cnpj: '48123456000190',
+  cnpj: '48123456000175',
   license: 'SPA/MF nº 0000/2025 (demonstração)',
   licenseValidUntil: '2030-01-01T12:00:00',
   address: 'Av. Paulista, 1000, 10º andar · São Paulo/SP · 01310-100',

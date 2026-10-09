@@ -299,9 +299,20 @@ export function DataTable<T>({
               <tr
                 key={rowKey(r)}
                 onClick={onRowClick ? () => onRowClick(r) : undefined}
+                tabIndex={onRowClick ? 0 : undefined}
+                onKeyDown={
+                  onRowClick
+                    ? (e) => {
+                        if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+                          e.preventDefault()
+                          onRowClick(r)
+                        }
+                      }
+                    : undefined
+                }
                 className={cn(
                   'border-b border-line/70 transition-colors duration-100 last:border-0 hover:bg-surface-2',
-                  onRowClick && 'cursor-pointer',
+                  onRowClick && 'cursor-pointer focus-visible:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary',
                   rowClassName?.(r),
                 )}
               >
