@@ -1,0 +1,207 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Tokens de tema. Os valores são canais RGB para permitir opacidade no Tailwind
+ * (ex.: bg-primary/10). O tema escuro vale para data-theme="dark" e, sem JS,
+ * para a preferência do sistema (a menos que o usuário tenha escolhido claro).
+ */
+:root {
+  color-scheme: light;
+  --bg: 245 246 250;
+  --surface: 255 255 255;
+  --surface-2: 248 249 251;
+  --surface-3: 238 240 245;
+  --line: 230 232 238;
+  --line-strong: 208 212 222;
+  --fg: 16 19 34;
+  --fg-2: 71 77 94;
+  --fg-3: 104 110 128;
+  --primary: 108 59 235;
+  --primary-fg: 255 255 255;
+  --primary-text: 98 50 220;
+  --success: 4 120 87;
+  --danger: 220 38 38;
+  --warning: 180 83 9;
+  --info: 3 105 161;
+  --gold: 202 138 4;
+  --shadow: 15 18 34;
+
+  /* Paleta categórica de gráficos (validada para daltonismo) */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-7: #4a3aa7;
+  --chart-8: #e34948;
+  --chart-grid: #eceef2;
+  --chart-axis: #8a8f9c;
+  --chart-cursor: rgba(16, 19, 34, 0.06);
+  --avatar-l: 38%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --bg: 9 11 17;
+    --surface: 17 20 29;
+    --surface-2: 22 26 37;
+    --surface-3: 30 35 49;
+    --line: 36 41 56;
+    --line-strong: 52 58 77;
+    --fg: 240 242 247;
+    --fg-2: 178 184 200;
+    --fg-3: 135 142 160;
+    --primary: 124 77 255;
+    --primary-fg: 255 255 255;
+    --primary-text: 177 152 255;
+    --success: 52 211 153;
+    --danger: 248 113 113;
+    --warning: 251 191 36;
+    --info: 56 189 248;
+    --gold: 250 204 21;
+    --shadow: 0 0 0;
+    --chart-1: #3987e5;
+    --chart-2: #d95926;
+    --chart-3: #199e70;
+    --chart-4: #c98500;
+    --chart-5: #d55181;
+    --chart-6: #008300;
+    --chart-7: #9085e9;
+    --chart-8: #e66767;
+    --chart-grid: #1f2433;
+    --chart-axis: #7d8396;
+    --chart-cursor: rgba(255, 255, 255, 0.05);
+    --avatar-l: 74%;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: 9 11 17;
+  --surface: 17 20 29;
+  --surface-2: 22 26 37;
+  --surface-3: 30 35 49;
+  --line: 36 41 56;
+  --line-strong: 52 58 77;
+  --fg: 240 242 247;
+  --fg-2: 178 184 200;
+  --fg-3: 135 142 160;
+  --primary: 124 77 255;
+  --primary-fg: 255 255 255;
+  --primary-text: 177 152 255;
+  --success: 52 211 153;
+  --danger: 248 113 113;
+  --warning: 251 191 36;
+  --info: 56 189 248;
+  --gold: 250 204 21;
+  --shadow: 0 0 0;
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #008300;
+  --chart-7: #9085e9;
+  --chart-8: #e66767;
+  --chart-grid: #1f2433;
+  --chart-axis: #7d8396;
+  --chart-cursor: rgba(255, 255, 255, 0.05);
+  --avatar-l: 74%;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-bg font-sans text-sm text-fg antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+  h1, h2, h3 {
+    @apply font-display tracking-tight;
+  }
+  ::selection {
+    background: rgb(var(--primary) / 0.22);
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--primary));
+    outline-offset: 2px;
+  }
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--line-strong)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--line-strong));
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  button, [role='button'], summary, label[for], select {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  fieldset:disabled {
+    opacity: 1;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-line bg-surface shadow-card;
+  }
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+  .input-base {
+    @apply h-10 w-full rounded-lg border border-line-strong/80 bg-surface px-3 text-sm text-fg placeholder:text-fg-3
+      transition-[border-color,box-shadow] duration-150
+      hover:border-line-strong focus:border-primary focus:shadow-ring focus:outline-none
+      disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-fg-3;
+  }
+  .link {
+    @apply font-medium text-primary-text underline-offset-2 hover:underline;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Recharts: tira o contorno de foco padrão do SVG */
+.recharts-wrapper *:focus {
+  outline: none;
+}
