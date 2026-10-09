@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { Suspense, lazy, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   Bell,
@@ -23,13 +23,16 @@ import { cn } from '@/lib/cn'
 import { brl, date, relative } from '@/lib/format'
 import { useTheme } from '@/lib/theme'
 import { resetDb } from '@/lib/store'
-import { useRoles, useSession, useTeam } from '@/domain/session'
+import { useAuthApi, useRoles, useSession, useTeam } from '@/domain/session'
 import { useAttackMode, useMaintenance, usePanelSecurity } from '@/domain/system'
 import { INVOICES_KEY, type Invoice } from '@/domain/config1-faturas'
 import { seedInvoices } from '@/data/config1-faturas'
 import { useCollection } from '@/lib/store'
 import { useWithdrawals } from '@/data/hooks'
 import { Avatar, IconButton, Menu, Popover, confirm, toast, type MenuEntry } from '@/components/ui'
+
+// só no modo API (carregado ao abrir)
+const ChangePasswordModal = lazy(() => import('@/pages/auth/ChangePasswordPage').then((m) => ({ default: m.ChangePasswordModal })))
 
 interface Notice {
   id: string
@@ -105,8 +108,37 @@ export function Topbar({ onOpenMenu, onOpenSearch }: { onOpenMenu: () => void; o
   const [roles] = useRoles()
   const notices = useNotices()
   const navigate = useNavigate()
+  const auth = useAuthApi()
+  const [passwordOpen, setPasswordOpen] = useState(false)
 
-  const userMenu: MenuEntry[] = [
+  // modo API: conta real (trocar senha, sair de verdade); sem dados de demonstração para restaurar
+  const accountMenu: MenuEntry[] = auth.enabled
+    ? [
+        { heading: 'Sua conta' },
+        { label: 'Trocar senha', icon: KeyRound, onSelect: () => setPasswordOpen(true) },
+        { label: 'Sair', icon: LogOut, danger: true, onSelect: () => void auth.logout() },
+      ]
+    : [
+        {
+          label: 'Restaurar dados de demonstração',
+          icon: RotateCcw,
+          onSelect: async () => {
+            const ok = await confirm({
+              title: 'Restaurar dados de demonstração?',
+              description: 'Todas as alterações feitas neste navegador serão apagadas e o painel volta ao estado inicial.',
+              confirmLabel: 'Restaurar',
+              tone: 'warning',
+            })
+            if (ok) {
+              resetDb()
+              toast.success('Dados restaurados')
+            }
+          },
+        },
+        { label: 'Sair', icon: LogOut, danger: true, onSelect: () => toast.info('Sessão encerrada (demonstração)') },
+      ]
+
+  const viewAsMenu: MenuEntry[] = [
     { heading: 'Ver painel como cargo' },
     ...roles.map((r) => ({
       label: (
@@ -119,29 +151,17 @@ export function Topbar({ onOpenMenu, onOpenSearch }: { onOpenMenu: () => void; o
       onSelect: () => {
         setViewAs(r.id === realRole.id ? null : r.id)
         toast.info(r.id === realRole.id ? 'Voltou ao seu cargo' : `Vendo o painel como ${r.name}`, {
-          description: 'Menu, telas e botões seguem as permissões do cargo.',
+          description: auth.enabled
+            ? 'Menu, telas e botões seguem o cargo escolhido, sem passar das suas permissões.'
+            : 'Menu, telas e botões seguem as permissões do cargo.',
         })
       },
     })),
     { divider: true },
-    {
-      label: 'Restaurar dados de demonstração',
-      icon: RotateCcw,
-      onSelect: async () => {
-        const ok = await confirm({
-          title: 'Restaurar dados de demonstração?',
-          description: 'Todas as alterações feitas neste navegador serão apagadas e o painel volta ao estado inicial.',
-          confirmLabel: 'Restaurar',
-          tone: 'warning',
-        })
-        if (ok) {
-          resetDb()
-          toast.success('Dados restaurados')
-        }
-      },
-    },
-    { label: 'Sair', icon: LogOut, danger: true, onSelect: () => toast.info('Sessão encerrada (demonstração)') },
   ]
+
+  // sem a lista de cargos (modo API, falha ao carregar), o menu mostra só a conta
+  const userMenu: MenuEntry[] = [...(roles.length ? viewAsMenu : []), ...accountMenu]
 
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-bg/85 backdrop-blur-md">
@@ -262,6 +282,11 @@ export function Topbar({ onOpenMenu, onOpenSearch }: { onOpenMenu: () => void; o
           />
         </div>
       </div>
+      {auth.enabled && passwordOpen && (
+        <Suspense fallback={null}>
+          <ChangePasswordModal open onClose={() => setPasswordOpen(false)} />
+        </Suspense>
+      )}
     </header>
   )
 }

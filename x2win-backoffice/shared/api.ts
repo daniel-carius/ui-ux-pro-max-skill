@@ -82,6 +82,8 @@ export interface KvGetResponse<T = unknown> {
   value: T
   version: number
   updatedAt: string | null
+  /** false = nunca gravada (value vem null; o painel usa o valor padrão dele) */
+  stored?: boolean
 }
 
 export interface KvPutRequest<T = unknown> {

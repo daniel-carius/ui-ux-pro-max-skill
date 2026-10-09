@@ -83,8 +83,8 @@ Cada tela guarda seus dados por chave (ex.: `campanhas.cupons`). As regras de ca
 `shared/kv-registry.ts` (`findKvRule`, `canReadKey`, `canWriteKey`).
 
 - Chave sem regra → 404 `chave_desconhecida`. Chave local (`isLocalOnlyKey`) → 400 `chave_local`.
-- **GET** → `{ key, value, version, updatedAt }`. Sem permissão de leitura → 403. Nunca gravada → 404
-  (o painel usa o valor padrão dele).
+- **GET** → `{ key, value, version, updatedAt, stored }`. Sem permissão de leitura → 403. Nunca gravada → 200 com
+  `stored: false`, `value: null` e `version: 0` (o painel usa o valor padrão dele).
 - **PUT** `{ value, version? }` → mesmo formato da leitura, já mascarado.
   - Sem permissão de escrita (`writePermissions`) → 403. `write: 'servidor'` → 403 sempre.
   - Já existe valor e `version` diferente da atual (ou ausente) → 409 `versao_desatualizada` com `details.version`.

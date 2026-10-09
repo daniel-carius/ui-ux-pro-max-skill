@@ -41,6 +41,11 @@ export const toast = {
   error: (title: string, opts?: ToastOpts) => pushToast('error', title, opts),
   info: (title: string, opts?: ToastOpts) => pushToast('info', title, opts),
   warning: (title: string, opts?: ToastOpts) => pushToast('warning', title, opts),
+  /** some com todos os avisos (ex.: ao sair) */
+  clear: () => {
+    toasts = []
+    toastListeners.forEach((l) => l(toasts))
+  },
 }
 
 const TOAST_STYLE: Record<ToastKind, { icon: LucideIcon; cls: string }> = {

@@ -3,7 +3,8 @@ import type { LucideIcon } from 'lucide-react'
 import { Calculator, ChevronRight, Eye, Lock, RotateCcw, Save } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/cn'
-import { useDb } from '@/lib/store'
+import { dbSetAndWait, useDb } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
 import { MODULE_BY_ID, pageByPath } from '@/nav'
 import { audit, usePageAccess } from '@/domain/session'
 import { Delta } from './Badge'
@@ -289,22 +290,31 @@ export function useSettingsForm<T>(
         return
       }
       setSaving(true)
-      // pequena espera para dar retorno visual de "salvando"
+      const prev = saved
+      const changed =
+        values && typeof values === 'object' && !Array.isArray(values)
+          ? Object.keys(values as object).filter(
+              (k) => stableStringify((values as Record<string, unknown>)[k]) !== stableStringify((prev as Record<string, unknown>)[k]),
+            )
+          : []
+      const finish = (ok: boolean) => {
+        setSaving(false)
+        if (!ok) return
+        opts.onSaved?.(values, prev)
+        toast.success(opts.successMessage ?? 'Alterações salvas', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
+      }
+      if (isApiMode()) {
+        // o servidor valida, grava a auditoria e confirma; erro já aparece pelo adaptador
+        void dbSetAndWait(key, values, defaults).then(finish)
+        return
+      }
+      // modo demonstração: pequena espera para dar retorno visual de "salvando"
       setTimeout(() => {
-        const prev = saved
         setSaved(values)
-        const changed =
-          values && typeof values === 'object' && !Array.isArray(values)
-            ? Object.keys(values as object).filter(
-                (k) => stableStringify((values as Record<string, unknown>)[k]) !== stableStringify((prev as Record<string, unknown>)[k]),
-              )
-            : []
         const labels = opts.fieldLabels as Record<string, string> | undefined
         const names = changed.map((k) => labels?.[k] ?? k)
         audit('editar', opts.entity, names.length ? `Campos alterados: ${names.join(', ')}` : 'Configuração salva')
-        opts.onSaved?.(values, prev)
-        setSaving(false)
-        toast.success(opts.successMessage ?? 'Alterações salvas', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
+        finish(true)
       }, 450)
     },
   }

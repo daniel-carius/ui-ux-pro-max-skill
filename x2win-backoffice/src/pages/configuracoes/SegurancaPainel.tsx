@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   Globe,
   LogIn,
@@ -39,7 +39,10 @@ import {
   useSettingsForm,
   type Column,
 } from '@/components/ui'
+import type { KvGetResponse, KvPutResponse } from '@shared/api'
 import { dateTime, num, plural, relative } from '@/lib/format'
+import { ApiError, api, isApiMode } from '@/lib/api'
+import { patchCache, refreshKey } from '@/lib/store'
 import { uid } from '@/lib/random'
 import type { AuditEntry } from '@/data/team'
 import { SESSION_IP, audit, useAudit, usePageAccess, useRoles, useSession, useTeam } from '@/domain/session'
@@ -49,6 +52,30 @@ import { needs2faSetup } from '@/domain/config2-access'
 import { useExternalSave } from './_shared-g'
 
 type Entry = PanelSecurityState['allowlist'][number]
+
+/**
+ * Modo API: incluir/remover IP grava na hora no servidor, a partir do valor atual dele (com versão).
+ * O servidor recusa (409 bloquearia_voce) a lista que deixaria o IP de quem grava de fora e informa esse IP.
+ * Nada é mostrado como salvo antes da resposta.
+ */
+const API = isApiMode()
+
+interface ListSaveError {
+  message: string
+  /** IP de quem gravou, visto pelo servidor (só no 409 bloquearia_voce) */
+  ip: string | null
+  lockout: boolean
+}
+
+async function saveAllowlistOnServer(change: (list: Entry[]) => Entry[]): Promise<Entry[]> {
+  const path = `/api/kv/${encodeURIComponent(PANEL_SECURITY_KEY)}`
+  const cur = await api<KvGetResponse<PanelSecurityState>>('GET', path)
+  const res = await api<KvPutResponse<PanelSecurityState>>('PUT', path, {
+    value: { ...cur.value, allowlist: change(cur.value.allowlist) },
+    version: cur.version,
+  })
+  return res.value.allowlist
+}
 
 const TIMEOUTS = [
   { value: '15', label: '15 minutos' },
@@ -65,16 +92,31 @@ export default function SegurancaPainel() {
   const { user } = useSession()
   const [team] = useTeam()
   const [roles] = useRoles()
+  const [auditEntries] = useAudit()
   const [, setPanel] = usePanelSecurity()
   const form = useSettingsForm<PanelSecurityState>(PANEL_SECURITY_KEY, DEFAULT_PANEL_SECURITY, {
     entity: 'Segurança do painel',
     successMessage: 'Segurança do painel salva',
     validate: (v) => (v.sessionTimeoutMinutes < 5 ? 'O tempo de sessão precisa ser de pelo menos 5 minutos.' : null),
   })
-  const applyNow = useExternalSave(form, setPanel)
+  // modo API: a lista já foi gravada pelo servidor; só atualiza a memória (sem novo PUT)
+  const patchSaved = useCallback((next: PanelSecurityState) => patchCache(PANEL_SECURITY_KEY, next, DEFAULT_PANEL_SECURITY), [])
+  const applyNow = useExternalSave(form, API ? patchSaved : setPanel)
+  // depois de esperar o servidor, usa o rascunho mais recente (não o do clique)
+  const applyRef = useRef(applyNow)
+  applyRef.current = applyNow
   const list = form.saved.allowlist
   const v = form.values
-  const myAllowed = allowlistAllows(list, SESSION_IP)
+
+  const [listSaving, setListSaving] = useState(false)
+  const [listError, setListError] = useState<ListSaveError | null>(null)
+  const [serverIp, setServerIp] = useState<string | null>(null)
+  // modo API: o IP real só o servidor sabe; usa o que ele informou, o do último login ou o da auditoria
+  const myLoginIp = useMemo(() => (API ? auditEntries.find((e) => e.action === 'login' && e.actorId === user.id)?.ip ?? null : null), [auditEntries, user.id])
+  const myIp: string | null = API ? serverIp ?? team.find((m) => m.id === user.id)?.lastIp ?? myLoginIp : SESSION_IP
+  // modo API: com a lista preenchida, quem chega aqui está nela (o servidor recusa os outros IPs)
+  const myAllowed = API ? true : allowlistAllows(list, SESSION_IP)
+  const firstName = user.name.split(' ')[0]
 
   const [value, setValue] = useState('')
   const [label, setLabel] = useState('')
@@ -86,6 +128,32 @@ export default function SegurancaPainel() {
 
   const activeTeam = team.filter((m) => m.status === 'ativo')
   const blockedTeam = list.length ? activeTeam.filter((m) => m.lastIp && !allowlistAllows(list, m.lastIp)) : []
+
+  /** Modo API: grava a mudança da lista no servidor; em caso de recusa, mostra o motivo e não muda nada na tela. */
+  const saveListOnServer = async (change: (list: Entry[]) => Entry[]) => {
+    setListSaving(true)
+    setListError(null)
+    try {
+      const saved = await saveAllowlistOnServer(change)
+      applyRef.current((prev) => ({ ...prev, allowlist: saved }))
+      // traz a versão nova para a próxima gravação (Salvar alterações)
+      await refreshKey(PANEL_SECURITY_KEY)
+      return true
+    } catch (e) {
+      const err = e instanceof ApiError ? e : null
+      const lockout = err?.code === 'bloquearia_voce'
+      const ip = lockout ? ((err?.details as { ip?: unknown } | undefined)?.ip as string | undefined) || null : null
+      if (ip) setServerIp(ip)
+      const message = err?.message ?? 'Erro inesperado ao falar com o servidor. Tente de novo.'
+      setListError({ message, ip, lockout })
+      toast.error(lockout ? 'A mudança bloquearia o seu acesso' : 'Lista de IPs não salva', { description: message, duration: 6000 })
+      // garante que a tela mostra o que está gravado no servidor
+      refreshKey(PANEL_SECURITY_KEY).catch(() => {})
+      return false
+    } finally {
+      setListSaving(false)
+    }
+  }
 
   const add = async (raw: string, lbl: string) => {
     const p = parseAllowEntry(raw)
@@ -100,7 +168,8 @@ export default function SegurancaPainel() {
     }
     const entry: Entry = { id: uid('ip'), value: p.normalized, label: lbl.trim(), createdAt: new Date().toISOString(), createdBy: user.name }
     const next = [...list, entry]
-    if (wouldLockOut(next, SESSION_IP)) {
+    // modo API: quem decide se bloquearia é o servidor (ele conhece o seu IP de verdade)
+    if (!API && wouldLockOut(next, SESSION_IP)) {
       const ok = await confirm({
         title: 'Você vai perder o acesso',
         description: `Com a lista ativa, só entram os IPs dela. Seu IP atual (${SESSION_IP}) não está em ${p.normalized}: sua sessão cai e você não entra de novo daqui.`,
@@ -123,6 +192,11 @@ export default function SegurancaPainel() {
       })
       if (!ok) return false
     }
+    if (API) {
+      if (!(await saveListOnServer((cur) => [...cur, entry]))) return false
+      toast.success(p.kind === 'ip' ? 'IP adicionado' : 'Faixa adicionada', { description: `${entry.value} · ${p.size === 1 ? '1 endereço' : `${num(p.size)} endereços`}` })
+      return true
+    }
     applyNow((prev) => ({ ...prev, allowlist: [...prev.allowlist, entry] }))
     audit('criar', 'Segurança do painel', `IP permitido adicionado: ${entry.value} (${entry.label})`)
     toast.success(p.kind === 'ip' ? 'IP adicionado' : 'Faixa adicionada', { description: `${entry.value} · ${p.size === 1 ? '1 endereço' : `${num(p.size)} endereços`}` })
@@ -131,7 +205,7 @@ export default function SegurancaPainel() {
 
   const submit = async () => {
     setTouched(true)
-    if (addError || !label.trim() || !parsed.ok) return
+    if (addError || !label.trim() || !parsed.ok || listSaving) return
     if (await add(value, label)) {
       setValue('')
       setLabel('')
@@ -140,8 +214,9 @@ export default function SegurancaPainel() {
   }
 
   const remove = async (e: Entry) => {
+    if (listSaving) return
     const next = list.filter((x) => x.id !== e.id)
-    const lockOut = wouldLockOut(next, SESSION_IP)
+    const lockOut = !API && wouldLockOut(next, SESSION_IP)
     const opens = next.length === 0
     const ok = await confirm({
       title: lockOut ? 'Remover vai bloquear você' : `Remover ${e.value}?`,
@@ -156,12 +231,18 @@ export default function SegurancaPainel() {
       typeToConfirm: lockOut ? 'BLOQUEAR' : undefined,
     })
     if (!ok) return
+    if (API) {
+      if (!(await saveListOnServer((cur) => cur.filter((x) => x.id !== e.id)))) return
+      toast.success('Removido da lista', { description: opens ? 'Nenhuma restrição: a equipe entra de qualquer IP.' : undefined })
+      return
+    }
     applyNow((prev) => ({ ...prev, allowlist: prev.allowlist.filter((x) => x.id !== e.id) }))
     audit('excluir', 'Segurança do painel', `IP permitido removido: ${e.value} (${e.label})${opens ? '; lista vazia, qualquer IP entra' : ''}`)
     toast.success('Removido da lista', { description: opens ? 'Nenhuma restrição: a equipe entra de qualquer IP.' : undefined })
   }
 
-  const addMyIp = () => add(SESSION_IP, `IP de ${user.name.split(' ')[0]}`)
+  const addMyIp = () => (myIp ? add(myIp, `IP de ${firstName}`) : Promise.resolve(false))
+  const noIpTitle = !myIp ? 'Seu IP ainda não é conhecido pelo painel. Adicione o IP ou a faixa da sua rede; se não cobrir o seu acesso, o servidor avisa qual é o seu IP.' : undefined
 
   const without2fa = activeTeam.filter((m) => !m.twoFactor)
   const pending = activeTeam.filter((m) => needs2faSetup(m, roles.find((r) => r.id === m.roleId), v.enforce2faForAll))
@@ -170,10 +251,10 @@ export default function SegurancaPainel() {
     <>
       <PageHeader
         actions={
-          <Tooltip content={`IP da sua sessão: ${SESSION_IP}`}>
+          <Tooltip content={API ? (myIp ? `IP visto pelo servidor no seu acesso: ${myIp}` : 'O servidor ainda não informou o seu IP') : `IP da sua sessão: ${SESSION_IP}`}>
             <span className="inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-surface px-3 text-[13px] text-fg-2">
               <MapPin size={15} className="text-fg-3" aria-hidden />
-              Seu IP: <Mono className="text-fg">{SESSION_IP}</Mono>
+              Seu IP: <Mono className="text-fg">{myIp ?? 'não identificado'}</Mono>
               <Badge tone={!list.length ? 'neutral' : myAllowed ? 'success' : 'danger'}>{!list.length ? 'sem restrição' : myAllowed ? 'liberado' : 'fora da lista'}</Badge>
             </span>
           </Tooltip>
@@ -194,12 +275,12 @@ export default function SegurancaPainel() {
             icon={Globe}
             title="Nenhuma restrição: a equipe entra de qualquer IP"
             action={
-              <Button variant="danger" size="sm" icon={Plus} onClick={addMyIp} disabled={!canEdit}>
+              <Button variant="danger" size="sm" icon={Plus} onClick={addMyIp} disabled={!canEdit || !myIp || listSaving} title={noIpTitle}>
                 Adicionar meu IP
               </Button>
             }
           >
-            Uma senha vazada basta para entrar de qualquer lugar do mundo. Libere só os IPs do escritório e da VPN. Comece pelo seu IP ({SESSION_IP}) para não se trancar fora.
+            Uma senha vazada basta para entrar de qualquer lugar do mundo. Libere só os IPs do escritório e da VPN. Comece pelo seu IP{myIp ? ` (${myIp})` : ''} para não se trancar fora.
           </Alert>
         )}
         {list.length > 0 && !myAllowed && (
@@ -214,7 +295,13 @@ export default function SegurancaPainel() {
             title="IPs e faixas permitidos"
             description="Com a lista preenchida, só estes endereços entram no painel. Vale para login, sessões abertas e chaves de IA."
             actions={
-              <Button size="sm" icon={MapPin} onClick={addMyIp} disabled={!canEdit || (list.length > 0 && myAllowed)} title={list.length > 0 && myAllowed ? 'Seu IP já está liberado' : undefined}>
+              <Button
+                size="sm"
+                icon={MapPin}
+                onClick={addMyIp}
+                disabled={!canEdit || (list.length > 0 && myAllowed) || !myIp || listSaving}
+                title={list.length > 0 && myAllowed ? 'Seu IP já está liberado' : noIpTitle}
+              >
                 Adicionar meu IP
               </Button>
             }
@@ -231,7 +318,7 @@ export default function SegurancaPainel() {
                 <Field label="IP ou faixa (CIDR)" htmlFor="ip-value" error={addError}
                   hint={
                     parsed.ok && !dup
-                      ? `${parsed.kind === 'ip' ? 'IP único' : `Faixa de ${num(parsed.size)} endereços: ${parsed.first} a ${parsed.last}`}${ipMatchesEntry(SESSION_IP, parsed.normalized) ? ' · inclui seu IP' : ''}`
+                      ? `${parsed.kind === 'ip' ? 'IP único' : `Faixa de ${num(parsed.size)} endereços: ${parsed.first} a ${parsed.last}`}${myIp && ipMatchesEntry(myIp, parsed.normalized) ? ' · inclui seu IP' : ''}`
                       : 'Ex.: 189.45.12.207 ou 189.45.12.0/24'
                   }
                 >
@@ -240,7 +327,7 @@ export default function SegurancaPainel() {
                 <Field label="De onde é" htmlFor="ip-label" error={labelError}>
                   <Input id="ip-label" value={label} invalid={!!labelError} placeholder="Escritório São Paulo" onChange={(e) => setLabel(e.target.value)} />
                 </Field>
-                <Button type="submit" variant="primary" icon={Plus} className="sm:mt-[26px]">
+                <Button type="submit" variant="primary" icon={Plus} className="sm:mt-[26px]" loading={listSaving}>
                   Adicionar
                 </Button>
               </form>
@@ -258,11 +345,29 @@ export default function SegurancaPainel() {
               )}
             </FormFieldset>
 
+            {listError && (
+              <Alert
+                tone="danger"
+                icon={ShieldAlert}
+                title={listError.lockout ? 'A mudança bloquearia o seu acesso: nada foi salvo' : 'A lista de IPs não foi salva'}
+                action={
+                  listError.lockout && listError.ip && (!list.length || !coveredBy(listError.ip, list)) ? (
+                    <Button size="sm" variant="danger" icon={Plus} onClick={() => add(listError.ip!, `IP de ${firstName}`)} disabled={!canEdit || listSaving}>
+                      Adicionar {listError.ip}
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {listError.message}
+                {listError.lockout && ' Com a lista ativa, só entram os IPs dela. Inclua primeiro o IP de onde você acessa.'}
+              </Alert>
+            )}
+
             {list.length ? (
               <ul className="divide-y divide-line rounded-xl border border-line">
                 {list.map((e) => {
                   const p = parseAllowEntry(e.value)
-                  const mine = ipMatchesEntry(SESSION_IP, e.value)
+                  const mine = !!myIp && ipMatchesEntry(myIp, e.value)
                   const people = activeTeam.filter((m) => m.lastIp && ipMatchesEntry(m.lastIp, e.value))
                   return (
                     <li key={e.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
@@ -280,7 +385,7 @@ export default function SegurancaPainel() {
                           {people.length > 0 && ` · usado por ${people.map((m) => m.name.split(' ')[0]).join(', ')}`}
                         </p>
                       </div>
-                      <IconButton icon={Trash2} variant="danger" label={`Remover ${e.value}`} disabled={!canEdit} onClick={() => remove(e)} />
+                      <IconButton icon={Trash2} variant="danger" label={`Remover ${e.value}`} disabled={!canEdit || listSaving} onClick={() => remove(e)} />
                     </li>
                   )
                 })}
@@ -289,7 +394,9 @@ export default function SegurancaPainel() {
               <div className="flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-danger/30 bg-danger/[0.03] px-6 py-8 text-center">
                 <Globe size={22} className="text-danger" aria-hidden />
                 <p className="text-sm font-semibold text-fg">Lista vazia: qualquer IP entra</p>
-                <p className="max-w-md text-[13px] text-fg-3">Adicione o IP do escritório, da VPN ou o seu. Sugestão de faixa para a sua rede: <Mono>{rangeOf24(SESSION_IP)}</Mono></p>
+                <p className="max-w-md text-[13px] text-fg-3">
+                  Adicione o IP do escritório, da VPN ou o seu.{myIp && <> Sugestão de faixa para a sua rede: <Mono>{rangeOf24(myIp)}</Mono></>}
+                </p>
               </div>
             )}
 

@@ -1,12 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   Eye,
   KeyRound,
+  Link2,
   LogOut,
   MailPlus,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
+  ShieldOff,
   Trash2,
   UserCheck,
   UserCog,
@@ -39,13 +41,15 @@ import {
   type MenuEntry,
   type Tone,
 } from '@/components/ui'
+import type { CreateMemberResponse, InviteMemberResponse } from '@shared/api'
 import { dateTime, num, pct, plural, relative } from '@/lib/format'
-import { useDb } from '@/lib/store'
+import { ApiError, api, isApiMode } from '@/lib/api'
+import { patchCache, refreshKey, useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { MODULES } from '@/nav'
-import { AUDIT_ACTION_LABEL, type TeamMember } from '@/data/team'
+import { AUDIT_ACTION_LABEL, seedTeam, type TeamMember } from '@/data/team'
 import { MCP_KEYS, seedMcpKeys } from '@/data/config2-mcp'
-import { audit, usePageAccess, useAudit, useRoles, useSession, useTeam } from '@/domain/session'
+import { KEYS, audit, usePageAccess, useAudit, useRoles, useSession, useTeam } from '@/domain/session'
 import { moduleAccess, type Role } from '@/domain/roles'
 import { usePanelSecurity } from '@/domain/system'
 import { allowlistAllows } from '@/domain/config2-network'
@@ -77,6 +81,32 @@ interface InviteInfo {
 
 const INVITES_KEY = 'config.equipe.convites'
 
+/** Modo API: criar, convidar, desativar, reativar, trocar cargo e redefinir 2FA usam as rotas de /api/team. */
+const API = isApiMode()
+
+type TeamAction = 'deactivate' | 'reactivate' | 'reset-2fa' | 'role'
+
+function apiMessage(e: unknown) {
+  return e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor. Tente de novo.'
+}
+
+/** Modo API: põe na lista a pessoa como o servidor devolveu e recarrega a equipe. */
+function applyMember(member: TeamMember) {
+  patchCache<TeamMember[]>(
+    KEYS.team,
+    (prev) => (prev.some((m) => m.id === member.id) ? prev.map((m) => (m.id === member.id ? member : m)) : [...prev, member]),
+    seedTeam,
+  )
+  refreshKey(KEYS.team).catch(() => {})
+}
+
+/** Modo API: ação sobre uma pessoa da equipe (o servidor confere as regras e grava a auditoria). */
+async function teamAction(id: string, action: TeamAction, body?: { roleId: string }): Promise<TeamMember> {
+  const res = await api<{ ok: true; member: TeamMember }>('POST', `/api/team/${encodeURIComponent(id)}/${action}`, body)
+  applyMember(res.member)
+  return res.member
+}
+
 export default function Equipe() {
   const { canEdit, can } = usePageAccess()
   const { user } = useSession()
@@ -89,6 +119,10 @@ export default function Equipe() {
   const [modal, setModal] = useState<null | 'convite' | 'direto'>(null)
   const [roleEditId, setRoleEditId] = useState<string | null>(null)
   const [openId, setOpenId] = useState<string | null>(null)
+  /** modo API: link de convite reenviado, mostrado uma vez */
+  const [inviteLink, setInviteLink] = useState<{ email: string; url: string } | null>(null)
+  /** modo API: pessoas com ação em andamento (evita clique duplo nos itens de menu) */
+  const inFlight = useRef(new Set<string>())
   const canGrant = can(GRANT_PERM)
   const noEdit = !canEdit ? 'Seu cargo não pode editar a equipe' : undefined
 
@@ -106,9 +140,66 @@ export default function Equipe() {
 
   const updateMember = (id: string, patch: Partial<TeamMember>) => setTeam((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)))
 
-  const ask2fa = (m: TeamMember) => {
-    audit('enviar', `Equipe · ${m.name}`, 'Pedido de ativação do 2FA enviado por e-mail')
-    toast.success('Pedido enviado', { description: `${m.name} recebe um e-mail e só continua no painel depois de ativar o 2FA.` })
+  /** Modo API: roda a ação uma vez por pessoa e mostra o erro do servidor. */
+  const runOnce = async (m: TeamMember, errorTitle: string, run: () => Promise<void>) => {
+    if (inFlight.current.has(m.id)) return
+    inFlight.current.add(m.id)
+    try {
+      await run()
+    } catch (e) {
+      toast.error(errorTitle, { description: apiMessage(e), duration: 6000 })
+    } finally {
+      inFlight.current.delete(m.id)
+    }
+  }
+
+  const ask2fa = async (m: TeamMember) => {
+    if (!API) {
+      audit('enviar', `Equipe · ${m.name}`, 'Pedido de ativação do 2FA enviado por e-mail')
+      toast.success('Pedido enviado', { description: `${m.name} recebe um e-mail e só continua no painel depois de ativar o 2FA.` })
+      return
+    }
+    // 2FA já exigido (cargo ou "2FA para todos"): encerrar as sessões obriga o cadastro no próximo acesso
+    if (needs2faSetup(m, roleOf(m), panel.enforce2faForAll)) {
+      if (!m.activeSessions) {
+        toast.info('O 2FA já é exigido', { description: `${m.name} cadastra o 2FA no próximo acesso ao painel.` })
+        return
+      }
+      const ok = await confirm({
+        title: `Exigir o 2FA de ${m.name} agora?`,
+        description: `O 2FA já é obrigatório para esta pessoa. ${m.activeSessions === 1 ? 'A sessão aberta é encerrada' : `As ${num(m.activeSessions)} sessões abertas são encerradas`} e ela cadastra o 2FA ao entrar de novo.`,
+        confirmLabel: 'Encerrar sessões e exigir 2FA',
+        tone: 'warning',
+        icon: ShieldCheck,
+      })
+      if (!ok) return
+      await runOnce(m, 'Não foi possível exigir o 2FA', async () => {
+        await teamAction(m.id, 'reset-2fa')
+        toast.success('2FA exigido', { description: `${m.name} saiu do painel e cadastra o 2FA no próximo acesso.` })
+      })
+      return
+    }
+    audit('enviar', `Equipe · ${m.name}`, 'Pedido de ativação do 2FA registrado')
+    toast.success('Pedido registrado', {
+      description: `Avise ${m.name} para ativar o 2FA. Para tornar obrigatório, exija o 2FA no cargo ou em Segurança do painel.`,
+      duration: 6000,
+    })
+  }
+
+  /** Modo API: desliga o 2FA (celular perdido, troca de aparelho) e encerra as sessões. */
+  const reset2fa = async (m: TeamMember) => {
+    const ok = await confirm({
+      title: `Redefinir o 2FA de ${m.name}?`,
+      description: 'O aplicativo atual deixa de valer e as sessões abertas são encerradas. Se o cargo exigir 2FA, a pessoa cadastra um novo no próximo acesso.',
+      confirmLabel: 'Redefinir 2FA',
+      tone: 'warning',
+      icon: ShieldOff,
+    })
+    if (!ok) return
+    await runOnce(m, 'Não foi possível redefinir o 2FA', async () => {
+      await teamAction(m.id, 'reset-2fa')
+      toast.success('2FA redefinido', { description: `${m.name} saiu de todas as sessões.` })
+    })
   }
 
   const require2faOnRoles = async () => {
@@ -160,7 +251,8 @@ export default function Equipe() {
           columns={2}
           items={[
             { label: 'Sessões encerradas', value: num(m.activeSessions) },
-            { label: 'Chaves de IA suspensas', value: num(keys.length) },
+            // modo API: as chaves de IA não são suspensas por esta ação
+            ...(API ? [] : [{ label: 'Chaves de IA suspensas', value: num(keys.length) }]),
             { label: 'Cargo', value: <RoleBadge role={roleOf(m)} /> },
             { label: 'Último acesso', value: relative(m.lastAccess) },
           ]}
@@ -168,6 +260,13 @@ export default function Equipe() {
       ),
     })
     if (!ok) return
+    if (API) {
+      await runOnce(m, 'Não foi possível desativar', async () => {
+        await teamAction(m.id, 'deactivate')
+        toast.success('Acesso desativado', { description: `${m.name} saiu de todas as sessões. O histórico continua na auditoria.` })
+      })
+      return
+    }
     updateMember(m.id, { status: 'desligado', activeSessions: 0 })
     audit('desativar', `Equipe · ${m.name}`, `Acesso desativado; ${plural(m.activeSessions, 'sessão encerrada', 'sessões encerradas')}${keys.length ? `; ${plural(keys.length, 'chave de IA suspensa', 'chaves de IA suspensas')}` : ''}`)
     toast.success('Acesso desativado', { description: `${m.name} saiu de todas as sessões. O histórico continua na auditoria.` })
@@ -187,6 +286,17 @@ export default function Equipe() {
       icon: UserCheck,
     })
     if (!ok) return
+    if (API) {
+      await runOnce(m, 'Não foi possível reativar', async () => {
+        const updated = await teamAction(m.id, 'reactivate')
+        if (updated.status === 'convidado') {
+          toast.success('Acesso reativado como convite', { description: `${m.name} ainda não tinha criado a senha. Reenvie o convite para a pessoa entrar.`, duration: 6000 })
+        } else {
+          toast.success('Acesso reativado')
+        }
+      })
+      return
+    }
     updateMember(m.id, { status: 'ativo' })
     audit('ligar', `Equipe · ${m.name}`, `Acesso reativado com o cargo ${role?.name ?? '—'}`)
     toast.success('Acesso reativado')
@@ -206,10 +316,18 @@ export default function Equipe() {
     toast.success('Sessões encerradas')
   }
 
-  const resendInvite = (m: TeamMember) => {
+  const resendInvite = async (m: TeamMember) => {
     const info = invites[m.id]
     if (info && Date.now() - new Date(info.sentAt).getTime() < 60_000) {
       toast.warning('Convite enviado há menos de 1 minuto', { description: 'Aguarde um pouco antes de reenviar.' })
+      return
+    }
+    if (API) {
+      await runOnce(m, 'Não foi possível reenviar o convite', async () => {
+        const res = await api<{ inviteUrl: string }>('POST', `/api/team/${encodeURIComponent(m.id)}/resend-invite`)
+        setInvites((prev) => ({ ...prev, [m.id]: { sentAt: new Date().toISOString(), count: (prev[m.id]?.count ?? 1) + 1, by: user.name } }))
+        setInviteLink({ email: m.email, url: res.inviteUrl })
+      })
       return
     }
     setInvites((prev) => ({ ...prev, [m.id]: { sentAt: new Date().toISOString(), count: (prev[m.id]?.count ?? 1) + 1, by: user.name } }))
@@ -220,13 +338,28 @@ export default function Equipe() {
   const cancelInvite = async (m: TeamMember) => {
     const ok = await confirm({
       title: `Cancelar o convite de ${m.email}?`,
-      description: 'O link do convite deixa de funcionar. Você pode convidar de novo depois.',
+      description: API
+        ? 'O link do convite deixa de funcionar e a pessoa fica como desligada. Para convidar de novo, reative o acesso e reenvie o convite.'
+        : 'O link do convite deixa de funcionar. Você pode convidar de novo depois.',
       confirmLabel: 'Cancelar convite',
       cancelLabel: 'Voltar',
       tone: 'danger',
       icon: Trash2,
     })
     if (!ok) return
+    if (API) {
+      // o servidor não apaga pessoas: desativar invalida o convite e mantém o histórico
+      await runOnce(m, 'Não foi possível cancelar o convite', async () => {
+        await teamAction(m.id, 'deactivate')
+        setInvites((prev) => {
+          const next = { ...prev }
+          delete next[m.id]
+          return next
+        })
+        toast.success('Convite cancelado', { description: 'O link deixou de valer.' })
+      })
+      return
+    }
     setTeam((prev) => prev.filter((x) => x.id !== m.id))
     setInvites((prev) => {
       const next = { ...prev }
@@ -249,7 +382,9 @@ export default function Equipe() {
     }
     if (m.status === 'ativo') {
       if (!m.twoFactor) list.push({ label: 'Pedir ativação do 2FA', icon: ShieldCheck, disabled: !canEdit, onSelect: () => ask2fa(m) })
-      if (m.activeSessions > 0 && !isMe) list.push({ label: 'Encerrar sessões', icon: LogOut, disabled: !canEdit, onSelect: () => endSessions(m) })
+      // modo API: redefinir o 2FA de outra pessoa; encerrar sessões só existe na demonstração
+      if (API && m.twoFactor && !isMe) list.push({ label: 'Redefinir 2FA', icon: ShieldOff, disabled: !canEdit, onSelect: () => reset2fa(m) })
+      if (!API && m.activeSessions > 0 && !isMe) list.push({ label: 'Encerrar sessões', icon: LogOut, disabled: !canEdit, onSelect: () => endSessions(m) })
       list.push({ divider: true }, { label: isMe ? 'Desativar (é você)' : 'Desativar acesso', icon: UserRoundX, danger: true, disabled: !canEdit || isMe, onSelect: () => deactivate(m) })
     }
     if (m.status === 'desligado') list.push({ divider: true }, { label: 'Reativar acesso', icon: UserCheck, disabled: !canEdit, onSelect: () => reactivate(m) })
@@ -452,6 +587,21 @@ export default function Equipe() {
       <InviteModal open={modal === 'convite'} onClose={() => setModal(null)} roles={roles} team={team} canGrant={canGrant} onCreated={(m) => setInvites((p) => ({ ...p, [m.id]: { sentAt: m.createdAt, count: 1, by: user.name } }))} />
       <DirectAccessModal open={modal === 'direto'} onClose={() => setModal(null)} roles={roles} team={team} canGrant={canGrant} />
       {roleEdit && <ChangeRoleModal member={roleEdit} onClose={() => setRoleEditId(null)} roles={roles} team={team} canGrant={canGrant} />}
+      <Modal
+        open={!!inviteLink}
+        onClose={() => setInviteLink(null)}
+        title="Convite reenviado"
+        description={inviteLink ? `Novo link para ${inviteLink.email}. O link anterior deixou de valer.` : undefined}
+        icon={Link2}
+        iconTone="success"
+        footer={
+          <Button variant="primary" onClick={() => setInviteLink(null)}>
+            Já copiei o link
+          </Button>
+        }
+      >
+        {inviteLink && <InviteLinkView url={inviteLink.url} />}
+      </Modal>
       <MemberDrawer
         member={open}
         role={open ? roleOf(open) : undefined}
@@ -486,18 +636,44 @@ function InviteModal({
   const [email, setEmail] = useState('')
   const [roleId, setRoleId] = useState('')
   const [touched, setTouched] = useState(false)
-  const emailErr = validateTeamEmail(email, team)
+  // modo API: envio em andamento, erro do servidor e link criado
+  const [submitting, setSubmitting] = useState(false)
+  const [serverError, setServerError] = useState<{ field: 'email' | null; message: string } | null>(null)
+  const [created, setCreated] = useState<{ email: string; url: string } | null>(null)
+  const emailErr = validateTeamEmail(email, team) ?? (serverError?.field === 'email' ? serverError.message : null)
   const role = roles.find((r) => r.id === roleId)
   const roleErr = !role ? 'Escolha um cargo.' : isAdminLevelRole(role) && !canGrant ? 'Só o Superadmin concede este cargo.' : null
   const close = () => {
     setEmail('')
     setRoleId('')
     setTouched(false)
+    setServerError(null)
+    setCreated(null)
     onClose()
+  }
+  const submitApi = async (r: Role) => {
+    setSubmitting(true)
+    setServerError(null)
+    try {
+      const res = await api<InviteMemberResponse>('POST', '/api/team/invite', { email: email.trim(), roleId: r.id })
+      const m = res.member as unknown as TeamMember
+      applyMember(m)
+      onCreated(m)
+      setCreated({ email: m.email, url: res.inviteUrl })
+    } catch (e) {
+      const conflict = e instanceof ApiError && e.code === 'email_em_uso'
+      setServerError({ field: conflict ? 'email' : null, message: apiMessage(e) })
+    } finally {
+      setSubmitting(false)
+    }
   }
   const submit = () => {
     setTouched(true)
-    if (emailErr || roleErr || !role) return
+    if (emailErr || roleErr || !role || submitting) return
+    if (API) {
+      void submitApi(role)
+      return
+    }
     const m: TeamMember = {
       id: uid('u'),
       name: nameFromEmail(email.trim()),
@@ -520,31 +696,76 @@ function InviteModal({
     <Modal
       open={open}
       onClose={close}
-      title="Convidar para a equipe"
-      description="A pessoa recebe um link por e-mail, cria a própria senha e ativa o 2FA no primeiro acesso."
-      icon={MailPlus}
+      title={created ? 'Convite criado' : 'Convidar para a equipe'}
+      description={
+        created
+          ? `Envie o link para ${created.email}. A pessoa cria a própria senha e ativa o 2FA no primeiro acesso.`
+          : API
+            ? 'Geramos um link de convite para você enviar. A pessoa cria a própria senha e ativa o 2FA no primeiro acesso.'
+            : 'A pessoa recebe um link por e-mail, cria a própria senha e ativa o 2FA no primeiro acesso.'
+      }
+      icon={created ? Link2 : MailPlus}
+      iconTone={created ? 'success' : 'primary'}
       footer={
-        <>
-          <Button onClick={close}>Cancelar</Button>
-          <Button variant="primary" icon={Send} onClick={submit}>
-            Enviar convite
+        created ? (
+          <Button variant="primary" onClick={close}>
+            Já copiei o link
           </Button>
-        </>
+        ) : (
+          <>
+            <Button onClick={close}>Cancelar</Button>
+            <Button variant="primary" icon={Send} onClick={submit} loading={submitting}>
+              {API ? 'Criar convite' : 'Enviar convite'}
+            </Button>
+          </>
+        )
       }
     >
-      <form
-        className="space-y-4"
-        onSubmit={(e) => {
-          e.preventDefault()
-          submit()
-        }}
-      >
-        <Field label="E-mail" htmlFor="inv-email" required error={touched ? emailErr : null}>
-          <Input id="inv-email" data-autofocus type="email" autoComplete="off" value={email} invalid={touched && !!emailErr} placeholder="nome@x2win.bet" onChange={(e) => setEmail(e.target.value)} />
-        </Field>
-        <RoleSelect id="inv-role" roles={roles} value={roleId} onChange={setRoleId} canGrant={canGrant} error={touched ? roleErr : null} />
-      </form>
+      {created ? (
+        <InviteLinkView url={created.url} />
+      ) : (
+        <form
+          className="space-y-4"
+          onSubmit={(e) => {
+            e.preventDefault()
+            submit()
+          }}
+        >
+          {serverError && !serverError.field && (
+            <Alert tone="danger" title="Convite não criado">
+              {serverError.message}
+            </Alert>
+          )}
+          <Field label="E-mail" htmlFor="inv-email" required error={touched ? emailErr : null}>
+            <Input
+              id="inv-email"
+              data-autofocus
+              type="email"
+              autoComplete="off"
+              value={email}
+              invalid={touched && !!emailErr}
+              placeholder="nome@x2win.bet"
+              onChange={(e) => {
+                setEmail(e.target.value)
+                if (serverError) setServerError(null)
+              }}
+            />
+          </Field>
+          <RoleSelect id="inv-role" roles={roles} value={roleId} onChange={setRoleId} canGrant={canGrant} error={touched ? roleErr : null} />
+        </form>
+      )}
     </Modal>
+  )
+}
+
+/** Link de convite mostrado uma vez (modo API): copiar e enviar à pessoa. */
+function InviteLinkView({ url }: { url: string }) {
+  return (
+    <OneTimeSecret
+      label="Link do convite"
+      value={url}
+      warning="Envie só para a pessoa convidada, por um canal seguro. O link vale por 72 horas e deixa de valer se você reenviar o convite."
+    />
   )
 }
 
@@ -557,8 +778,11 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
   const [roleId, setRoleId] = useState('')
   const [touched, setTouched] = useState(false)
   const [created, setCreated] = useState<{ member: TeamMember; password: string } | null>(null)
+  // modo API: envio em andamento e erro do servidor
+  const [submitting, setSubmitting] = useState(false)
+  const [serverError, setServerError] = useState<{ field: 'email' | null; message: string } | null>(null)
   const nameErr = name.trim().length < 3 ? 'Informe o nome completo.' : null
-  const emailErr = validateTeamEmail(email, team)
+  const emailErr = validateTeamEmail(email, team) ?? (serverError?.field === 'email' ? serverError.message : null)
   const role = roles.find((r) => r.id === roleId)
   const roleErr = !role ? 'Escolha um cargo.' : isAdminLevelRole(role) && !canGrant ? 'Só o Superadmin concede este cargo.' : null
   const close = () => {
@@ -567,11 +791,32 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
     setRoleId('')
     setTouched(false)
     setCreated(null)
+    setServerError(null)
     onClose()
+  }
+  const submitApi = async (r: Role) => {
+    setSubmitting(true)
+    setServerError(null)
+    try {
+      const res = await api<CreateMemberResponse>('POST', '/api/team/direct', { name: name.trim(), email: email.trim(), roleId: r.id })
+      const m = res.member as unknown as TeamMember
+      applyMember(m)
+      // a senha temporária vem do servidor e só aparece agora
+      setCreated({ member: m, password: res.temporaryPassword })
+    } catch (e) {
+      const conflict = e instanceof ApiError && e.code === 'email_em_uso'
+      setServerError({ field: conflict ? 'email' : null, message: apiMessage(e) })
+    } finally {
+      setSubmitting(false)
+    }
   }
   const submit = () => {
     setTouched(true)
-    if (nameErr || emailErr || roleErr || !role) return
+    if (nameErr || emailErr || roleErr || !role || submitting) return
+    if (API) {
+      void submitApi(role)
+      return
+    }
     const m: TeamMember = {
       id: uid('u'),
       name: name.trim(),
@@ -605,7 +850,7 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
         ) : (
           <>
             <Button onClick={close}>Cancelar</Button>
-            <Button variant="primary" icon={UserPlus} onClick={submit}>
+            <Button variant="primary" icon={UserPlus} onClick={submit} loading={submitting}>
               Criar acesso
             </Button>
           </>
@@ -625,7 +870,11 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
           <OneTimeSecret
             label="Senha temporária"
             value={created.password}
-            warning="Esta senha aparece só agora. Ela vale por 24 horas e precisa ser trocada no primeiro acesso. Não envie por e-mail junto com o login."
+            warning={
+              API
+                ? 'Esta senha aparece só agora e precisa ser trocada no primeiro acesso. Não envie por e-mail junto com o login.'
+                : 'Esta senha aparece só agora. Ela vale por 24 horas e precisa ser trocada no primeiro acesso. Não envie por e-mail junto com o login.'
+            }
           />
         </div>
       ) : (
@@ -636,11 +885,27 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
             submit()
           }}
         >
+          {serverError && !serverError.field && (
+            <Alert tone="danger" title="Acesso não criado">
+              {serverError.message}
+            </Alert>
+          )}
           <Field label="Nome completo" htmlFor="da-name" required error={touched ? nameErr : null}>
             <Input id="da-name" data-autofocus value={name} invalid={touched && !!nameErr} onChange={(e) => setName(e.target.value)} />
           </Field>
           <Field label="E-mail de acesso" htmlFor="da-email" required error={touched ? emailErr : null}>
-            <Input id="da-email" type="email" autoComplete="off" value={email} invalid={touched && !!emailErr} placeholder="nome@x2win.bet" onChange={(e) => setEmail(e.target.value)} />
+            <Input
+              id="da-email"
+              type="email"
+              autoComplete="off"
+              value={email}
+              invalid={touched && !!emailErr}
+              placeholder="nome@x2win.bet"
+              onChange={(e) => {
+                setEmail(e.target.value)
+                if (serverError) setServerError(null)
+              }}
+            />
           </Field>
           <RoleSelect id="da-role" roles={roles} value={roleId} onChange={setRoleId} canGrant={canGrant} error={touched ? roleErr : null} />
         </form>
@@ -655,12 +920,15 @@ function ChangeRoleModal({ member, onClose, roles, team, canGrant }: { member: T
   const { user } = useSession()
   const [, setTeam] = useTeam()
   const [roleId, setRoleId] = useState(member.roleId)
+  // modo API: gravação em andamento e erro do servidor
+  const [saving, setSaving] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
   const from = roles.find((r) => r.id === member.roleId)
   const to = roles.find((r) => r.id === roleId)
   const check = canChangeRole(member, from, to, team, user.id, canGrant)
   const changed = roleId !== member.roleId
   const save = async () => {
-    if (!check.ok || !to) return
+    if (!check.ok || !to || saving) return
     if (isAdminLevelRole(to)) {
       const ok = await confirm({
         title: `Dar o cargo ${to.name} a ${member.name}?`,
@@ -669,6 +937,20 @@ function ChangeRoleModal({ member, onClose, roles, team, canGrant }: { member: T
         tone: 'warning',
       })
       if (!ok) return
+    }
+    if (API) {
+      setSaving(true)
+      setServerError(null)
+      try {
+        await teamAction(member.id, 'role', { roleId: to.id })
+        toast.success('Cargo alterado', { description: `${member.name} agora é ${to.name}. Vale na próxima ação da pessoa no painel.` })
+        onClose()
+      } catch (e) {
+        setServerError(apiMessage(e))
+      } finally {
+        setSaving(false)
+      }
+      return
     }
     setTeam((prev) => prev.map((m) => (m.id === member.id ? { ...m, roleId: to.id } : m)))
     audit('editar', `Equipe · ${member.name}`, `Cargo alterado de ${from?.name ?? '—'} para ${to.name}`)
@@ -685,14 +967,25 @@ function ChangeRoleModal({ member, onClose, roles, team, canGrant }: { member: T
       footer={
         <>
           <Button onClick={onClose}>Cancelar</Button>
-          <Button variant="primary" onClick={save} disabled={!changed || !check.ok}>
+          <Button variant="primary" onClick={save} disabled={!changed || !check.ok} loading={saving}>
             Salvar cargo
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        <RoleSelect id="cr-role" roles={roles} value={roleId} onChange={setRoleId} canGrant={canGrant} label="Novo cargo" error={changed && !check.ok ? check.message : null} />
+        <RoleSelect
+          id="cr-role"
+          roles={roles}
+          value={roleId}
+          onChange={(id) => {
+            setRoleId(id)
+            setServerError(null)
+          }}
+          canGrant={canGrant}
+          label="Novo cargo"
+          error={changed && !check.ok ? check.message : serverError}
+        />
         {!canGrant && (
           <Alert tone="info">Cargos administrativos (Superadmin, Administrador e cargos com controle de acesso) só podem ser dados ou retirados pelo Superadmin.</Alert>
         )}

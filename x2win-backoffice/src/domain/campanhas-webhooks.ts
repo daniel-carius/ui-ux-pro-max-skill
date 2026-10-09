@@ -114,7 +114,7 @@ export function generateDemoSecret(): string {
   return `DEMO-hmac-${s}`
 }
 
-/** Assinatura de exemplo (ilustrativa) para mostrar o formato do cabeçalho. */
+/** Assinatura de exemplo (ilustrativa) no formato do cabeçalho X-X2W-Signature: "sha256=<hex>". */
 export function exampleSignature(secret: string, ts: number) {
   let h = 2166136261
   const src = `${secret}.${ts}`
@@ -124,7 +124,7 @@ export function exampleSignature(secret: string, ts: number) {
     h = Math.imul(h ^ round, 2246822507) >>> 0
     out += h.toString(16).padStart(8, '0')
   }
-  return `t=${ts},v1=${out}`
+  return `sha256=${out}`
 }
 
 export interface DeliveryResult {

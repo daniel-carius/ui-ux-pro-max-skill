@@ -22,15 +22,18 @@ import {
   inRange,
   presetRange,
   rangeLabel,
+  toast,
   type Column,
   type DateRange,
   type Tone,
 } from '@/components/ui'
 import { dateShort, dateTime, num, pct, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { ApiError, apiDownload, isApiMode } from '@/lib/api'
+import { refreshKey } from '@/lib/store'
 import { DAY, dayKey, startOfDay } from '@/data/now'
 import { AUDIT_ACTION_LABEL, type AuditAction, type AuditEntry } from '@/data/team'
-import { SESSION_IP, audit, useAudit, usePageAccess, useRoles, useTeam } from '@/domain/session'
+import { KEYS, SESSION_IP, audit, useAudit, usePageAccess, useRoles, useTeam } from '@/domain/session'
 import { SENSITIVE_ACTIONS } from '@/domain/config2-access'
 import { RoleBadge } from './_shared-g'
 
@@ -56,6 +59,16 @@ const ACTION_TONE: Partial<Record<AuditAction, Tone>> = {
 
 const ACTIONS = Object.keys(AUDIT_ACTION_LABEL) as AuditAction[]
 
+/** Modo API: o CSV é gerado pelo servidor (com os filtros de período, pessoa e ação) e a exportação é auditada lá. */
+const API = isApiMode()
+
+function exportQuery(range: DateRange, person: string, action: string) {
+  const q = new URLSearchParams({ from: range.from.toISOString(), to: range.to.toISOString() })
+  if (person) q.set('actorId', person)
+  if (action) q.set('action', action)
+  return q.toString()
+}
+
 export default function Auditoria() {
   const { can } = usePageAccess()
   const [entries] = useAudit()
@@ -64,6 +77,7 @@ export default function Auditoria() {
   const [params, setParams] = useSearchParams()
   const [range, setRange] = useState<DateRange>(() => presetRange('30d'))
   const [openId, setOpenId] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
   const person = params.get('pessoa') ?? ''
   const action = (params.get('acao') ?? '') as AuditAction | ''
   const canExport = can('auditoria.exportar')
@@ -121,6 +135,21 @@ export default function Auditoria() {
   const knownIp = (e: AuditEntry) => {
     const m = team.find((x) => x.id === e.actorId)
     return e.ip === SESSION_IP || !m || m.lastIp === e.ip
+  }
+
+  const exportFromServer = async () => {
+    if (exporting) return
+    setExporting(true)
+    try {
+      await apiDownload(`/api/audit/export.csv?${exportQuery(range, person, action)}`, `auditoria-${new Date().toISOString().slice(0, 10)}.csv`)
+      toast.success('Exportação concluída', { description: 'O arquivo foi baixado e a exportação ficou registrada na auditoria.' })
+      // a própria exportação entra no registro
+      refreshKey(KEYS.audit).catch(() => {})
+    } catch (e) {
+      toast.error('Não foi possível exportar', { description: e instanceof ApiError ? e.message : 'Tente de novo em instantes.' })
+    } finally {
+      setExporting(false)
+    }
   }
 
   const filterLabel = [person && `pessoa: ${team.find((m) => m.id === person)?.name ?? person}`, action && `ação: ${AUDIT_ACTION_LABEL[action]}`].filter(Boolean).join(', ')
@@ -280,9 +309,23 @@ export default function Auditoria() {
           onRowClick={(e) => setOpenId(e.id)}
           resetKey={`${person}|${action}|${range.from.getTime()}|${range.to.getTime()}`}
           rowClassName={(e) => (SENSITIVE_ACTIONS.includes(e.action) ? 'bg-danger/[0.03]' : undefined)}
-          exportName="auditoria"
+          exportName={API ? undefined : 'auditoria'}
           canExport={canExport}
           onExport={(n) => audit('exportar', 'Auditoria', `Exportação CSV de ${num(n)} registros (${rangeLabel(range)}${filterLabel ? `; ${filterLabel}` : ''})`)}
+          toolbarRight={
+            API ? (
+              <Button
+                size="sm"
+                icon={Download}
+                onClick={exportFromServer}
+                loading={exporting}
+                disabled={!canExport}
+                title={canExport ? 'Baixa o CSV do período e dos filtros de pessoa e ação (a busca não entra)' : 'Seu cargo não exporta estes dados'}
+              >
+                Exportar
+              </Button>
+            ) : undefined
+          }
           toolbar={
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <Select

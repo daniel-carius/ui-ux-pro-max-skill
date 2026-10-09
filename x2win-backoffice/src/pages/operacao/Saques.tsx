@@ -57,6 +57,7 @@ import {
 } from '@/components/ui'
 import { brl, dateTime, duration, maskCpf, maskEmail, maskPhone, num, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { ApiError, isApiMode } from '@/lib/api'
 import { useDb } from '@/lib/store'
 import { useWithdrawals } from '@/data/hooks'
 import { WITHDRAWAL_STATUS_LABEL, type RiskLevel, type Withdrawal, type WithdrawalStatus } from '@/data/finance'
@@ -68,7 +69,9 @@ import {
   approveWithdrawal,
   checkApprovalCeiling,
   rejectWithdrawal,
+  revealPixKey,
   simulateWithdrawal,
+  validateWithdrawalRules,
   type WithdrawalRules,
 } from '@/domain/withdrawals'
 
@@ -97,6 +100,9 @@ const REJECT_REASONS = [
 const OPEN: WithdrawalStatus[] = ['criado', 'pendente', 'em_analise']
 
 type Filter = 'todos' | WithdrawalStatus
+
+/** Decisão em andamento por saque (modo API: espera a resposta do servidor). */
+type Busy = Record<string, 'approve' | 'reject'>
 
 export default function Saques() {
   const [tab, setTab] = useTabParam('fila', ['fila', 'regras'] as const)
@@ -135,7 +141,23 @@ function Queue() {
   const [filter, setFilter] = useState<Filter>('todos')
   const [openId, setOpenId] = useState<string | null>(null)
   const [rules] = useDb<WithdrawalRules>(WITHDRAWAL_KEYS.rules, DEFAULT_WITHDRAWAL_RULES)
+  const [busy, setBusy] = useState<Busy>({})
   const canDecide = can('saques.aprovar') && role.approvalCeiling !== 0
+
+  // só no modo API a decisão espera o servidor; na demonstração ela é imediata
+  const track = async <T,>(w: Withdrawal, kind: Busy[string], run: () => Promise<T>): Promise<T> => {
+    if (!isApiMode()) return run()
+    setBusy((b) => ({ ...b, [w.id]: kind }))
+    try {
+      return await run()
+    } finally {
+      setBusy((b) => {
+        const next = { ...b }
+        delete next[w.id]
+        return next
+      })
+    }
+  }
 
   const now = Date.now()
   const inPeriod = useMemo(() => items.filter((w) => OPEN.includes(w.status) || inRange(w.createdAt, range)), [items, range])
@@ -154,6 +176,7 @@ function Queue() {
   const cancelled = inPeriod.filter((w) => w.status === 'cancelado')
 
   const approve = async (w: Withdrawal) => {
+    if (busy[w.id]) return
     const check = checkApprovalCeiling(role, w.amount)
     if (!check.ok) {
       toast.error('Não foi possível aprovar', { description: check.message })
@@ -178,12 +201,13 @@ function Queue() {
       ),
     })
     if (!ok) return
-    const r = approveWithdrawal(w, role, user.name)
+    const r = await track(w, 'approve', () => approveWithdrawal(w, role, user.name))
     if (r.ok) toast.success('Saque aprovado', { description: r.message })
     else toast.error('Não foi possível aprovar', { description: r.message })
   }
 
   const reject = async (w: Withdrawal) => {
+    if (busy[w.id]) return
     const r = await confirmWithInput({
       title: `Recusar saque de ${brl(w.amount)}?`,
       description: 'O valor volta para o saldo do jogador e ele recebe o motivo por e-mail.',
@@ -193,7 +217,7 @@ function Queue() {
       input: { label: 'Motivo', required: true, options: REJECT_REASONS },
     })
     if (!r.confirmed) return
-    const res = rejectWithdrawal(w, role, user.name, r.value)
+    const res = await track(w, 'reject', () => rejectWithdrawal(w, role, user.name, r.value))
     if (res.ok) toast.success('Saque recusado', { description: res.message })
     else toast.error('Não foi possível recusar', { description: res.message })
   }
@@ -263,10 +287,18 @@ function Queue() {
       cell: (w) =>
         OPEN.includes(w.status) ? (
           <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
-            <Button size="sm" variant="success" icon={Check} onClick={() => approve(w)} disabled={!canDecide} title={!canDecide ? 'Seu cargo não decide saques' : undefined}>
+            <Button
+              size="sm"
+              variant="success"
+              icon={Check}
+              onClick={() => approve(w)}
+              disabled={!canDecide || !!busy[w.id]}
+              loading={busy[w.id] === 'approve'}
+              title={!canDecide ? 'Seu cargo não decide saques' : undefined}
+            >
               Aprovar
             </Button>
-            <Button size="sm" variant="secondary" icon={X} onClick={() => reject(w)} disabled={!canDecide} className="text-danger">
+            <Button size="sm" variant="secondary" icon={X} onClick={() => reject(w)} disabled={!canDecide || !!busy[w.id]} loading={busy[w.id] === 'reject'} className="text-danger">
               Recusar
             </Button>
           </div>
@@ -358,12 +390,14 @@ function Queue() {
         empty={{ title: 'Nenhum saque neste filtro', description: 'Troque o status ou o período para ver outros saques.' }}
       />
 
-      <WithdrawalDrawer w={open} onClose={() => setOpenId(null)} onApprove={approve} onReject={reject} canDecide={canDecide} />
+      <WithdrawalDrawer w={open} onClose={() => setOpenId(null)} onApprove={approve} onReject={reject} canDecide={canDecide} busy={open ? busy[open.id] : undefined} />
     </div>
   )
 }
 
 function maskPix(w: Withdrawal) {
+  // modo API: a lista já chega do servidor com a chave mascarada
+  if (isApiMode()) return w.pixKey
   if (w.pixKeyType === 'CPF') return maskCpf(w.pixKey)
   if (w.pixKeyType === 'E-mail') return maskEmail(w.pixKey)
   if (w.pixKeyType === 'Celular') return maskPhone(w.pixKey)
@@ -376,30 +410,43 @@ function WithdrawalDrawer({
   onApprove,
   onReject,
   canDecide,
+  busy,
 }: {
   w: Withdrawal | undefined
   onClose: () => void
   onApprove: (w: Withdrawal) => void
   onReject: (w: Withdrawal) => void
   canDecide: boolean
+  busy?: Busy[string]
 }) {
   const { can } = useSession()
-  const [revealed, setRevealed] = useState(false)
+  /** chave revelada (por saque, para não vazar ao abrir outro) */
+  const [revealedKey, setRevealedKey] = useState<{ id: string; pixKey: string } | null>(null)
+  const [revealing, setRevealing] = useState(false)
   if (!w) return null
   const isOpen = OPEN.includes(w.status)
-  const reveal = () => {
+  const revealed = revealedKey?.id === w.id ? revealedKey.pixKey : null
+  const reveal = async () => {
     if (!can('usuarios.ver-dados')) {
       toast.error('Seu cargo não pode ver dados completos do PIX.')
       return
     }
-    setRevealed(true)
-    audit('revelar', `Saque #${w.id}`, `Chave PIX completa exibida para conferência`)
+    if (revealing) return
+    setRevealing(true)
+    try {
+      const pixKey = await revealPixKey(w)
+      setRevealedKey({ id: w.id, pixKey })
+    } catch (e) {
+      toast.error('Não foi possível revelar a chave PIX', { description: e instanceof ApiError ? e.message : 'Tente de novo em instantes.' })
+    } finally {
+      setRevealing(false)
+    }
   }
   return (
     <Drawer
       open
       onClose={() => {
-        setRevealed(false)
+        setRevealedKey(null)
         onClose()
       }}
       title={`Saque ${w.id}`}
@@ -412,10 +459,10 @@ function WithdrawalDrawer({
       footer={
         isOpen ? (
           <>
-            <Button icon={X} onClick={() => onReject(w)} disabled={!canDecide} className="text-danger">
+            <Button icon={X} onClick={() => onReject(w)} disabled={!canDecide || !!busy} loading={busy === 'reject'} className="text-danger">
               Recusar
             </Button>
-            <Button variant="success" icon={Check} onClick={() => onApprove(w)} disabled={!canDecide}>
+            <Button variant="success" icon={Check} onClick={() => onApprove(w)} disabled={!canDecide || !!busy} loading={busy === 'approve'}>
               Aprovar {brl(w.amount)}
             </Button>
           </>
@@ -441,10 +488,16 @@ function WithdrawalDrawer({
                 label: 'Chave PIX',
                 value: (
                   <span className="flex items-center gap-2">
-                    <Mono>{revealed ? w.pixKey : maskPix(w)}</Mono>
-                    {!revealed && (
-                      <button type="button" onClick={reveal} className="inline-flex items-center gap-1 text-xs font-semibold text-primary-text hover:underline">
-                        <Eye size={12} aria-hidden /> Revelar
+                    <Mono>{revealed ?? maskPix(w)}</Mono>
+                    {revealed === null && (
+                      <button
+                        type="button"
+                        onClick={reveal}
+                        disabled={revealing}
+                        aria-busy={revealing || undefined}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-primary-text hover:underline disabled:cursor-wait disabled:opacity-60"
+                      >
+                        <Eye size={12} aria-hidden /> {revealing ? 'Revelando…' : 'Revelar'}
                       </button>
                     )}
                   </span>
@@ -503,14 +556,8 @@ function Rules() {
       rolloverMode: 'modo de contagem',
       rolloverBets: 'apostas que contam',
     },
-    validate: (v) => {
-      if (v.min <= 0) return 'O valor mínimo precisa ser maior que zero.'
-      if (v.maxPerRequest < v.min) return 'O valor máximo precisa ser maior que o mínimo.'
-      if (v.dailyLimit < 1) return 'O limite diário precisa ser de pelo menos 1 saque.'
-      if (v.autoApproveMax > v.maxPerRequest) return 'O teto da aprovação automática não pode passar do valor máximo por saque.'
-      if (v.rolloverPct < 0 || v.rolloverPct > 5000) return 'Rollover precisa estar entre 0% e 5.000%.'
-      return null
-    },
+    // mesma validação do servidor (shared/withdrawals)
+    validate: validateWithdrawalRules,
   })
   const v = form.values
   const autoOn = v.autoApproveMax > 0

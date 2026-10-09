@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { CornerDownLeft, Moon, RotateCcw, Search, Sun } from 'lucide-react'
+import { CornerDownLeft, LogOut, Moon, RotateCcw, Search, Sun } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { MODULE_BY_ID, PAGES, type PageDef } from '@/nav'
-import { useSession } from '@/domain/session'
+import { useAuthApi, useSession } from '@/domain/session'
 import { useTheme } from '@/lib/theme'
 import { resetDb } from '@/lib/store'
 import { Kbd, normalize, toast } from '@/components/ui'
@@ -45,6 +45,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const navigate = useNavigate()
   const { canView } = useSession()
   const { resolved, toggle } = useTheme()
+  const auth = useAuthApi()
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -68,17 +69,20 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     })
     const actions: Item[] = [
       { id: 'act-theme', label: resolved === 'dark' ? 'Usar tema claro' : 'Usar tema escuro', sub: 'Aparência', icon: resolved === 'dark' ? Sun : Moon, section: 'Ações', run: toggle },
-      {
-        id: 'act-reset',
-        label: 'Restaurar dados de demonstração',
-        sub: 'Apaga as alterações feitas neste navegador',
-        icon: RotateCcw,
-        section: 'Ações',
-        run: () => {
-          resetDb()
-          toast.success('Dados de demonstração restaurados')
-        },
-      },
+      // modo API: os dados são do servidor (nada a restaurar); a ação é sair
+      auth.enabled
+        ? { id: 'act-logout', label: 'Sair do painel', sub: 'Encerra a sua sessão neste navegador', icon: LogOut, section: 'Ações', run: () => void auth.logout() }
+        : {
+            id: 'act-reset',
+            label: 'Restaurar dados de demonstração',
+            sub: 'Apaga as alterações feitas neste navegador',
+            icon: RotateCcw,
+            section: 'Ações',
+            run: () => {
+              resetDb()
+              toast.success('Dados de demonstração restaurados')
+            },
+          },
     ]
     if (!q.trim()) {
       const recent = getRecent()
@@ -93,7 +97,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       .sort((a, b) => Number(normalize(b.title).startsWith(terms[0])) - Number(normalize(a.title).startsWith(terms[0])))
       .map((p) => toItem(p, 'Páginas'))
     return [...pages, ...actions.filter((a) => score(normalize(`${a.label} ${a.sub}`)))]
-  }, [q, canView, navigate, resolved, toggle])
+  }, [q, canView, navigate, resolved, toggle, auth])
 
   useEffect(() => setIdx(0), [q])
   useEffect(() => {

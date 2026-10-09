@@ -44,14 +44,23 @@ import {
   toast,
   type Column,
 } from '@/components/ui'
+import type { WebhookTestResponse } from '@shared/api'
 import { cn } from '@/lib/cn'
+import { ApiError, api, isApiMode } from '@/lib/api'
 import { dateTime, num, relative } from '@/lib/format'
 import { uid } from '@/lib/random'
-import { useCollection } from '@/lib/store'
+import { patchCache, refreshKey, useCollection } from '@/lib/store'
 import { useWebhookDestinations, useWebhookExecutions } from '@/data/hooks'
 import { TEMPLATE_EVENTS, TEMPLATE_EVENT_BY_KEY, TEMPLATE_KEY, seedTemplates } from '@/data/campanhas-templates'
 import { audit, usePageAccess, useSession } from '@/domain/session'
-import { WEBHOOK_EVENT_LABEL, type WebhookDestination, type WebhookEvent } from '@/domain/webhooks'
+import {
+  WEBHOOK_EVENT_LABEL,
+  WEBHOOK_KEYS,
+  seedWebhookExecutions,
+  type WebhookDestination,
+  type WebhookEvent,
+  type WebhookExecution,
+} from '@/domain/webhooks'
 import {
   defaultTemplateBody,
   formatTemplate,
@@ -96,6 +105,12 @@ type Row = WebhookTemplate & { def: TemplateEventDef }
 type StatusFilter = 'todos' | 'ativos' | 'inativos'
 
 const isWebhookEvent = (k: string): k is WebhookEvent => k in WEBHOOK_EVENT_LABEL
+
+/**
+ * Modo API: o teste para destinos ativos é enviado de verdade pelo servidor
+ * (POST /api/webhooks/destinations/:id/test), que grava as execuções. O painel nunca grava execuções.
+ */
+const API = isApiMode()
 
 /** Eventos de jogo responsável pedem confirmação forte para desligar. */
 async function confirmProtectedOff(r: Row) {
@@ -166,9 +181,55 @@ export default function Templates() {
     toast.success('Template restaurado')
   }
 
+  /** Modo API: um POST de teste de verdade por destino ativo; o servidor grava execução e auditoria. */
+  const runServerTest = async (r: Row, dests: WebhookDestination[]): Promise<{ result: TemplateTest; targets: TestTarget[] }> => {
+    const done: WebhookExecution[] = []
+    const targets: TestTarget[] = []
+    // um por vez: o servidor limita os testes por minuto
+    for (const d of dests) {
+      try {
+        const res = await api<WebhookTestResponse>('POST', `/api/webhooks/destinations/${encodeURIComponent(d.id)}/test`)
+        const ex = res.execution as unknown as WebhookExecution & { error?: string }
+        done.push(ex)
+        const ok = ex.status === 'sucesso'
+        targets.push({
+          url: d.url,
+          ok,
+          httpStatus: ex.httpStatus,
+          durationMs: ex.durationMs,
+          message: ex.error ?? (ok ? 'Recebido com sucesso.' : `O destino respondeu HTTP ${ex.httpStatus}.`),
+        })
+      } catch (e) {
+        targets.push({ url: d.url, ok: false, httpStatus: 0, durationMs: 0, message: e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor.' })
+      }
+    }
+    if (done.length) {
+      const ids = new Set(done.map((x) => x.id))
+      patchCache<WebhookExecution[]>(WEBHOOK_KEYS.executions, (prev) => [...done, ...prev.filter((x) => !ids.has(x.id))], seedWebhookExecutions)
+      refreshKey(WEBHOOK_KEYS.executions).catch(() => {})
+    }
+    const allOk = targets.every((t) => t.ok)
+    const worst = targets.find((t) => !t.ok) ?? targets[0]
+    const result: TemplateTest = {
+      at: new Date().toISOString(),
+      ok: allOk,
+      httpStatus: worst.httpStatus,
+      durationMs: Math.round(targets.reduce((s, t) => s + t.durationMs, 0) / targets.length),
+      destinations: dests.length,
+    }
+    templates.update(r.id, { lastTest: result })
+    audit('testar', `Template ${r.def.label}`, `Envio de teste para ${dests.length} destino(s): ${allOk ? 'sucesso' : worst.httpStatus ? `falha (HTTP ${worst.httpStatus})` : 'falha (sem resposta)'}`)
+    if (allOk) toast.success('Teste enviado', { description: `${targets.length} ${targets.length === 1 ? 'envio recebido' : 'envios recebidos'} · ${result.durationMs} ms em média` })
+    else toast.error('O teste falhou', { description: worst.message })
+    return { result, targets }
+  }
+
   /** Teste simulado: envia o corpo com dados de exemplo aos destinos ativos (ou à caixa de teste). */
-  const runTest = (r: Row, body: string): Promise<{ result: TemplateTest; targets: { url: string; ok: boolean; httpStatus: number; durationMs: number; message: string }[] }> =>
-    new Promise((resolve) => {
+  const runTest = (r: Row, body: string): Promise<{ result: TemplateTest; targets: TestTarget[] }> => {
+    const active = destFor(r.event).filter((d) => d.active)
+    // sem destino ativo o teste vai para a caixa de inspeção (simulada, não grava execução)
+    if (API && active.length) return runServerTest(r, active)
+    return new Promise((resolve) => {
       setTimeout(() => {
         const rendered = renderTemplate(body, sampleValues(r.def)) ?? '{}'
         const dests = destFor(r.event).filter((d) => d.active)
@@ -205,6 +266,7 @@ export default function Templates() {
         resolve({ result, targets })
       }, 650)
     })
+  }
 
   const columns: Column<Row>[] = [
     {
@@ -274,7 +336,7 @@ export default function Templates() {
         r.lastTest ? (
           <span className="flex items-center gap-1.5 text-[13px]">
             {r.lastTest.ok ? <CheckCircle2 size={14} className="text-success" aria-label="Sucesso" /> : <XCircle size={14} className="text-danger" aria-label="Falha" />}
-            <span className={r.lastTest.ok ? 'text-fg-2' : 'font-medium text-danger'}>{r.lastTest.ok ? relative(r.lastTest.at) : `HTTP ${r.lastTest.httpStatus}`}</span>
+            <span className={r.lastTest.ok ? 'text-fg-2' : 'font-medium text-danger'}>{r.lastTest.ok ? relative(r.lastTest.at) : r.lastTest.httpStatus ? `HTTP ${r.lastTest.httpStatus}` : 'sem resposta'}</span>
           </span>
         ) : (
           <span className="text-xs text-fg-3">Nunca testado</span>
@@ -621,9 +683,11 @@ function TemplateEditor({
           <p className="mb-2 font-mono text-[11.5px] leading-5 text-fg-3">
             POST · Content-Type: application/json
             <br />
-            X-X2Win-Event: {row.event}
+            X-X2W-Event: {row.event}
             <br />
-            X-X2Win-Signature: {signature.slice(0, 46)}…
+            X-X2W-Timestamp: 1760020320
+            <br />
+            X-X2W-Signature: {signature.slice(0, 46)}…
           </p>
           {preview ? <CodeBlock label="Prévia do corpo enviado">{preview}</CodeBlock> : <p className="rounded-xl border border-dashed border-line-strong px-4 py-8 text-center text-[13px] text-fg-3">Corrija o JSON para ver a prévia.</p>}
         </section>
@@ -641,7 +705,9 @@ function TemplateEditor({
           </BlockTitle>
           <p className="text-[13px] text-fg-3">
             {activeDests.length
-              ? `Envia a prévia acima (com "test": true) para ${activeDests.length} ${activeDests.length === 1 ? 'destino ativo' : 'destinos ativos'}. Usa o corpo da tela, mesmo sem salvar.`
+              ? API
+                ? `Envia um POST de teste assinado, pelo servidor, para ${activeDests.length} ${activeDests.length === 1 ? 'destino ativo' : 'destinos ativos'}. O corpo é o evento de teste padrão (com "test": true), não a prévia acima.`
+                : `Envia a prévia acima (com "test": true) para ${activeDests.length} ${activeDests.length === 1 ? 'destino ativo' : 'destinos ativos'}. Usa o corpo da tela, mesmo sem salvar.`
               : 'Este evento não tem destino ativo: o teste vai para a caixa de inspeção da X2Win e não sai para fora.'}
           </p>
           {lastRun ? (
@@ -650,7 +716,7 @@ function TemplateEditor({
                 <li key={i} className={cn('flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg px-3 py-2 text-[13px]', t.ok ? 'bg-success/5' : 'bg-danger/5')}>
                   {t.ok ? <CheckCircle2 size={15} className="text-success" aria-hidden /> : <XCircle size={15} className="text-danger" aria-hidden />}
                   <Mono className="min-w-0 flex-1 truncate">{maskUrlTokens(t.url)}</Mono>
-                  <Badge tone={t.ok ? 'success' : 'danger'}>HTTP {t.httpStatus}</Badge>
+                  <Badge tone={t.ok ? 'success' : 'danger'}>{t.httpStatus ? `HTTP ${t.httpStatus}` : 'Sem resposta'}</Badge>
                   <span className="text-xs text-fg-3 tnum">{num(t.durationMs)} ms</span>
                   {!t.ok && <span className="w-full text-xs text-danger">{t.message}</span>}
                 </li>
@@ -658,7 +724,7 @@ function TemplateEditor({
             </ul>
           ) : row.lastTest ? (
             <p className="mt-3 text-xs text-fg-3">
-              Último teste {relative(row.lastTest.at)}: {row.lastTest.ok ? 'sucesso' : `falha (HTTP ${row.lastTest.httpStatus})`} · {num(row.lastTest.durationMs)} ms
+              Último teste {relative(row.lastTest.at)}: {row.lastTest.ok ? 'sucesso' : row.lastTest.httpStatus ? `falha (HTTP ${row.lastTest.httpStatus})` : 'falha (sem resposta)'} · {num(row.lastTest.durationMs)} ms
             </p>
           ) : null}
         </section>

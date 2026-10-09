@@ -13,8 +13,8 @@ export const kvHandlers: KvHandlers = {
       if (!canReadKey(ctx.rule, ctx.auth.perms)) throw Errors.forbidden()
       const rows = await ctx.app.db.query<AuditRow>('select * from audit_log order by at desc, id desc limit $1', [AUDIT_KV_LIMIT])
       // versão = maior id gravado (a auditoria só cresce)
-      const version = rows.reduce((max, r) => Math.max(max, Number(r.id)), 0)
-      return { value: rows.map(toAuditEntry), version, updatedAt: rows[0]?.at ?? null }
+      const max = await ctx.app.db.one<{ v: number | null }>('select max(id) as v from audit_log')
+      return { value: rows.map(toAuditEntry), version: Number(max?.v ?? 0), updatedAt: rows[0]?.at ?? null }
     },
   },
 }

@@ -49,12 +49,22 @@ import {
   toast,
   type Column,
 } from '@/components/ui'
+import type { WebhookTestResponse } from '@shared/api'
 import { cn } from '@/lib/cn'
+import { ApiError, api, isApiMode } from '@/lib/api'
 import { dateTime, maskSecret, num, pct, relative } from '@/lib/format'
 import { uid } from '@/lib/random'
+import { patchCache, refreshKey } from '@/lib/store'
 import { useWebhookDestinations, useWebhookExecutions } from '@/data/hooks'
 import { audit, usePageAccess } from '@/domain/session'
-import { WEBHOOK_EVENT_LABEL, type WebhookDestination, type WebhookEvent, type WebhookExecution } from '@/domain/webhooks'
+import {
+  WEBHOOK_EVENT_LABEL,
+  WEBHOOK_KEYS,
+  seedWebhookExecutions,
+  type WebhookDestination,
+  type WebhookEvent,
+  type WebhookExecution,
+} from '@/domain/webhooks'
 import {
   deliveryStats,
   exampleSignature,
@@ -71,6 +81,31 @@ import {
 import { BlockTitle, CodeBlock, MiniStat } from './_shared-c1'
 
 const EVENTS = Object.keys(WEBHOOK_EVENT_LABEL) as WebhookEvent[]
+
+/** Modo API: o teste é enviado de verdade pelo servidor, que grava a execução. */
+const API = isApiMode()
+/** Cabeçalho da assinatura e tempo limite de resposta (no modo API, os do servidor). */
+const SIGNATURE_HEADER = 'X-X2W-Signature'
+const TIMEOUT_S = API ? 5 : 10
+
+/** Execução como o servidor devolve no teste (com o motivo da falha, quando houver). */
+type ServerExecution = WebhookExecution & { test?: boolean; error?: string }
+
+function isTestExecution(e: WebhookExecution) {
+  return (e as ServerExecution).test === true || e.payload.includes('"test":true')
+}
+
+function httpLabel(code: number) {
+  return code ? `HTTP ${code}` : 'sem resposta'
+}
+
+/** Segredo de assinatura: forte no modo API (vai para o servidor), ilustrativo na demonstração. */
+function newSigningSecret() {
+  if (!API) return generateDemoSecret()
+  const bytes = new Uint8Array(24)
+  crypto.getRandomValues(bytes)
+  return `whsec_${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
+}
 
 const EVENT_META: Record<WebhookEvent, { icon: LucideIcon; tone: string; description: string }> = {
   'saque.solicitado': { icon: ArrowUpFromLine, tone: 'bg-info/10 text-info', description: 'Jogador pediu um saque.' },
@@ -123,7 +158,7 @@ export default function Webhooks() {
     if (hasTokenInUrl(url)) {
       const ok = await confirm({
         title: 'Salvar com token no endereço?',
-        description: 'Tokens no caminho da URL ficam gravados em logs de proxy, histórico do navegador e ferramentas de monitoramento. Prefira a assinatura HMAC (cabeçalho X-X2Win-Signature) ou um cabeçalho de autenticação no sistema que recebe.',
+        description: 'Tokens no caminho da URL ficam gravados em logs de proxy, histórico do navegador e ferramentas de monitoramento. Prefira a assinatura HMAC (cabeçalho X-X2W-Signature) ou um cabeçalho de autenticação no sistema que recebe.',
         confirmLabel: 'Salvar mesmo assim',
         tone: 'warning',
         icon: ShieldAlert,
@@ -138,7 +173,7 @@ export default function Webhooks() {
       toast.success('Destino atualizado')
       setForm(null)
     } else {
-      const secret = generateDemoSecret()
+      const secret = newSigningSecret()
       const d: WebhookDestination = { id: uid('wh'), event: form.event, url, active: form.active, secret, createdAt: new Date().toISOString() }
       dests.add(d, 'end')
       audit('criar', `Webhook ${label}`, `Destino ${maskUrlTokens(url)} criado${form.active ? '' : ' (inativo)'}`)
@@ -181,13 +216,44 @@ export default function Webhooks() {
       icon: KeyRound,
     })
     if (!ok) return
-    const secret = generateDemoSecret()
+    const secret = newSigningSecret()
     dests.update(d.id, { secret })
     audit('editar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Segredo de assinatura trocado (${maskUrlTokens(d.url)})`)
     setNewSecret({ label: WEBHOOK_EVENT_LABEL[d.event], secret })
   }
 
+  /** Modo API: POST de teste de verdade; o servidor grava a execução e a auditoria. */
+  const testOnServer = async (d: WebhookDestination) => {
+    setTesting(d.id)
+    try {
+      const res = await api<WebhookTestResponse>('POST', `/api/webhooks/destinations/${encodeURIComponent(d.id)}/test`)
+      const ex = res.execution as unknown as ServerExecution
+      // mostra na hora; a recarga traz a lista como o servidor gravou
+      patchCache<WebhookExecution[]>(WEBHOOK_KEYS.executions, (prev) => [ex, ...prev.filter((x) => x.id !== ex.id)], seedWebhookExecutions)
+      refreshKey(WEBHOOK_KEYS.executions).catch(() => {})
+      const timing = `${httpLabel(ex.httpStatus)} em ${num(ex.durationMs)} ms`
+      if (ex.status === 'sucesso') toast.success('Teste entregue', { description: `${timing}.` })
+      else
+        toast.error('O teste falhou', {
+          description: ex.error ? `${ex.error}${ex.durationMs ? ` Tempo: ${num(ex.durationMs)} ms.` : ''}` : `O destino respondeu ${timing}.`,
+          duration: 6000,
+        })
+    } catch (e) {
+      toast.error('Não foi possível testar', { description: e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor. Tente de novo.' })
+    } finally {
+      setTesting((cur) => (cur === d.id ? null : cur))
+    }
+  }
+
   const test = (d: WebhookDestination) => {
+    if (API) {
+      if (testing) {
+        toast.info('Aguarde o teste em andamento terminar')
+        return
+      }
+      void testOnServer(d)
+      return
+    }
     setTesting(d.id)
     setTimeout(() => {
       const res = simulateDelivery(d.url)
@@ -231,7 +297,7 @@ export default function Webhooks() {
           icon={CheckCircle2}
           tone={stats.rate === null || stats.rate >= 0.98 ? 'success' : stats.rate >= 0.9 ? 'warning' : 'danger'}
           value={stats.rate === null ? '—' : pct(stats.rate)}
-          hint="respostas 2xx em até 10 s"
+          hint={`respostas 2xx em até ${TIMEOUT_S} s`}
           formula={<>Entregas com resposta HTTP 2xx dividido pelo total de entregas nos últimos 30 dias. Testes entram na conta.</>}
         />
         <KpiCard label="Tempo médio de resposta" icon={Gauge} tone="neutral" value={`${num(stats.avgMs)} ms`} hint="do envio à resposta do destino" />
@@ -249,7 +315,7 @@ export default function Webhooks() {
             </Button>
           }
         >
-          Tokens no caminho da URL ficam gravados em logs de proxy, histórico e ferramentas de monitoramento. Prefira autenticar pelo cabeçalho <strong>X-X2Win-Signature</strong> (HMAC com o segredo do destino) ou por um cabeçalho Authorization no
+          Tokens no caminho da URL ficam gravados em logs de proxy, histórico e ferramentas de monitoramento. Prefira autenticar pelo cabeçalho <strong>{SIGNATURE_HEADER}</strong> (HMAC com o segredo do destino) ou por um cabeçalho Authorization no
           sistema que recebe. Nesta tela o trecho sensível aparece mascarado.
         </Alert>
       )}
@@ -311,17 +377,17 @@ export default function Webhooks() {
             <CardHeader icon={ShieldCheck} title="Como validar a assinatura" description="Todo envio é um POST JSON assinado com o segredo do destino." />
             <CardBody className="space-y-3 text-[13px] leading-5 text-fg-2">
               <CodeBlock label="Cabeçalhos de exemplo" className="text-[11.5px]">
-                {`X-X2Win-Event: saque.pago\nX-X2Win-Delivery: dlv_7f3a…\nX-X2Win-Signature:\n  ${exampleSignature('DEMO-hmac-exemplo', 1760020320).slice(0, 34)}…`}
+                {`X-X2W-Event: saque.pago\nX-X2W-Delivery: ex_7f3a…\nX-X2W-Timestamp: 1760020320\nX-X2W-Signature:\n  sha256=${exampleSignature('exemplo', 1760020320).slice(7, 33)}…`}
               </CodeBlock>
               <ol className="list-decimal space-y-1.5 pl-4">
                 <li>
-                  Calcule HMAC-SHA256 de <Mono>t + "." + corpo</Mono> com o segredo.
+                  Calcule HMAC-SHA256 de <Mono>timestamp + "." + corpo</Mono> com o segredo.
                 </li>
                 <li>
-                  Compare com <Mono>v1</Mono>. Se não bater, recuse com 401.
+                  Compare com o valor depois de <Mono>sha256=</Mono>. Se não bater, recuse com 401.
                 </li>
-                <li>Recuse envios com t mais velho que 5 minutos.</li>
-                <li>Responda 2xx em até 10 s. Falhas são tentadas de novo 3 vezes.</li>
+                <li>Recuse envios com timestamp mais velho que 5 minutos.</li>
+                <li>Responda 2xx em até {TIMEOUT_S} s. Falhas são tentadas de novo até 5 vezes, com espera crescente.</li>
               </ol>
             </CardBody>
           </Card>
@@ -346,7 +412,7 @@ export default function Webhooks() {
                   </div>
                   <div className="shrink-0 text-right">
                     <p className={cn('text-xs font-semibold tnum', e.status === 'sucesso' ? 'text-fg-2' : 'text-danger')}>
-                      {e.httpStatus} · {num(e.durationMs)} ms
+                      {e.httpStatus || '—'} · {num(e.durationMs)} ms
                     </p>
                     <p className="text-[11px] text-fg-3">{relative(e.at)}</p>
                   </div>
@@ -411,7 +477,7 @@ function LastDelivery({ e }: { e: WebhookExecution | undefined }) {
   return (
     <span className={cn('inline-flex items-center gap-1', e.status === 'sucesso' ? 'text-fg-2' : 'font-medium text-danger')}>
       {e.status === 'sucesso' ? <CheckCircle2 size={12} className="text-success" aria-hidden /> : <XCircle size={12} aria-hidden />}
-      {e.status === 'sucesso' ? 'Entregue' : 'Falhou'} · HTTP {e.httpStatus} · {num(e.durationMs)} ms · {relative(e.at)}
+      {e.status === 'sucesso' ? 'Entregue' : 'Falhou'} · {httpLabel(e.httpStatus)} · {num(e.durationMs)} ms · {relative(e.at)}
     </span>
   )
 }
@@ -545,7 +611,7 @@ function DestinationForm({
           {tokens.length > 0 && (
             <Alert tone="warning" icon={ShieldAlert} title="Este endereço parece ter um token">
               {tokens.map((t) => (t.where === 'caminho' ? `Trecho do caminho “${maskToken(t.value)}”` : `Parâmetro “${t.name}”`)).join(', ')} parece um segredo. Tokens na URL ficam gravados em logs. Prefira validar a assinatura{' '}
-              <strong>X-X2Win-Signature</strong> ou um cabeçalho de autenticação. Se o sistema exigir o token, você pode salvar mesmo assim: ele aparece mascarado no painel.
+              <strong>{SIGNATURE_HEADER}</strong> ou um cabeçalho de autenticação. Se o sistema exigir o token, você pode salvar mesmo assim: ele aparece mascarado no painel.
             </Alert>
           )}
           <Switch label="Destino ativo" description={form.active ? 'Recebe os eventos a partir de agora.' : 'Fica salvo, mas não recebe nada.'} checked={form.active} onChange={(on) => setForm({ ...form, active: on })} />
@@ -603,12 +669,12 @@ function DestinationDrawer({
         </Badge>
       ),
     },
-    { id: 'http', header: 'HTTP', align: 'right', sortValue: (e) => e.httpStatus, cell: (e) => e.httpStatus },
+    { id: 'http', header: 'HTTP', align: 'right', sortValue: (e) => e.httpStatus, cell: (e) => e.httpStatus || '—' },
     { id: 'ms', header: 'Tempo', align: 'right', sortValue: (e) => e.durationMs, cell: (e) => `${num(e.durationMs)} ms` },
     {
       id: 'test',
       header: 'Origem',
-      cell: (e) => (e.payload.includes('"test":true') ? <Badge tone="info">Teste</Badge> : <span className="text-xs text-fg-3">Evento real</span>),
+      cell: (e) => (isTestExecution(e) ? <Badge tone="info">Teste</Badge> : <span className="text-xs text-fg-3">Evento real</span>),
     },
   ]
   return (
@@ -640,7 +706,7 @@ function DestinationDrawer({
       <div className="space-y-6">
         {tokens.length > 0 && (
           <Alert tone="warning" icon={ShieldAlert} title="Token no endereço (achado #7 da auditoria)">
-            O caminho deste destino tem um trecho com cara de token. Peça ao responsável pelo sistema que recebe para trocar por validação da assinatura <strong>X-X2Win-Signature</strong> ou por um cabeçalho Authorization, e depois edite o
+            O caminho deste destino tem um trecho com cara de token. Peça ao responsável pelo sistema que recebe para trocar por validação da assinatura <strong>{SIGNATURE_HEADER}</strong> ou por um cabeçalho Authorization, e depois edite o
             endereço para tirar o token.
           </Alert>
         )}

@@ -363,7 +363,7 @@ function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: b
           <Clock size={14} className="text-fg-3" aria-hidden /> Cabeçalhos enviados
         </h3>
         <pre className="overflow-x-auto rounded-xl border border-line bg-surface-2 p-3 font-mono text-[12px] leading-5 text-fg-2">
-          {`Content-Type: application/json\nUser-Agent: X2Win-Webhooks/1.0\nX-X2Win-Event: ${e.event}\nX-X2Win-Delivery: ${e.id}\nX-X2Win-Signature: sha256=••••••••••••`}
+          {`Content-Type: application/json\nUser-Agent: X2Win-Webhooks/1.0\nX-X2W-Event: ${e.event}\nX-X2W-Delivery: ${e.id}\nX-X2W-Signature: sha256=••••••••••••`}
         </pre>
         <p className="mt-1.5 text-xs text-fg-3">A assinatura HMAC usa o segredo do destino, que nunca é exibido.</p>
       </section>

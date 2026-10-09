@@ -5,6 +5,8 @@ import { cn } from '@/lib/cn'
 import { pageByPath } from '@/nav'
 import { ConfirmHost, Skeleton, ToastHost, toast } from '@/components/ui'
 import { autoOffLabel, runAttackAutoOff } from '@/domain/seguranca'
+import { useSession } from '@/domain/session'
+import { isApiMode } from '@/lib/api'
 import { CommandPalette, pushRecent } from './CommandPalette'
 import { Sidebar } from './Sidebar'
 import { Topbar } from './Topbar'
@@ -33,7 +35,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [collapsed])
 
   // modo de ataque com desligamento automático vale em qualquer tela
+  // (no modo API, só quem pode editar o modo de ataque grava o desligamento)
+  const { can } = useSession()
+  const autoOffAllowed = !isApiMode() || can('modo-ataque.editar')
   useEffect(() => {
+    if (!autoOffAllowed) return
     const check = () => {
       const minutes = runAttackAutoOff()
       if (minutes) toast.info('Modo de ataque desligado automaticamente', { description: `Passou o tempo escolhido (${autoOffLabel(minutes)}).` })
@@ -41,7 +47,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     check()
     const id = setInterval(check, 30_000)
     return () => clearInterval(id)
-  }, [])
+  }, [autoOffAllowed])
 
   // Ctrl/Cmd + K abre a busca de páginas
   useEffect(() => {

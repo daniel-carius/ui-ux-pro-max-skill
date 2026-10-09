@@ -49,8 +49,10 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, date, dateTime, mult, num, pct, plural, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useSportsBets } from '@/data/hooks'
-import { SPORTS_BET_STATUS_LABEL, type SportsBet, type SportsBetStatus, type SportsSelection } from '@/data/sports'
+import { isApiMode } from '@/lib/api'
+import { dbGet, refreshKey } from '@/lib/store'
+import { DATA_KEYS, useSportsBets } from '@/data/hooks'
+import { SPORTS_BET_STATUS_LABEL, seedSportsBets, type SportsBet, type SportsBetStatus, type SportsSelection } from '@/data/sports'
 import { BET_TYPE_LABEL, LEG_RESULT_LABEL, betSearchText, exposure, legResults, settleFromFeed, sportsTotals, type LegResult } from '@/domain/esportes'
 import { PlayerDrawer, TableFrame } from '@/pages/geral/_shared'
 
@@ -141,7 +143,34 @@ export default function ApostasEsportivas() {
     setMaxV('')
   }
 
+  /** Modo API: as apostas vêm da plataforma; "Atualizar" só relê a lista do servidor (nada é liquidado no painel). */
+  const refreshFromServer = async () => {
+    const openBefore = new Set(open.map((b) => b.id))
+    setRefreshing(true)
+    try {
+      const before = dbGet<SportsBet[]>(DATA_KEYS.sportsBets, seedSportsBets)
+      await refreshKey(DATA_KEYS.sportsBets)
+      const after = dbGet<SportsBet[]>(DATA_KEYS.sportsBets, seedSportsBets)
+      // a recarga troca a lista por uma nova; a mesma lista (e não a padrão, de chave nunca gravada)
+      // indica que a leitura falhou: o aviso de erro já apareceu
+      if (after === before && before !== seedSportsBets()) return
+      const settled = after.filter((b) => openBefore.has(b.id) && b.status !== 'aberta')
+      setLastUpdate(new Date())
+      toast.success('Lista atualizada', {
+        description: settled.length
+          ? `${plural(settled.length, 'aposta liquidada', 'apostas liquidadas')} desde a última consulta: ${plural(settled.filter((s) => s.status === 'ganha').length, 'ganha', 'ganhas')} e ${plural(settled.filter((s) => s.status === 'perdida').length, 'perdida', 'perdidas')}.`
+          : 'Nenhuma aposta nova liquidada desde a última consulta.',
+      })
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   const refresh = () => {
+    if (isApiMode()) {
+      if (!refreshing) void refreshFromServer()
+      return
+    }
     setRefreshing(true)
     setTimeout(() => {
       const { next, settled } = settleFromFeed(bets.items, Date.now(), 5)

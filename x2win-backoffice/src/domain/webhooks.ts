@@ -35,6 +35,10 @@ export interface WebhookExecution {
   httpStatus: number
   durationMs: number
   payload: string
+  /** envio de teste (botão "Testar") */
+  test?: boolean
+  /** motivo da falha, quando houver */
+  error?: string
 }
 
 export const WEBHOOK_KEYS = {

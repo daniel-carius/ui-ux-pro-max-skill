@@ -51,7 +51,8 @@ export async function api<T>(method: Method, path: string, body?: unknown): Prom
   const data = text ? (JSON.parse(text) as unknown) : undefined
   if (!res.ok) {
     const err = (data as ApiErrorBody | undefined)?.error
-    if (res.status === 401) unauthorizedListeners.forEach((l) => l())
+    // senha ou código errado também é 401, mas não significa que a sessão caiu
+    if (res.status === 401 && err?.code === 'nao_autenticado') unauthorizedListeners.forEach((l) => l())
     throw new ApiError(res.status, err?.code ?? 'erro', err?.message ?? `Erro ${res.status}`, err?.details)
   }
   return data as T

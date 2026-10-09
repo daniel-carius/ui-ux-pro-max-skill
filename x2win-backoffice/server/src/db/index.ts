@@ -22,7 +22,12 @@ const INT8 = 20
 const TIMESTAMPTZ = 1184
 const TIMESTAMP = 1114
 
-const toIso = (v: string) => new Date(v.includes('T') || v.endsWith('Z') ? v : v.replace(' ', 'T')).toISOString()
+/** Texto do Postgres ("2026-10-09 17:52:10.856+00") para ISO. O V8 exige o fuso como "+00:00". */
+export function toIso(v: string): string {
+  const s = v.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00').replace(/([+-]\d{2})(\d{2})$/, '$1:$2')
+  const d = new Date(s)
+  return Number.isNaN(d.getTime()) ? v : d.toISOString()
+}
 
 type Queryable = { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }
 
