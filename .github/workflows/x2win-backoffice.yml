@@ -1,0 +1,54 @@
+name: x2win-backoffice
+
+on:
+  push:
+    paths:
+      - 'x2win-backoffice/**'
+      - '.github/workflows/x2win-backoffice.yml'
+  pull_request:
+    paths:
+      - 'x2win-backoffice/**'
+      - '.github/workflows/x2win-backoffice.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  painel:
+    name: Painel (tipos e build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: x2win-backoffice
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: x2win-backoffice/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit -p .
+      - run: npx vite build
+      - name: Build em modo API
+        run: npx vite build
+        env:
+          VITE_API_MODE: '1'
+
+  api:
+    name: API (tipos e testes)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: x2win-backoffice/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: x2win-backoffice/server/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit -p .
+      - run: npx vitest run
+      - run: npm run build

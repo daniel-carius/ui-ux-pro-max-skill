@@ -1,0 +1,22 @@
+# API do backoffice. Contexto de build: a pasta x2win-backoffice/
+# (o servidor usa shared/ e os dados de demonstração de src/data/).
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY server/package.json server/package-lock.json server/.npmrc ./server/
+RUN cd server && npm ci
+COPY shared ./shared
+COPY src/data ./src/data
+COPY src/lib/random.ts ./src/lib/random.ts
+COPY server ./server
+RUN cd server && npm run build && npm prune --omit=dev
+
+FROM node:22-alpine
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /app/server/node_modules ./node_modules
+COPY --from=build /app/server/dist ./dist
+COPY --from=build /app/server/package.json ./package.json
+USER node
+EXPOSE 3333
+HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://127.0.0.1:3333/api/health || exit 1
+CMD ["node", "dist/index.js"]
