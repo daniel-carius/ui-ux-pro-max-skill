@@ -18,7 +18,7 @@ import {
   startWebhookDispatcher,
   USER_AGENT,
 } from '../src/modules/webhooks/dispatcher'
-import { kvHandlers } from '../src/modules/webhooks/kv'
+import { destinationUrl, kvHandlers, type DestinationRow } from '../src/modules/webhooks/kv'
 import { seedDemo, DEMO_DESTINATIONS } from '../src/modules/webhooks/seed'
 import { isPrivateHostname, isPrivateIp, webhookTargetProblem, webhookUrlProblem } from '../src/modules/webhooks/url'
 import { api, createTestApp, createUser, loginAs } from './helpers'
@@ -107,6 +107,12 @@ async function insertDestination(app: FastifyInstance, d: { id?: string; event: 
     app.cipher.encrypt(d.secret),
   ])
   return id
+}
+
+/** Endereços gravados (decifrados: o banco guarda o endereço cifrado e só o host em claro). */
+async function storedUrls(app: FastifyInstance, where = '') {
+  const rows = await app.db.query<DestinationRow>(`select * from webhook_destinations ${where} order by id`)
+  return rows.map((r) => ({ id: r.id, url: destinationUrl(r, app.cipher), plain: r.url, host: r.host }))
 }
 
 type Outbox = { id: number; status: string; attempts: number; next_attempt_at: string; last_error: string | null; destination_id: string }
@@ -419,7 +425,7 @@ describe('kv campanhas.webhooks.destinos', () => {
     expect(v2.version).toBe(2)
     const after = await app.db.query<{ id: string; secret_enc: string; url: string }>('select * from webhook_destinations order by id')
     expect(app.cipher.decrypt(after[0].secret_enc)).toBe('segredo-original-1234')
-    expect(after[0].url).toBe(`${base}/a2`)
+    expect((await storedUrls(app))[0]).toMatchObject({ url: `${base}/a2`, plain: null, host: new URL(base).host })
     expect(app.cipher.decrypt(after[1].secret_enc)).toBe(app.cipher.decrypt(rows[1].secret_enc))
 
     // e a assinatura continua usando o segredo original
@@ -530,7 +536,9 @@ describe('POST /api/webhooks/destinations/:id/test', () => {
     expect(verifySignature(received[0], secret)).toBe(true)
     expect(received[0].headers['x-x2w-delivery']).toBe(execution.id)
     const body = JSON.parse(received[0].body)
-    expect(body).toMatchObject({ event: 'saque.pago', test: true, data: { id: 'TESTE-0001', amount: 100 } })
+    // envio de teste: evento próprio (nunca o envelope do evento real do destino), assinado com o segredo do destino
+    expect(received[0].headers['x-x2w-event']).toBe('webhook.teste')
+    expect(body).toEqual({ id: expect.stringMatching(/^evt_/), event: 'webhook.teste', createdAt: expect.any(String), test: true, data: { destinationId: id, destinationEvent: 'saque.pago' } })
     expect(execution.payload).toBe(received[0].body)
     const row = await app.db.one<{ test: boolean }>('select test from webhook_executions where id = $1', [execution.id])
     expect(row?.test).toBe(true)
@@ -621,14 +629,21 @@ describe('seed de demonstração', () => {
   it('5 destinos com segredo cifrado e 134 execuções de sucesso nos últimos 30 dias; não repete', async () => {
     const app = await createTestApp()
     expect(await seedDemo(app)).toMatch(/5 destinos e 134 execuções/)
-    const dests = await app.db.query<{ id: string; secret_enc: string; url: string; event: string }>('select * from webhook_destinations order by id')
+    const dests = await app.db.query<DestinationRow>('select * from webhook_destinations order by id')
     expect(dests.map((d) => d.id)).toEqual(['wh1', 'wh2', 'wh3', 'wh4', 'wh5'])
     for (const d of dests) {
       const demo = DEMO_DESTINATIONS.find((x) => x.id === d.id)!
       expect(d.secret_enc).not.toContain(demo.secret)
       expect(app.cipher.decrypt(d.secret_enc)).toBe(demo.secret)
-      expect(d.url).toBe(demo.url)
+      // endereço cifrado; só o host em claro
+      expect(d.url).toBeNull()
+      expect(d.url_enc).not.toContain(new URL(demo.url).pathname)
+      expect(destinationUrl(d, app.cipher)).toBe(demo.url)
+      expect(d.host).toBe(new URL(demo.url).host)
     }
+    // execuções de demonstração com o token do caminho mascarado
+    const leadflow = await app.db.query<{ url: string }>(`select distinct url from webhook_executions where destination_id = 'wh5'`)
+    expect(leadflow.map((e) => e.url)).toEqual(['https://api.leadflow.app/v1/ftd/a8c3****'])
     const ex = await app.db.query<{ status: string; at: string; http_status: number; test: boolean }>('select * from webhook_executions')
     expect(ex).toHaveLength(134)
     expect(ex.every((e) => e.status === 'sucesso' && e.http_status === 200 && !e.test)).toBe(true)
@@ -701,9 +716,9 @@ describe('regressão r2-api-mode-seed-fallback-3: destinos de demonstração nã
       })
       expect(r.statusCode, r.body).toBe(200)
     }
-    const rows = await app.db.query<{ url: string }>('select url from webhook_destinations')
+    const rows = await storedUrls(app)
     expect(rows.filter((r) => THIRD_PARTY.test(r.url)), 'destinos de demonstração gravados como reais').toEqual([])
-    const queued = await app.db.query<{ url: string }>(`select d.url from webhook_outbox o join webhook_destinations d on d.id = o.destination_id`)
+    const queued = await storedUrls(app, `where id in (select destination_id from webhook_outbox)`)
     expect(queued.filter((o) => THIRD_PARTY.test(o.url)), 'eventos reais de saque enfileirados para terceiro').toEqual([])
   })
 
@@ -733,7 +748,7 @@ describe('regressão r2-api-mode-seed-fallback-3: destinos de demonstração nã
     const cur = ok.json().value as { id: string; url: string }[]
     const moved = await put({ value: cur.map((d) => ({ ...d, url: 'https://hooks.x2win-crm.com/in/saques' })), version: 1 })
     expect(moved.statusCode).toBe(400)
-    expect((await app.db.query<{ url: string }>('select url from webhook_destinations'))[0].url).toBe('https://hooks.exemplo.com/in')
+    expect((await storedUrls(app))[0].url).toBe('https://hooks.exemplo.com/in')
   })
 
   it('destino de demonstração já gravado e ativo (ex.: antes desta trava) não recebe evento real', async () => {

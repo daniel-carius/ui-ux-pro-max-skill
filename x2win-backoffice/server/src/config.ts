@@ -2,7 +2,8 @@
 import { z } from 'zod'
 
 const fields = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  /** sem valor vale produção: esquecer a variável nunca afrouxa o cookie Secure nem a proteção dos webhooks */
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('production'),
   PORT: z.coerce.number().int().positive().default(3333),
   HOST: z.string().default('0.0.0.0'),
   DATABASE_URL: z.string().default('pglite://./data/pglite'),
@@ -22,6 +23,11 @@ const fields = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+  /** libera destino de webhook em http e em rede interna (só desenvolvimento local; recusado em produção) */
+  WEBHOOK_ALLOW_LOCAL_TARGETS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   /** desliga o disparador de webhooks em segundo plano (testes) */
   WEBHOOK_DISPATCHER: z
     .enum(['on', 'off'])
@@ -36,6 +42,14 @@ const schema = fields
         code: 'custom',
         path: ['COOKIE_SECURE'],
         message: 'em produção o cookie de sessão precisa ser Secure: sirva o painel por HTTPS e use COOKIE_SECURE=true',
+      })
+    }
+    // em produção os webhooks só saem por https para host público (sem SSRF para a rede interna)
+    if (c.NODE_ENV === 'production' && c.WEBHOOK_ALLOW_LOCAL_TARGETS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['WEBHOOK_ALLOW_LOCAL_TARGETS'],
+        message: 'a liberação de destinos locais de webhook é só para desenvolvimento: retire a variável em produção',
       })
     }
   })

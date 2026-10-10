@@ -1,20 +1,39 @@
 // Dados de demonstração deste módulo (usados por src/seed.ts quando DEMO_DATA=true).
 // Cria a equipe de demonstração do painel (exceto e-mails já cadastrados), cada
 // pessoa com uma senha temporária aleatória e troca obrigatória no 1º acesso.
+// O nome é genérico pelo cargo ("Demonstração ADM 1"), nunca o de alguém da equipe
+// real, e o último IP fica na faixa privada 10.x.
 import type { FastifyInstance } from 'fastify'
 import { seedTeam } from '@/data/team'
 import { hashPassword, newId } from '../../lib/crypto'
 import { writeAudit } from '../../services/audit'
+import { demoIp } from '../kv/demo-seed'
 import { memberNameKeys, strongTemporaryPassword, withTeamLock } from './service'
 
+/** Equipe do painel com nome genérico pelo cargo (numerado quando o cargo se repete) e IP fictício. */
+function demoTeam(roleNames: Map<string, string>) {
+  const team = seedTeam()
+  const perRole = new Map<string, number>()
+  for (const m of team) perRole.set(m.roleId, (perRole.get(m.roleId) ?? 0) + 1)
+  const seen = new Map<string, number>()
+  return team.map((m) => {
+    const n = (seen.get(m.roleId) ?? 0) + 1
+    seen.set(m.roleId, n)
+    const role = roleNames.get(m.roleId) ?? m.roleId
+    const name = `Demonstração ${role}${(perRole.get(m.roleId) ?? 0) > 1 ? ` ${n}` : ''}`
+    return { ...m, name, lastIp: m.lastIp && demoIp(m.lastIp) }
+  })
+}
+
 export async function seedDemo(app: FastifyInstance): Promise<string> {
-  const demo = seedTeam()
+  const roleNames = new Map((await app.db.query<{ id: string; name: string }>('select id, name from roles')).map((r) => [r.id, r.name]))
+  const demo = demoTeam(roleNames)
   const existing = new Set(
     (await app.db.query<{ email: string }>('select lower(email) as email from users')).map((r) => r.email),
   )
   // nome exibido é único na equipe (a auditoria identifica a pessoa por ele): não cria xará de quem já existe
   const names = new Set((await app.db.query<{ name: string }>('select name from users')).flatMap((r) => memberNameKeys(r.name)))
-  const roles = new Set((await app.db.query<{ id: string }>('select id from roles')).map((r) => r.id))
+  const roles = new Set(roleNames.keys())
   // o Superadmin real vem de ADMIN_EMAIL: não cria um segundo de demonstração
   const hasSuperadmin = !!(await app.db.one(`select 1 from users where role_id = 'superadmin' and status = 'ativo'`))
   const skipped: string[] = []

@@ -8,8 +8,9 @@
 // r1-web-4: a proteção estrita (só https, só host público, DNS conferido) não pode depender de
 // NODE_ENV=production: sem a variável (npm start + .env.example) ela ficava desligada.
 //
-// O resolvedor abaixo modela um servidor DNS de rebinding e é ligado aos DOIS caminhos de resolução
-// do Node: dns/promises (checagem antecipada) e dns.lookup do módulo CJS (o que a conexão usa).
+// O resolvedor abaixo modela um servidor DNS de rebinding. A checagem antecipada e a conexão resolvem pelo mesmo
+// caminho (url.ts › resolveHost: dns.promises.resolve4/resolve6, c-ares, fora do pool de threads do libuv); o
+// dns.lookup (getaddrinfo, no pool de threads que o scrypt das senhas usa) não pode ser chamado.
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http'
@@ -18,7 +19,7 @@ import { createServer as createTcpServer, type AddressInfo, type Server as TcpSe
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer as createTlsServer, type Server as TlsServer } from 'node:tls'
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { newId } from '../src/lib/crypto'
 import { DELIVERY_ERRORS, DELIVERY_TIMEOUT_MS, enqueueWebhook, processOutboxOnce, sendWebhook } from '../src/modules/webhooks/dispatcher'
@@ -42,39 +43,41 @@ function fakeAnswer(host: string): string[] | 'hang' | null {
   return [n === 1 ? PUBLIC_IP : INTERNAL_IP]
 }
 
-// caminho 1: checagem antecipada (url.ts usa lookup de node:dns/promises)
-vi.mock('node:dns/promises', async (importOriginal) => {
-  const orig = await importOriginal<typeof import('node:dns/promises')>()
-  const lookup = async (host: string, opts?: unknown) => {
+// o resolvedor de url.ts (dns.promises do módulo CJS, lido na hora da chamada)
+const cjsDns = createRequire(import.meta.url)('node:dns') as typeof import('node:dns')
+const dnsPromises = cjsDns.promises as { resolve4: unknown; resolve6: unknown }
+type Resolve = (host: string) => Promise<string[]>
+const orig = {
+  resolve4: cjsDns.promises.resolve4 as Resolve,
+  resolve6: cjsDns.promises.resolve6 as Resolve,
+  lookup: cjsDns.lookup,
+}
+/** nomes passados ao dns.lookup (getaddrinfo) — o envio estrito não pode usá-lo */
+const lookupCalls: string[] = []
+beforeAll(() => {
+  dnsPromises.resolve4 = async (host: string) => {
+    if (host.endsWith('.nxdomain.attacker.example')) throw Object.assign(new Error(`queryA ENOTFOUND ${host}`), { code: 'ENOTFOUND' })
     const ans = fakeAnswer(host)
     if (ans === 'hang') return new Promise(() => undefined)
-    if (ans) {
-      const list = ans.map((address) => ({ address, family: 4 }))
-      return (opts as { all?: boolean } | undefined)?.all ? list : list[0]
-    }
-    return (orig.lookup as (h: string, o?: unknown) => Promise<unknown>)(host, opts)
+    if (ans) return ans
+    return orig.resolve4.call(cjsDns.promises, host)
   }
-  return { ...orig, lookup, default: { ...orig, lookup } }
-})
-
-// caminho 2: a conexão (net/tls e o safeLookup chamam dns.lookup do módulo CJS)
-const cjsDns = createRequire(import.meta.url)('node:dns') as typeof import('node:dns')
-const origLookup = cjsDns.lookup
-beforeAll(() => {
-  ;(cjsDns as { lookup: unknown }).lookup = function patched(host: string, opts: unknown, cb?: unknown) {
-    const callback = (typeof opts === 'function' ? opts : cb) as (...a: unknown[]) => void
-    const o = (typeof opts === 'object' && opts) || {}
-    const ans = fakeAnswer(host)
-    if (ans === 'hang') return undefined
-    if (ans) {
-      const list = ans.map((address) => ({ address, family: 4 }))
-      return process.nextTick(() => ((o as { all?: boolean }).all ? callback(null, list) : callback(null, list[0].address, 4)))
+  dnsPromises.resolve6 = async (host: string) => {
+    // os nomes de teste só têm registro A
+    if (/\.(static|public|mixed|slow|rebind|nxdomain)\.attacker\.example$/.test(host)) {
+      throw Object.assign(new Error(`queryAaaa ENODATA ${host}`), { code: 'ENODATA' })
     }
-    return (origLookup as (...a: unknown[]) => void).call(cjsDns, host, opts, cb)
+    return orig.resolve6.call(cjsDns.promises, host)
+  }
+  ;(cjsDns as { lookup: unknown }).lookup = function counted(host: string, ...rest: unknown[]) {
+    lookupCalls.push(host)
+    return (orig.lookup as (...a: unknown[]) => void).call(cjsDns, host, ...rest)
   }
 })
 afterAll(() => {
-  ;(cjsDns as { lookup: unknown }).lookup = origLookup
+  dnsPromises.resolve4 = orig.resolve4
+  dnsPromises.resolve6 = orig.resolve6
+  ;(cjsDns as { lookup: unknown }).lookup = orig.lookup
 })
 
 // ---------- "serviços internos" em 127.0.0.1 ----------
@@ -135,6 +138,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   counts.clear()
+  lookupCalls.length = 0
 })
 
 const portOf = (s: TcpServer | TlsServer | HttpServer) => (s.address() as AddressInfo).port
@@ -191,6 +195,8 @@ describe('r1-web-3: DNS rebinding no envio de webhook', () => {
     // a checagem antecipada viu o IP público; a conexão resolveu de novo, conferiu e recusou
     expect(counts.get(host)).toBeGreaterThanOrEqual(2)
     expect(tcpConns.length - before).toBe(0)
+    // nenhuma resolução pelo getaddrinfo (pool de threads do libuv, o mesmo do scrypt)
+    expect(lookupCalls).toEqual([])
   })
 
   it('resposta de DNS com um endereço público e um interno é recusada inteira', async () => {
@@ -270,6 +276,22 @@ describe('safeLookup (lookup usado pela conexão)', () => {
     const host = `${uniq()}.rebind.attacker.example`
     expect((await run(host, false)).address).toBe(PUBLIC_IP)
     expect((await run(host, false)).err?.code).toBe(BLOCKED_PRIVATE_CODE)
+  })
+
+  it('respeita a família pedida pela conexão e não usa dns.lookup (getaddrinfo)', async () => {
+    const v4 = await new Promise<{ err: NodeJS.ErrnoException | null; address: unknown }>((resolve) =>
+      safeLookup(`${uniq()}.public.attacker.example`, { family: 4, all: true }, (err, address) => resolve({ err, address })),
+    )
+    expect(v4).toEqual({ err: null, address: [{ address: PUBLIC_IP, family: 4 }] })
+    const v6 = await new Promise<{ err: NodeJS.ErrnoException | null }>((resolve) =>
+      safeLookup(`${uniq()}.public.attacker.example`, { family: 6 }, (err) => resolve({ err })),
+    )
+    expect(v6.err?.code).toBe('ENOTFOUND')
+    const missing = await new Promise<{ err: NodeJS.ErrnoException | null }>((resolve) =>
+      safeLookup(`${uniq()}.nxdomain.attacker.example`, { all: true }, (err) => resolve({ err })),
+    )
+    expect(missing.err?.code).toBe('ENOTFOUND')
+    expect(lookupCalls).toEqual([])
   })
 })
 

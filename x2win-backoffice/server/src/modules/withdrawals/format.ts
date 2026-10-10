@@ -23,6 +23,8 @@ export interface WithdrawalRow {
   updated_at: string
   decided_by: string | null
   decided_by_id: string | null
+  /** e-mail atual de quem decidiu (users), quando a consulta junta a equipe */
+  decided_by_email?: string | null
   decision_note: string | null
 }
 
@@ -61,6 +63,9 @@ export function toPanelWithdrawal(r: WithdrawalRow, cipher: Cipher, perms: Reado
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     decidedBy: r.decided_by,
+    // identidade de quem decidiu (o nome sozinho pode repetir ou mudar): id e e-mail da equipe
+    decidedById: r.decided_by_id,
+    decidedByEmail: r.decided_by_email ?? null,
     decisionNote: r.decision_note,
   }
 }

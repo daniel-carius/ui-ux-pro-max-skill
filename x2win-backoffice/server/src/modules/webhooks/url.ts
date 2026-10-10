@@ -1,7 +1,6 @@
 // Endereços de destino dos webhooks: validação ao gravar e proteção contra SSRF
 // no envio (modo estrito: só https e só hosts públicos, conferidos na própria conexão).
 import dns from 'node:dns'
-import { lookup } from 'node:dns/promises'
 import { isIP, type LookupFunction } from 'node:net'
 
 export const WEBHOOK_EVENTS = ['saque.solicitado', 'saque.pago', 'saque.rejeitado', 'saque.expirado', 'deposito.primeiro'] as const
@@ -36,6 +35,11 @@ export function isDemoWebhookHost(url: string): boolean {
     return false
   }
   return DEMO_WEBHOOK_HOSTS.some((d) => host === d || host.endsWith(`.${d}`))
+}
+
+/** Mesmo que isDemoWebhookHost, a partir só do host (com porta), guardado em claro em webhook_destinations.host. */
+export function isDemoHost(host: string): boolean {
+  return isDemoWebhookHost(`https://${host}/`)
 }
 
 /**
@@ -142,6 +146,28 @@ export function webhookUrlProblem(raw: string, strict: boolean): string | null {
 
 export const INTERNAL_TARGET_MESSAGE = 'O endereço do destino aponta para rede interna; envio bloqueado.'
 
+export interface ResolvedAddress {
+  address: string
+  family: 4 | 6
+}
+
+/**
+ * Resolve o nome direto no DNS (resolve4 + resolve6, c-ares). Não usa dns.lookup (getaddrinfo), que roda no pool de
+ * threads do libuv: com o pool ocupado pelo scrypt das senhas (login), os envios de webhook esperariam na mesma fila,
+ * e um DNS lento seguraria os logins. Não consulta /etc/hosts: destino de webhook é sempre um host público.
+ */
+export async function resolveHost(hostname: string): Promise<ResolvedAddress[]> {
+  // `dns.promises` lido na hora da chamada (não fixado no import)
+  const [v4, v6] = await Promise.allSettled([dns.promises.resolve4(hostname), dns.promises.resolve6(hostname)])
+  const list: ResolvedAddress[] = [
+    ...(v4.status === 'fulfilled' ? v4.value.map((address) => ({ address, family: 4 as const })) : []),
+    ...(v6.status === 'fulfilled' ? v6.value.map((address) => ({ address, family: 6 as const })) : []),
+  ]
+  if (list.length) return list
+  const reason = v4.status === 'rejected' ? v4.reason : v6.status === 'rejected' ? v6.reason : null
+  throw reason ?? Object.assign(new Error(`Sem endereço para ${hostname}`), { code: 'ENOTFOUND' })
+}
+
 /**
  * Checagem antes do envio. No modo estrito também resolve o DNS e recusa se o
  * nome apontar para rede interna. Só dá a mensagem clara cedo: quem garante que a
@@ -154,8 +180,7 @@ export async function webhookTargetProblem(raw: string, strict: boolean): Promis
   const host = stripBrackets(new URL(raw.trim()).hostname)
   if (isIP(host)) return null // já conferido acima
   try {
-    const addrs = await lookup(host, { all: true, verbatim: true })
-    if (!addrs.length) return 'Não foi possível resolver o endereço do destino.'
+    const addrs = await resolveHost(host)
     if (addrs.some((a) => isPrivateIp(a.address))) return INTERNAL_TARGET_MESSAGE
   } catch {
     return 'Não foi possível resolver o endereço do destino.'
@@ -167,27 +192,29 @@ export async function webhookTargetProblem(raw: string, strict: boolean): Promis
 export const BLOCKED_PRIVATE_CODE = 'EBLOCKED_PRIVATE'
 
 /**
- * `lookup` da conexão do envio (net/tls): resolve o nome UMA vez, recusa se qualquer
- * endereço da resposta for interno e entrega à conexão exatamente os endereços
- * conferidos. Assim a checagem e a conexão usam o mesmo resultado de DNS (sem
- * janela para DNS rebinding).
+ * `lookup` da conexão do envio (net/tls): resolve o nome UMA vez (resolveHost), recusa
+ * se qualquer endereço da resposta for interno e entrega à conexão exatamente os
+ * endereços conferidos. Assim a checagem e a conexão usam o mesmo resultado de DNS
+ * (sem janela para DNS rebinding). O TLS continua conferindo o certificado pelo nome.
  */
 export const safeLookup: LookupFunction = (hostname, options, callback) => {
-  // `dns.lookup` lido na hora da chamada (não fixado no import)
-  dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
-    if (err) return callback(err, '', 0)
-    const list = Array.isArray(addresses) ? addresses : []
-    if (!list.length) {
-      const e: NodeJS.ErrnoException = Object.assign(new Error(`Sem endereço para ${hostname}`), { code: 'ENOTFOUND' })
-      return callback(e, '', 0)
-    }
-    if (list.some((a) => isPrivateIp(a.address))) {
-      const e: NodeJS.ErrnoException = Object.assign(new Error(`${hostname} resolve para rede interna`), { code: BLOCKED_PRIVATE_CODE })
-      return callback(e, '', 0)
-    }
-    if (options.all) return callback(null, list)
-    return callback(null, list[0].address, list[0].family)
-  })
+  resolveHost(hostname).then(
+    (list) => {
+      if (list.some((a) => isPrivateIp(a.address))) {
+        const e: NodeJS.ErrnoException = Object.assign(new Error(`${hostname} resolve para rede interna`), { code: BLOCKED_PRIVATE_CODE })
+        return callback(e, '', 0)
+      }
+      const family = options.family === 4 || options.family === 'IPv4' ? 4 : options.family === 6 || options.family === 'IPv6' ? 6 : 0
+      const usable = family ? list.filter((a) => a.family === family) : list
+      if (!usable.length) {
+        const e: NodeJS.ErrnoException = Object.assign(new Error(`Sem endereço para ${hostname}`), { code: 'ENOTFOUND' })
+        return callback(e, '', 0)
+      }
+      if (options.all) return callback(null, usable)
+      return callback(null, usable[0].address, usable[0].family)
+    },
+    (err: NodeJS.ErrnoException) => callback(err, '', 0),
+  )
 }
 
 /** Só o host (para resumos de auditoria sem expor tokens do caminho). */

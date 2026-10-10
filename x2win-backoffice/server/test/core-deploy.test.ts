@@ -1,6 +1,9 @@
 // Regressões da implantação (achados r1-authn-8, r1-web-2 e r1-frontend-3): deploy/nginx.conf termina TLS com
 // HSTS, manda os cabeçalhos de segurança (com CSP) em toda resposta do painel, e o IP do cliente chega certo à
-// API com o nginx na borda ou atrás de um balanceador. A parte com nginx real é pulada se não houver nginx/openssl.
+// API com o nginx na borda ou atrás de um balanceador. Também: limite de corpo do nginx igual ao da API (1m, e 12m
+// só em /api/kv/), imagem da API (build, pool de threads, healthcheck) e o que fica fora do contexto do Docker.
+// A parte com nginx real é pulada se não houver nginx/openssl.
+import { build } from 'esbuild'
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -19,6 +22,9 @@ const NGINX_CONF = read('deploy/nginx.conf')
 const HEADERS_CONF = read('deploy/security-headers.conf')
 const SNIPPET_PATH = '/etc/nginx/snippets/x2win-security-headers.conf'
 const noComments = (s: string) => s.replace(/#[^\n]*/g, '')
+/** Blocos location do server HTTPS: [nome, corpo]. Aceita o modificador (ex.: "location ^~ /api/kv/ {"). */
+const locationsOf = (conf: string) =>
+  [...conf.slice(conf.indexOf('listen 443')).matchAll(/location\s+(?:[=~^*]+\s+)?(\S+)\s*\{([^}]*)\}/g)].map((m) => [m[1], m[2]] as const)
 
 const SECURITY_HEADERS = {
   'strict-transport-security': /^max-age=31536000; includeSubDomains$/,
@@ -65,14 +71,38 @@ describe('deploy/nginx.conf e deploy/security-headers.conf (estático)', () => {
 
   it('toda location com add_header própria inclui os cabeçalhos de segurança (o nginx não herda)', () => {
     const https = conf.slice(conf.indexOf('listen 443'))
-    const locations = [...https.matchAll(/location\s+(\S+)\s*\{([^}]*)\}/g)]
-    expect(locations.map((l) => l[1])).toEqual(expect.arrayContaining(['/assets/', '/api/', '/']))
-    for (const [, name, body] of locations) {
+    const locations = locationsOf(conf)
+    expect(locations.map((l) => l[0])).toEqual(expect.arrayContaining(['/assets/', '/api/', '/api/kv/', '/']))
+    for (const [name, body] of locations) {
       if (/add_header/.test(body)) expect(body, `location ${name}`).toContain(`include ${SNIPPET_PATH};`)
     }
     // e o nível do server (vale para as locations sem add_header, como /api/)
-    const serverLevel = https.replace(/location\s+\S+\s*\{[^}]*\}/g, '')
+    const serverLevel = https.replace(/location\s+(?:[=~^*]+\s+)?\S+\s*\{[^}]*\}/g, '')
     expect(serverLevel).toContain(`include ${SNIPPET_PATH};`)
+  })
+
+  // O nginx aceitava 12m em toda a /api/: qualquer rota recebia (e repassava à API) corpos de 12 MB. Agora o limite é
+  // o da API (1 MiB) e só /api/kv/ (imagens e importações, limite próprio nas rotas da API) aceita 12m.
+  it('limite de corpo: 1m em /api/ e 12m só em /api/kv/, que repete as regras de /api/', () => {
+    const loc = Object.fromEntries(locationsOf(conf))
+    expect(loc['/api/']).toMatch(/^\s*client_max_body_size 1m;$/m)
+    expect(loc['/api/kv/']).toMatch(/^\s*client_max_body_size 12m;$/m)
+    expect(conf).toMatch(/location \^~ \/api\/kv\/ \{/)
+    // nenhuma outra location passa de 1m
+    for (const [name, body] of locationsOf(conf)) {
+      if (name !== '/api/kv/') expect(body, name).not.toMatch(/client_max_body_size (?!1m;)/)
+    }
+    // mesmas diretivas de proxy, resolver e cabeçalhos (sem add_header: herda os do server)
+    const rules = (b: string) =>
+      b
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('client_max_body_size'))
+    expect(rules(loc['/api/kv/'])).toEqual(rules(loc['/api/']))
+    expect(loc['/api/kv/']).not.toMatch(/add_header/)
+    // a recusa do nginx sai no formato de erro da API
+    expect(loc['/api/']).toMatch(/^\s*error_page 413 = @x2w_corpo_grande;$/m)
+    expect(loc['@x2w_corpo_grande']).toContain('"code":"corpo_grande_demais"')
   })
 
   it('o snippet traz HSTS, nosniff, X-Frame-Options, Referrer-Policy, Permissions-Policy e CSP, todos com always', () => {
@@ -124,8 +154,66 @@ describe('deploy/nginx.conf e deploy/security-headers.conf (estático)', () => {
     expect(api).toMatch(/condition: service_completed_successfully/)
     const migrateSvc = compose.slice(compose.indexOf('\n  migrate:'), compose.indexOf('\n  api:'))
     expect(migrateSvc).toMatch(/command: \["node", "dist\/migrate\.js"\]/)
-    expect(read('Dockerfile.api')).toMatch(/esbuild src\/migrate\.ts/)
+    // dist/migrate.js sai do mesmo build da API (npm run build), sem um esbuild à parte no Dockerfile.api
+    const pkg = JSON.parse(read('server/package.json')) as { scripts: Record<string, string> }
+    expect(pkg.scripts.build).toMatch(/^esbuild src\/index\.ts src\/seed\.ts src\/migrate\.ts /)
+    expect(read('Dockerfile.api')).toMatch(/RUN cd server && npm run build && npm prune --omit=dev/)
+    expect(read('Dockerfile.api')).not.toMatch(/esbuild src\/migrate\.ts/)
     expect(read('deploy/db-init/10-x2win-app-role.sh')).toMatch(/create role x2win_app login password :'app_pw' nosuperuser/)
+  })
+
+  // NODE_ENV ausente agora vale produção: o desenvolvimento local diz development nos scripts do npm.
+  it('npm run dev roda em development; seed e migrate usam development só sem NODE_ENV', () => {
+    const { scripts } = JSON.parse(read('server/package.json')) as { scripts: Record<string, string> }
+    expect(scripts.dev).toBe('NODE_ENV=development tsx watch src/index.ts')
+    expect(scripts.seed).toBe('NODE_ENV=${NODE_ENV:-development} tsx src/seed.ts')
+    expect(scripts.migrate).toBe('NODE_ENV=${NODE_ENV:-development} tsx src/migrate.ts')
+    expect(scripts.start).toBe('node dist/index.js')
+    // a imagem fixa production (não depende do padrão)
+    expect(read('Dockerfile.api')).toMatch(/^ENV NODE_ENV=production$/m)
+  })
+
+  // password-gate.ts usa metade do pool do libuv para o scrypt: com o padrão (4 threads) só 2 senhas por vez.
+  it('Dockerfile.api: pool de threads do libuv com 16 (UV_THREADPOOL_SIZE) na imagem final', () => {
+    const api = read('Dockerfile.api')
+    const final = api.slice(api.lastIndexOf('\nFROM '))
+    expect(final).toMatch(/^ENV UV_THREADPOOL_SIZE=16$/m)
+  })
+
+  // deploy/certs (certificado e chave privada do TLS) entrava no contexto de build enviado ao Docker.
+  it('.dockerignore deixa fora do contexto o .env e os certificados', () => {
+    const lines = read('.dockerignore')
+      .split('\n')
+      .map((l) => l.trim())
+    for (const entry of ['deploy/certs', 'deploy/.env', '**/.env', '**/node_modules']) expect(lines, entry).toContain(entry)
+  })
+
+  // A imagem da API só copia de src/ (o painel) o que os dados de demonstração usam: arquivo novo importado pelo
+  // servidor e não copiado quebra o build do Docker ("Could not resolve").
+  it('Dockerfile.api copia todo arquivo de src/ que o bundle do servidor importa', async () => {
+    const meta = await build({
+      entryPoints: ['src/index.ts', 'src/seed.ts', 'src/migrate.ts'].map((f) => join(ROOT, 'server', f)),
+      absWorkingDir: join(ROOT, 'server'),
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      target: 'node20',
+      packages: 'external',
+      write: false,
+      outdir: 'dist',
+      metafile: true,
+      logLevel: 'silent',
+    })
+    const used = Object.keys(meta.metafile.inputs)
+      .map((f) => resolve(ROOT, 'server', f))
+      .filter((f) => f.startsWith(join(ROOT, 'src') + '/'))
+      .map((f) => f.slice(ROOT.length + 1))
+    expect(used.length).toBeGreaterThan(0)
+    const copied = [...read('Dockerfile.api').matchAll(/^COPY (src\/\S+) \.\/(\S+)$/gm)].map((m) => {
+      expect(m[2], 'mesmo caminho dentro da imagem').toBe(m[1])
+      return m[1]
+    })
+    for (const f of used) expect(copied.some((c) => f === c || f.startsWith(c.replace(/\/?$/, '/'))), f).toBe(true)
   })
 
   // r3-process-resilience-and-restart-2: sem a chave restart o Docker usa "no" e um crash da API, do banco ou um
@@ -144,6 +232,8 @@ describe('deploy/nginx.conf e deploy/security-headers.conf (estático)', () => {
     expect(block('migrate')).toMatch(/^ {4}restart: "no"$/m)
     // a sonda do contêiner olha /api/health, que agora consulta o banco (core.test.ts)
     expect(read('Dockerfile.api')).toMatch(/^HEALTHCHECK .*http:\/\/127\.0\.0\.1:3333\/api\/health/m)
+    // e o compose declara a mesma sonda para a API (docker compose ps mostra healthy/unhealthy)
+    expect(block('api')).toMatch(/^ {4}healthcheck:\n {6}test: \["CMD", "wget", "-qO-", "http:\/\/127\.0\.0\.1:3333\/api\/health"\]$/m)
   })
 
   // r3-process-resilience-and-restart-3: "proxy_pass http://api:3333;" resolvia "api" uma vez, ao carregar: com a API
@@ -171,7 +261,7 @@ describe.skipIf(!HAS_COMPOSE)('docker compose config (renderizado)', () => {
       cpSync(join(ROOT, 'deploy'), join(scratch, 'deploy'), { recursive: true })
       writeFileSync(join(scratch, 'deploy/.env'), `POSTGRES_PASSWORD=p1\nAPP_DB_PASSWORD=p2\nAPP_SECRET=${'x'.repeat(48)}\n`)
       const out = execFileSync('docker', ['compose', '--env-file', 'deploy/.env', 'config', '--format', 'json'], { cwd: scratch, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-      const services = JSON.parse(out).services as Record<string, { restart?: string }>
+      const services = JSON.parse(out).services as Record<string, { restart?: string; healthcheck?: { test?: string[] } }>
       expect(Object.keys(services).sort()).toEqual(['api', 'db', 'migrate', 'web'])
       expect(Object.fromEntries(Object.entries(services).map(([n, v]) => [n, v.restart]))).toEqual({
         db: 'unless-stopped',
@@ -179,6 +269,7 @@ describe.skipIf(!HAS_COMPOSE)('docker compose config (renderizado)', () => {
         web: 'unless-stopped',
         migrate: 'no',
       })
+      expect(services.api.healthcheck?.test).toEqual(['CMD', 'wget', '-qO-', 'http://127.0.0.1:3333/api/health'])
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }
@@ -332,7 +423,8 @@ describe.skipIf(!HAS_TOOLS)('deploy/nginx.conf rodando no nginx real', () => {
         .replace('/etc/nginx/certs/fullchain.pem', join(dir, 'fullchain.pem'))
         .replace('/etc/nginx/certs/privkey.pem', join(dir, 'privkey.pem'))
         .replace('root /usr/share/nginx/html;', `root ${html};`)
-        .replace('set $x2w_api http://api:3333;', `set $x2w_api http://127.0.0.1:${apiPort};`)
+        .split('set $x2w_api http://api:3333;')
+        .join(`set $x2w_api http://127.0.0.1:${apiPort};`)
         .split(`include ${SNIPPET_PATH};`)
         .join(`include ${join(ROOT, 'deploy/security-headers.conf')};`)
       if (!supportsHttp2On) c = c.replace(/http2 on;/, '')
@@ -405,6 +497,24 @@ http {
       }
     })
   }
+
+  it('corpo acima de 1m em /api/ para no nginx (413, nem chega à API); /api/kv/ repassa até 12m', async () => {
+    const over1m = 'x'.repeat(1024 * 1024 + 1024)
+    const r = await request({ tls: true, port: edgeHttps, path: '/api/team/direct', method: 'POST', body: { pad: over1m } })
+    expect(r.status).toBe(413)
+    // o mesmo erro da API, em JSON e pt-BR (não a página HTML do nginx), sem chegar a ela (nada de nao_autenticado)
+    expect(r.headers['content-type']).toMatch(/^application\/json/)
+    expect(JSON.parse(r.body)).toEqual({ error: { code: 'corpo_grande_demais', message: 'Os dados enviados passam do tamanho permitido.' } })
+    for (const [name, re] of Object.entries(SECURITY_HEADERS)) expect(r.headers[name], name).toMatch(re)
+    // /api/kv/ (com as mesmas regras de proxy): chega à API, que recusa sem sessão
+    const kv = await request({ tls: true, port: edgeHttps, path: '/api/kv/x', method: 'PUT', body: { value: over1m } })
+    expect(kv.status, kv.body.slice(0, 200)).toBe(401)
+    expect(JSON.parse(kv.body).error.code).toBe('nao_autenticado')
+    expect(occurrences(kv, 'x-frame-options')).toBe(1)
+    const over12m = await request({ tls: true, port: edgeHttps, path: '/api/kv/x', method: 'PUT', body: { value: 'x'.repeat(12 * 1024 * 1024 + 1024) } })
+    expect(over12m.status).toBe(413)
+    expect(JSON.parse(over12m.body).error.code).toBe('corpo_grande_demais')
+  })
 
   it('o Cache-Control de cada location continua valendo', async () => {
     expect((await request({ tls: true, port: edgeHttps, path: '/' })).headers['cache-control']).toBe('no-cache')

@@ -23,6 +23,15 @@ import { startWebhookDispatcher } from './modules/webhooks/dispatcher'
 import kvRoutes from './modules/kv/routes'
 import './types'
 
+/** Maior corpo aceito pelas rotas sem limite próprio (o nginx recusa antes, com client_max_body_size 1m). */
+export const BODY_LIMIT = 1024 * 1024
+
+/**
+ * Erros de concorrência do Postgres: impasse entre transações (40P01) e falha de serialização (40001). A transação
+ * inteira foi desfeita e repetir resolve: para a pessoa é o mesmo que outra gravação ao mesmo tempo.
+ */
+const PG_CONCURRENCY_CODES = new Set(['40P01', '40001'])
+
 export interface BuildOptions {
   config: Config
   db?: Db
@@ -34,8 +43,8 @@ export async function buildApp({ config, db, logger = false }: BuildOptions): Pr
     logger: logger ? { level: config.NODE_ENV === 'production' ? 'info' : 'debug', redact: ['req.headers.cookie', 'req.headers.authorization'] } : false,
     // confia em N proxies à frente (para ler o IP real em X-Forwarded-For)
     trustProxy: config.TRUST_PROXY > 0 ? (_addr: string, hop: number) => hop < config.TRUST_PROXY : false,
-    // imagens (banners, logos) chegam como data URL dentro do JSON
-    bodyLimit: 12 * 1024 * 1024,
+    // 1 MiB para as rotas em geral; imagens (data URL no JSON) e importações têm limite próprio nas rotas de /api/kv
+    bodyLimit: BODY_LIMIT,
   })
 
   const database = db ?? openDb(config.DATABASE_URL)
@@ -68,6 +77,17 @@ export async function buildApp({ config, db, logger = false }: BuildOptions): Pr
     const e = err as { statusCode?: number; validation?: unknown; message?: string; code?: string }
     if (e.statusCode === 429) {
       return reply.status(429).send({ error: { code: 'muitas_tentativas', message: 'Muitas tentativas. Aguarde um minuto e tente de novo.' } })
+    }
+    // corpo acima do bodyLimit (da API ou da rota)
+    if (e.statusCode === 413) {
+      return reply.status(413).send({ error: { code: 'corpo_grande_demais', message: 'Os dados enviados passam do tamanho permitido.' } })
+    }
+    if (e.code && PG_CONCURRENCY_CODES.has(e.code)) {
+      req.log.warn({ err }, 'conflito de concorrência no banco: transação desfeita')
+      const body: ErrorBody = {
+        error: { code: 'versao_desatualizada', message: 'Outra pessoa alterou estes dados ao mesmo tempo. Recarregue e tente de novo.' },
+      }
+      return reply.status(409).send(body)
     }
     if (e.validation || (e.statusCode && e.statusCode >= 400 && e.statusCode < 500)) {
       return reply.status(e.statusCode ?? 400).send({ error: { code: 'requisicao_invalida', message: e.message ?? 'Requisição inválida.' } })

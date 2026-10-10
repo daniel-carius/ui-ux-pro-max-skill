@@ -160,6 +160,31 @@ async function writeSettlements(ctx: KvContext, value: unknown, expectedVersion:
   })
 }
 
+const settlementRecord = newSettlement.extend({
+  status: z.enum(['aberta', 'fechada', 'paga'], { error: 'Situação da apuração inválida.' }),
+})
+
+/**
+ * Apurações vindas da plataforma (dados de demonstração): números válidos, uma por
+ * provedora e mês, taxa devida = GGR positivo × taxa, e só fechada/paga depois do fim
+ * do mês, com a referência do pagamento na paga.
+ */
+export function checkSettlementRecords(list: readonly JsonObject[], now: number) {
+  const seen = new Set<string>()
+  for (const raw of list) {
+    const s = parseOr400(settlementRecord, raw, `Apuração ${idOf(raw)}: `)
+    const k = `${s.providerId}|${s.month}`
+    if (seen.has(k)) throw Errors.invalid(`Já existe apuração de ${name(raw)}.`, { id: s.id })
+    seen.add(k)
+    // tolerância de 1 centavo (arredondamento do GGR antes ou depois da taxa)
+    if (typeof raw.feeDue !== 'number' || Math.abs(raw.feeDue - providerFee(s.ggr, s.feePct)) > 0.011) {
+      throw Errors.invalid(`Apuração ${s.id}: a taxa devida não confere com o GGR e a taxa.`, { id: s.id })
+    }
+    if (s.status !== 'aberta' && !monthEnded(s.month, now)) throw Errors.invalid(`Apuração ${s.id}: o mês ainda não terminou.`, { id: s.id })
+    if (s.status === 'paga') parseOr400(paymentRef, raw.paymentRef, `Apuração ${s.id}: `)
+  }
+}
+
 export const kvHandlers: KvHandlers = {
   'ggr-settlements': { read: (ctx) => genericHandler.read(ctx), write: writeSettlements },
 }

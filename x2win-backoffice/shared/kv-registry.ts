@@ -21,6 +21,7 @@ export type KvDomain =
   | 'affiliates'
   | 'commission-rules'
   | 'ggr-settlements'
+  | 'player-projections'
 
 export interface KvRule {
   prefix: string
@@ -46,8 +47,13 @@ export interface KvRule {
    * só se o objeto que o guarda não mudou de destino (host, porta, URL, conta…).
    */
   secrets?: boolean
-  /** contém dados pessoais: mascarados para quem não tem a permissão indicada */
-  pii?: { revealPermission: string }
+  /**
+   * contém dados pessoais: mascarados para quem não tem a permissão indicada.
+   * revealByRecord: mascarados para todos na leitura da chave; quem tem a permissão
+   * pede o dado em claro de um registro por vez (POST /api/kv/<chave>/:id/reveal),
+   * com auditoria 'revelar' do servidor.
+   */
+  pii?: { revealPermission: string; revealByRecord?: boolean }
   /**
    * nomes de campo tratados como dado pessoal nesta chave, além de PII_FIELD
    * (ex.: dados bancários: agency, account, holder). Só valem com `pii`.
@@ -83,10 +89,16 @@ export interface KvRule {
 
 /** Tamanho máximo padrão do valor de uma chave (JSON). */
 export const KV_DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+/**
+ * Corpo máximo das rotas que recebem o valor de uma chave (PUT /api/kv/:key e as
+ * importações de jogadores e extrato). As demais rotas ficam com o limite global
+ * da API (menor).
+ */
+export const KV_BODY_LIMIT = 12 * 1024 * 1024
 /** Chaves com imagens (data URL de até 3 MB cada): o limite é o do corpo da requisição. */
-const IMAGES = 12 * 1024 * 1024
+const IMAGES = KV_BODY_LIMIT
 /** Listas de registros que crescem com o uso (concessões, compras, históricos): idem. */
-const RECORDS = 12 * 1024 * 1024
+const RECORDS = KV_BODY_LIMIT
 
 /** Chaves que ficam só no navegador (preferências de tela e rascunhos pessoais). */
 export const LOCAL_ONLY_PREFIXES = [
@@ -100,16 +112,26 @@ export const LOCAL_ONLY_PREFIXES = [
 ] as const
 
 const PII_PLAYERS = { revealPermission: 'usuarios.ver-dados' }
-const PII_AFFILIATES = { revealPermission: 'afiliados-saques.ver-pix' }
+// chave PIX, dados bancários e e-mail de afiliados: mascarados para todos na lista; o dado em claro
+// sai por registro (POST /api/kv/afiliados.saques/:id/reveal e /api/kv/crescimento.afiliados/:id/reveal)
+const PII_AFFILIATES = { revealPermission: 'afiliados-saques.ver-pix', revealByRecord: true }
 const WEBHOOK_URLS = { revealPermission: 'webhooks.editar' }
 
 /**
  * Telas que trabalham com jogadores individuais e por isso leem a lista inteira
  * (além de Usuários). Telas que só mostram contagens (Dashboard, Cadastro, Jogo
- * responsável, Textos legais) e as de campanha não leem: precisam de agregados/
- * projeção mínima no servidor (dado pessoal e financeiro, LGPD art. 6º III).
+ * responsável, Textos legais) e as de campanha não leem: usam as visões calculadas
+ * pelo servidor, geral.jogadores.metricas e geral.jogadores.audiencia (dado pessoal
+ * e financeiro, LGPD art. 6º III).
  */
 const PLAYER_READ_PAGES = ['transacoes', 'antifraude', 'rankings', 'indicados', 'links', 'ranking-afiliados', 'afiliados-gerentes']
+/**
+ * Telas que leem o público de marketing (geral.jogadores.audiencia): jogadores que podem
+ * receber campanhas, com campos mínimos (sem dado pessoal nem saldo).
+ */
+const AUDIENCE_READ_PAGES = ['promocoes', 'free-spins', 'cupons', 'torneios', 'niveis', 'disparos', 'notificacoes', 'popups-inbox']
+/** Telas que leem as contagens da base (geral.jogadores.metricas): as de público e as que só mostram números. */
+const METRICS_READ_PAGES = ['dashboard', 'cadastro', 'jogo-responsavel', 'textos-legais', 'moeda', 'cashback', ...AUDIENCE_READ_PAGES]
 /** Telas que leem a base de afiliados (além de Afiliados e gerentes). */
 const AFFILIATE_READ_PAGES = ['usuarios', 'comissoes', 'links', 'ranking-afiliados', 'indicados', 'antifraude', 'afiliados-visao-geral', 'afiliados-saques']
 
@@ -126,6 +148,10 @@ export const KV_RULES: KvRule[] = [
   },
   // pausas em vigor (início de cada pausa), gravadas só pelo servidor ao mudar o status
   { prefix: 'geral.jogadores.pausas', page: 'usuarios', read: 'tela', write: 'servidor' },
+  // visões da base calculadas pelo servidor (só leitura): público de marketing com campos mínimos
+  // e contagens sem jogador identificado, para as telas que não leem a lista inteira
+  { prefix: 'geral.jogadores.audiencia', page: 'usuarios', read: 'tela', readPages: AUDIENCE_READ_PAGES, write: 'servidor', domain: 'player-projections' },
+  { prefix: 'geral.jogadores.metricas', page: 'usuarios', read: 'tela', readPages: METRICS_READ_PAGES, write: 'servidor', domain: 'player-projections' },
   {
     prefix: 'geral.transacoes',
     page: 'transacoes',
@@ -269,7 +295,8 @@ export const KV_RULES: KvRule[] = [
   // ferramentas de jogo responsável (Lei 14.790/2023): validadas pelo servidor
   { prefix: 'config.jogo-responsavel', page: 'jogo-responsavel', read: 'equipe', history: true },
   { prefix: 'config.suporte', page: 'suporte', read: 'equipe' },
-  { prefix: 'config.manutencao', page: 'manutencao', read: 'equipe' },
+  // a barra do topo de todos mostra se o site está fechado; o link de testes (bypassToken) só para quem vê a tela
+  { prefix: 'config.manutencao', page: 'manutencao', read: 'equipe', teamView: ['active', 'message', 'returnAt', 'since'] },
   // a tela é só de leitura: quem vê só inclui uma verificação nova (o servidor define id, data e autor)
   { prefix: 'config.dominios.verificacoes', page: 'dominios', read: 'equipe', write: ['dominios.ver'], history: true },
   { prefix: 'config.paises.bloqueados', page: 'paises', read: 'equipe', history: true },

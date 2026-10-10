@@ -26,7 +26,7 @@
 // ativo; só inclui ids novos, não mexe em saldo e audita quem importou.
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { canWriteKey, findKvRule } from '@shared/kv-registry'
+import { canWriteKey, findKvRule, KV_BODY_LIMIT } from '@shared/kv-registry'
 import { brl } from '@shared/money'
 import type { AuditAction } from '@shared/audit'
 import { AppError, Errors } from '../../errors'
@@ -338,7 +338,8 @@ export const kvHandlers: KvHandlers = {
 
 export const MAX_IMPORT_TRANSACTIONS = 20_000
 
-const importedTx = baseTx.extend({
+/** Transação do histórico da plataforma (importação e dados de demonstração). */
+export const importedTx = baseTx.extend({
   id: txId.trim(),
   at: z.string('Data inválida.').max(40, 'Data inválida.').refine((s) => !Number.isNaN(Date.parse(s)), 'Data inválida.'),
   amount: z.number('Valor inválido.').min(-1e9, 'Valor inválido.').max(1e9, 'Valor inválido.').refine(twoDecimals, 'Use no máximo duas casas decimais.'),
@@ -354,7 +355,7 @@ const importBody = z.object(
 )
 
 export function registerTransactionImportRoute(app: FastifyInstance) {
-  app.post(`/${TRANSACTIONS_KEY}/import`, async (req, reply) => {
+  app.post(`/${TRANSACTIONS_KEY}/import`, { bodyLimit: KV_BODY_LIMIT }, async (req, reply) => {
     const auth = requireImporter(req)
     const { transactions } = importBody.parse(req.body ?? {})
     const rule = findKvRule(TRANSACTIONS_KEY)!

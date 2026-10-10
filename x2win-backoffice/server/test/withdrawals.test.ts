@@ -7,8 +7,9 @@ import { newId } from '../src/lib/crypto'
 import { getRole } from '../src/services/roles-repo'
 import type { KvContext } from '../src/kv/types'
 import type { AuthContext } from '../src/types'
-import { kvHandlers } from '../src/modules/withdrawals/kv'
+import { kvHandlers, RULES_SETTINGS_KEY } from '../src/modules/withdrawals/kv'
 import { seedDemo } from '../src/modules/withdrawals/seed'
+import { DEMO_STAFF_LABEL, demoCpf, demoPhone } from '../src/modules/kv/demo-seed'
 import { api, createTestApp, createUser, loginAs, sessionCookie } from './helpers'
 
 // ---------- utilitários locais ----------
@@ -79,11 +80,17 @@ const outboxOf = (app: FastifyInstance, event: string) =>
 // ---------- testes ----------
 
 let app: FastifyInstance
-let admin: { cookie: string; user: { id: string } }
+let admin: { cookie: string; user: { id: string; email: string } }
 
 beforeAll(async () => {
   app = await createTestApp()
   admin = await loginAs(app, 'superadmin', { name: 'Ana Admin' })
+  // os testes de decisão usam sempre o mesmo jogador e valores acima do padrão: regras folgadas
+  // (as conferências das regras na aprovação têm testes próprios em withdrawals-payout.test.ts)
+  await app.db.query(`insert into settings (key, value) values ($1, $2::jsonb)`, [
+    RULES_SETTINGS_KEY,
+    JSON.stringify({ version: 1, rules: { ...DEFAULT_WITHDRAWAL_RULES, maxPerRequest: 100_000, dailyLimit: 1000 } }),
+  ])
 })
 afterAll(async () => app.close())
 
@@ -105,6 +112,8 @@ describe('POST /api/withdrawals/:id/approve', () => {
       amount: 1234.56,
       fee: 0,
       decidedBy: 'Ana Admin',
+      decidedById: admin.user.id,
+      decidedByEmail: admin.user.email,
       decisionNote: null,
       pixKeyType: 'CPF',
       pixKey: '123.***.***-09',
@@ -434,6 +443,9 @@ describe('kv operacao.saques.regras', () => {
     [{ autoApproveMax: 9000 }, 'aprovação automática'],
     [{ rolloverPct: 6000 }, 'Rollover'],
     [{ fee: -1 }, 'positivos'],
+    [{ fee: 1.234 }, 'casas decimais'],
+    [{ maxPerRequest: 1000.001 }, 'casas decimais'],
+    [{ rolloverPct: 33.333 }, 'casas decimais'],
   ])('regra inválida %o → 400 com a mensagem do validador', async (patch, msg) => {
     const a = await authFor(app, 'superadmin')
     const err = await handler()
@@ -477,5 +489,28 @@ describe('seed de demonstração', () => {
     expect(await seedDemo(probe)).toMatch(/nada a semear/)
     expect((await probe.db.query('select id from withdrawals')).length).toBe(96)
     await probe.close()
+  })
+
+  it('dados obviamente fictícios: quem decidiu é o rótulo genérico, e-mail .invalid e chave PIX fictícia', async () => {
+    const probe = await createTestApp()
+    try {
+      await seedDemo(probe)
+      const rows = await probe.db.query<{ player_email: string; pix_key_type: string; pix_key_enc: string; decided_by: string | null; status: string }>(
+        'select player_email, pix_key_type, pix_key_enc, decided_by, status from withdrawals',
+      )
+      const decided = rows.filter((r) => ['aprovado', 'recusado'].includes(r.status))
+      expect(decided.length).toBeGreaterThan(0)
+      // antes: nomes da equipe real ('Daniel Carius', 'Rafael Lima', 'Beatriz Souza')
+      expect(new Set(decided.map((r) => r.decided_by))).toEqual(new Set([DEMO_STAFF_LABEL]))
+      expect(rows.every((r) => r.player_email.endsWith('.invalid'))).toBe(true)
+      for (const r of rows) {
+        const key = probe.cipher.decrypt(r.pix_key_enc)
+        if (r.pix_key_type === 'E-mail') expect(key.endsWith('.invalid')).toBe(true)
+        if (r.pix_key_type === 'CPF') expect(demoCpf(key)).toBe(key)
+        if (r.pix_key_type === 'Celular') expect(demoPhone(key)).toBe(key)
+      }
+    } finally {
+      await probe.close()
+    }
   })
 })

@@ -12,6 +12,8 @@ export interface AuditRow {
   summary: string
   ip: string | null
   source: 'servidor' | 'painel'
+  /** e-mail atual de quem fez (users), na exportação */
+  actor_email?: string | null
 }
 
 export function toAuditEntry(r: AuditRow): AuditEntry {
@@ -139,14 +141,31 @@ export function csvCell(v: unknown): string {
   return s
 }
 
-export const CSV_HEADER = ['Data e hora', 'Quem fez', 'Ação', 'Entidade', 'Resumo', 'IP', 'Origem']
+export const CSV_HEADER = ['Data e hora', 'Quem fez', 'ID de quem fez', 'E-mail de quem fez', 'Ação', 'Entidade', 'Resumo', 'IP', 'Origem']
 
-export function auditCsv(entries: AuditEntry[]): string {
+/** Linha da exportação: o nome sozinho pode repetir ou mudar; id e e-mail identificam a pessoa. */
+export type AuditExportEntry = AuditEntry & { actorEmail: string }
+
+export function toAuditExportEntry(r: AuditRow): AuditExportEntry {
+  return { ...toAuditEntry(r), actorEmail: r.actor_email ?? '' }
+}
+
+export function auditCsv(entries: AuditExportEntry[]): string {
   const lines = [CSV_HEADER.map(csvCell).join(';')]
   for (const e of entries) {
     lines.push(
       // Origem: deixa explícito que o relatado pelo painel não foi verificado pelo servidor
-      [csvDate(e.at), e.actorName, AUDIT_ACTION_LABEL[e.action] ?? e.action, e.entity, e.summary, e.ip, AUDIT_SOURCE_LABEL[e.source ?? 'servidor']]
+      [
+        csvDate(e.at),
+        e.actorName,
+        e.actorId,
+        e.actorEmail,
+        AUDIT_ACTION_LABEL[e.action] ?? e.action,
+        e.entity,
+        e.summary,
+        e.ip,
+        AUDIT_SOURCE_LABEL[e.source ?? 'servidor'],
+      ]
         .map(csvCell)
         .join(';'),
     )

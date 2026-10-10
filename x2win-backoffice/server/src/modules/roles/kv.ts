@@ -4,11 +4,13 @@
 // existir no catálogo; teto null | 0 | > 0 (guardado em centavos); cargo novo
 // ganha id do servidor; só exclui cargo personalizado sem pessoas ativas ou
 // convidadas; cargo de nível administrativo (antes ou depois) exige
-// cargos.conceder. Auditoria com o resumo por cargo.
+// cargos.conceder, assim como dar ou tirar permissão de governança (saques.aprovar,
+// jogo-responsavel.editar, paises.editar e as administrativas) e mudar o teto.
+// Auditoria com o resumo por cargo.
 import { z } from 'zod'
 import { canReadKey, canWriteKey } from '@shared/kv-registry'
 import { brl } from '@shared/money'
-import { isAdminLevelRole, isRequire2faLocked, PERMISSION_BY_KEY, PERMISSIONS, type Role } from '@shared/permissions'
+import { isAdminLevelRole, isGovernedChange, isGovernedRole, isRequire2faLocked, PERMISSION_BY_KEY, PERMISSIONS, type Role } from '@shared/permissions'
 import type { Db } from '../../db'
 import { Errors } from '../../errors'
 import { newId } from '../../lib/crypto'
@@ -104,6 +106,17 @@ function assertKnownPerms(r: IncomingRole, keys: string[]) {
 function assertGrant(auth: AuthContext, ...roles: Pick<Role, 'permissions'>[]) {
   if (roles.some((r) => isAdminLevelRole(r)) && !auth.perms.has(GRANT_PERM)) {
     throw Errors.forbidden('Só quem pode conceder cargos administrativos cria, altera ou exclui cargos de nível administrativo.')
+  }
+}
+
+type GovernedState = Pick<Role, 'permissions' | 'approvalCeiling'>
+
+/** Dar ou tirar permissão de governança, ou mudar o teto de aprovação (null = cargo criado ou excluído). */
+function assertGovernedGrant(auth: AuthContext, name: string, before: GovernedState | null, after: GovernedState | null) {
+  if (isGovernedChange(before, after) && !auth.perms.has(GRANT_PERM)) {
+    throw Errors.forbidden(
+      `Só quem pode conceder cargos dá ou tira as permissões de aprovar saques, de jogo responsável e de países bloqueados, e muda o teto de aprovação de saques (${name}).`,
+    )
   }
 }
 
@@ -232,6 +245,10 @@ export const kvHandlers: KvHandlers = {
           for (const r of created) assertGrant(auth, { permissions: r.permissions })
           for (const c of changes) assertGrant(auth, c.old, { permissions: c.next.permissions })
           for (const r of deleted) assertGrant(auth, r)
+          // permissão de governança dada ou tirada, ou teto mudado (inclusive ao criar ou excluir), também
+          for (const r of created) assertGovernedGrant(auth, r.name, null, { permissions: r.permissions, approvalCeiling: r.approvalCeiling })
+          for (const c of changes) assertGovernedGrant(auth, c.old.name, c.old, { permissions: c.next.permissions, approvalCeiling: c.incoming.approvalCeiling })
+          for (const r of deleted) assertGovernedGrant(auth, r.name, r, null)
 
           // exclusões primeiro: liberam nomes para os cargos novos
           let movedTotal = 0
@@ -252,10 +269,10 @@ export const kvHandlers: KvHandlers = {
                 { id: r.id },
               )
             }
-            // pessoas desligadas não impedem a exclusão: passam para o cargo do sistema mais restrito
+            // pessoas desligadas não impedem a exclusão: passam para o cargo do sistema mais restrito (sem governança)
             if (members.length) {
               const fallback = (await listRoles(t))
-                .filter((x) => x.system && x.id !== r.id && !isAdminLevelRole(x))
+                .filter((x) => x.system && x.id !== r.id && !isGovernedRole(x))
                 .sort((a, b) => a.permissions.length - b.permissions.length || a.id.localeCompare(b.id))[0]
               if (!fallback) throw Errors.invalid(`Não há cargo do sistema para receber as pessoas desligadas de ${r.name}.`, { id: r.id })
               // só quem está desligado muda de cargo; qualquer diferença com o conjunto travado desfaz tudo

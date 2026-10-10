@@ -4,7 +4,9 @@
 //    autoexcluído ou em pausa continua podendo sacar o saldo (jogo responsável);
 //  - manualCreditors: quem lançou creditação manual ou estorno para o jogador desde
 //    um instante (segregação de funções: quem credita não aprova o saque sozinho).
-// Leem dentro da transação de quem chama (for share: a decisão vê o estado gravado).
+// Leem dentro da transação de quem chama (for share: a decisão vê o estado gravado). Quem usa as duas chama
+// manualCreditors antes de payoutHold: é a ordem em que o lançamento no extrato trava as linhas (geral.transacoes,
+// depois geral.jogadores); na ordem inversa as duas transações podem se travar (impasse no PostgreSQL).
 import type { Cipher } from '../../lib/crypto'
 import type { Db } from '../../db'
 import { isPlainObject, type JsonObject } from './json'

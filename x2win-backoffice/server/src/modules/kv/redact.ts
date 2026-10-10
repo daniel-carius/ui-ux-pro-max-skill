@@ -40,9 +40,12 @@ function withExtras(base: MaskPolicy, rule: KvRule, urls: boolean): MaskPolicy {
   return out
 }
 
-/** O que sai mascarado para esta pessoa. */
+/**
+ * O que sai mascarado para esta pessoa. Chave com pii.revealByRecord: dados pessoais
+ * mascarados para todos (o dado em claro sai só pela rota de revelar, por registro).
+ */
 export function readPolicy(rule: KvRule, perms: ReadonlySet<string>): MaskPolicy {
-  const base = { secrets: !!rule.secrets, pii: !!rule.pii && !perms.has(rule.pii.revealPermission) }
+  const base = { secrets: !!rule.secrets, pii: !!rule.pii && (!!rule.pii.revealByRecord || !perms.has(rule.pii.revealPermission)) }
   return withExtras(base, rule, !!rule.urls && !perms.has(rule.urls.revealPermission))
 }
 

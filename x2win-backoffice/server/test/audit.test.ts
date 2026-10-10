@@ -7,7 +7,7 @@ import { newId } from '../src/lib/crypto'
 import { getRole } from '../src/services/roles-repo'
 import type { KvContext } from '../src/kv/types'
 import type { AuthContext } from '../src/types'
-import { AUDIT_KV_LIMIT, AUDIT_KV_PANEL_LIMIT, kvHandlers } from '../src/modules/audit/kv'
+import { AUDIT_KV_LIMIT, AUDIT_KV_PANEL_LIMIT, auditSliceWhere, kvHandlers } from '../src/modules/audit/kv'
 import { csvCell } from '../src/modules/audit/format'
 import { EVENTS_PER_IP_PER_MINUTE, EVENTS_PER_USER_PER_MINUTE } from '../src/modules/audit/routes'
 import { api, cookieFrom, createTestApp, createUser, loginAs, sessionCookie } from './helpers'
@@ -285,18 +285,18 @@ describe('GET /api/audit/export.csv', () => {
     expect([...raw.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf])
     const text = raw.toString('utf8').replace(/^﻿/, '')
     const lines = text.trim().split('\r\n')
-    expect(lines[0]).toBe('Data e hora;Quem fez;Ação;Entidade;Resumo;IP;Origem')
+    expect(lines[0]).toBe('Data e hora;Quem fez;ID de quem fez;E-mail de quem fez;Ação;Entidade;Resumo;IP;Origem')
     expect(lines).toHaveLength(3)
     expect(lines[1]).toContain('Saque #2')
     expect(lines[1]).toContain('Aprovou')
-    expect(lines[1]).toMatch(/^03\/05\/2026 07:00:00;Duda;/)
+    expect(lines[1]).toMatch(/^03\/05\/2026 07:00:00;Duda;;;/)
     expect(lines[2]).toContain('"Valor; com ""aspas"""')
     expect(text).not.toContain('Cupom')
 
     const all = await api(probe, 'GET', '/api/audit/export.csv', { cookie })
     const allText = all.rawPayload.toString('utf8')
     expect(allText).toContain(`"'=HYPERLINK(""http://mal"")"`)
-    expect(allText).toMatch(/;Duda;Aprovou;Saque #2;ok;1\.2\.3\.4;servidor\r\n/)
+    expect(allText).toMatch(/;Duda;;;Aprovou;Saque #2;ok;1\.2\.3\.4;servidor\r\n/)
 
     const exports = await probe.db.query<{ action: string; actor_id: string; entity: string; summary: string; ip: string }>(
       `select * from audit_log where action = 'exportar' order by id`,
@@ -478,7 +478,6 @@ describe('panelAuditDecision: eventos que as telas relatam', () => {
     ['editar', 'Fatura 2026-001'], ['exportar', 'Faturas'], ['exportar', 'Fatura 2026-001'],
     ['editar', 'Gateway PixPay'], ['excluir', 'Conta PixPay · Principal'],
     ['desligar', 'Integração Mailgun'], ['ligar', 'Integração SendWork'], ['testar', 'Integrações · e-mail'],
-    ['ligar', 'Manutenção'], ['desligar', 'Manutenção'], ['editar', 'Manutenção'],
     ['criar', 'Chave MCP "Claude"'],
     ['desligar', 'Módulo Cassino'],
     ['bloquear', 'País AR · Argentina'], ['excluir', 'País AR · Argentina'],
@@ -497,9 +496,7 @@ describe('panelAuditDecision: eventos que as telas relatam', () => {
     ['criar', 'Banner "Hero"'], ['editar', 'Banners · Topo'],
     ['editar', 'Identidade e tema'], ['editar', 'Página inicial'], ['editar', 'SEO avançado'], ['editar', 'Sportsbook'],
     ['bloquear', 'IP 1.2.3.4'], ['desbloquear', 'Bloqueio do IP 1.2.3.4'], ['desbloquear', 'Bloqueio da rede n1'], ['exportar', 'Anti-fraude'],
-    ['ligar', 'Modo de ataque'], ['desligar', 'Modo de ataque'],
     ['criar', 'Gerente Maria'], ['editar', 'Contrato de Maria'], ['exportar', 'Gerentes de afiliados'], ['exportar', 'Saques de afiliados'], ['exportar', 'Afiliados · Visão geral'],
-    ['editar', 'Empresa e licença'],
   ]
 
   it.each(reported)('aceita %s "%s" (com a permissão da tela)', (action, entity) => {
@@ -530,13 +527,22 @@ describe('panelAuditDecision: eventos que as telas relatam', () => {
     ['editar', '2FA · Ana', 'entidade_do_servidor'],
     ['editar', 'Senha', 'entidade_do_servidor'],
     ['criar', 'Acesso ao painel', 'entidade_do_servidor'],
+    // o servidor grava ao salvar a chave (seguranca.modo-ataque, config.manutencao, config.empresa)
+    ['ligar', 'Modo de ataque', 'entidade_do_servidor'],
+    ['desligar', 'Modo de ataque', 'entidade_do_servidor'],
+    ['editar', 'Modo de ataque', 'entidade_do_servidor'],
+    ['exportar', 'Modo de ataque', 'entidade_do_servidor'],
+    ['ligar', 'Manutenção', 'entidade_do_servidor'],
+    ['desligar', 'Manutenção', 'entidade_do_servidor'],
+    ['editar', 'Manutenção', 'entidade_do_servidor'],
+    ['excluir', 'Manutenção', 'entidade_do_servidor'],
+    ['editar', 'Empresa e licença', 'entidade_do_servidor'],
+    ['ligar', 'Empresa e licença', 'entidade_do_servidor'],
     // fora da lista / ação que a tela não relata
     ['editar', 'Qualquer coisa', 'evento_desconhecido'],
     ['ligar', 'Modo  de ataque', 'evento_desconhecido'],
     ['ligar', 'modo de ataque', 'evento_desconhecido'],
-    ['editar', 'Modo de ataque', 'evento_desconhecido'],
-    ['excluir', 'Manutenção', 'evento_desconhecido'],
-    ['ligar', 'Empresa e licença', 'evento_desconhecido'],
+    ['ligar', 'Manutenção · site', 'evento_desconhecido'],
     ['editar', 'Segurança do painel', 'evento_desconhecido'],
     ['editar', 'Promoção ', 'evento_desconhecido'],
     ['editar', 'Termos de uso', 'evento_desconhecido'],
@@ -545,9 +551,9 @@ describe('panelAuditDecision: eventos que as telas relatam', () => {
   })
 
   it('permissão exigida: editar a tela; exportar = permissão de exportação, se houver, ou ver a tela', () => {
-    expect(panelAuditDecision('ligar', 'Modo de ataque')).toMatchObject({ ok: true, perms: ['modo-ataque.editar'] })
-    expect(panelAuditDecision('ligar', 'Manutenção')).toMatchObject({ ok: true, perms: ['manutencao.editar'] })
-    expect(panelAuditDecision('editar', 'Empresa e licença')).toMatchObject({ ok: true, perms: ['empresa.editar'] })
+    expect(panelAuditDecision('ligar', 'Cargos e permissões')).toMatchObject({ ok: true, perms: ['cargos.editar'] })
+    expect(panelAuditDecision('criar', 'Segurança do painel')).toMatchObject({ ok: true, perms: ['seguranca-painel.editar'] })
+    expect(panelAuditDecision('editar', 'Identidade e tema')).toMatchObject({ ok: true, perms: ['tema.editar'] })
     expect(panelAuditDecision('exportar', 'Usuários')).toMatchObject({ ok: true, perms: ['usuarios.exportar'] })
     expect(panelAuditDecision('exportar', 'Auditoria')).toMatchObject({ ok: true, perms: ['auditoria.exportar'] })
     expect(panelAuditDecision('exportar', 'Promoções')).toMatchObject({ ok: true, perms: ['promocoes.ver', 'promocoes.editar'] })
@@ -620,11 +626,22 @@ describe('regressão r2-audit-forgery-attribution-1: auditoria forjada por qualq
     // controle: marketing NÃO pode aprovar o saque de verdade
     expect((await api(probe, 'POST', `/api/withdrawals/${saqueId}/approve`, { cookie: mktCookie, ip: '177.7.7.7' })).statusCode).toBe(403)
 
-    // ações reais do Superadmin: aprova o saque (linha do servidor) e liga Modo de ataque / Manutenção (relato do painel)
+    // ações reais do Superadmin: aprova o saque e liga Modo de ataque / Manutenção (as três linhas são do servidor)
     expect((await api(probe, 'POST', `/api/withdrawals/${saqueId}/approve`, { cookie: daniel.cookie, ip: '200.1.1.1' })).statusCode).toBe(200)
-    const on1 = await api(probe, 'POST', '/api/audit/events', { cookie: daniel.cookie, ip: '200.1.1.1', body: { action: 'ligar', entity: 'Modo de ataque', summary: 'Ligado com captcha; desligamento manual' } })
-    const on2 = await api(probe, 'POST', '/api/audit/events', { cookie: daniel.cookie, ip: '200.1.1.1', body: { action: 'ligar', entity: 'Manutenção', summary: 'Site fechado para manutenção. Previsão de volta: sem previsão' } })
-    expect([on1.statusCode, on2.statusCode]).toEqual([201, 201])
+    const on1 = await api(probe, 'PUT', '/api/kv/seguranca.modo-ataque', {
+      cookie: daniel.cookie,
+      ip: '200.1.1.1',
+      body: { value: { active: true, autoOffMinutes: null, lowerLimits: false, closeSignups: false, captcha: true } },
+    })
+    const on2 = await api(probe, 'PUT', '/api/kv/config.manutencao', {
+      cookie: daniel.cookie,
+      ip: '200.1.1.1',
+      body: { value: { active: true, message: 'Voltamos em breve.', returnAt: null, bypassToken: 'link-de-testes', since: null } },
+    })
+    expect([on1.statusCode, on2.statusCode], `${on1.body} ${on2.body}`).toEqual([200, 200])
+    // o painel não relata mais estas entidades (nem quem pode editar a tela)
+    const reported = await api(probe, 'POST', '/api/audit/events', { cookie: daniel.cookie, ip: '200.1.1.1', body: { action: 'ligar', entity: 'Modo de ataque', summary: 'Ligado com captcha; desligamento manual' } })
+    expect(reported.statusCode).toBe(403)
 
     // marketing tenta forjar linhas sensíveis
     const forged: [string, string][] = [
@@ -658,7 +675,8 @@ describe('regressão r2-audit-forgery-attribution-1: auditoria forjada por qualq
     // a aprovação real é do servidor; os relatos do Daniel saem marcados como do painel (não verificados)
     const real = log.find((e) => e.entity === `Saque #${saqueId}` && e.action === 'aprovar')
     expect(real).toMatchObject({ actorId: daniel.user.id, source: 'servidor' })
-    expect(modoAtaqueHistory(log)[0]).toMatchObject({ source: 'painel' })
+    expect(modoAtaqueHistory(log)[0]).toMatchObject({ actorId: daniel.user.id, action: 'ligar', source: 'servidor' })
+    expect(manutencaoLastOn(log)).toMatchObject({ actorId: daniel.user.id, source: 'servidor' })
 
     // o que marketing PODE fazer continua relatável (e sai marcado como relatado)
     const own = await api(probe, 'POST', '/api/audit/events', { cookie: mktCookie, ip: '177.7.7.7', body: { action: 'ligar', entity: 'Promoção Boas-vindas', summary: 'Promoção ligada' } })
@@ -666,8 +684,8 @@ describe('regressão r2-audit-forgery-attribution-1: auditoria forjada por qualq
 
     // CSV: a coluna Origem diz que o relato não foi verificado
     const csv = (await api(probe, 'GET', '/api/audit/export.csv', { cookie: daniel.cookie })).rawPayload.toString('utf8')
-    expect(csv).toContain(';Mário Marketing;Ligou;Promoção Boas-vindas;Promoção ligada;177.7.7.7;relatado pelo painel (não verificado)\r\n')
-    expect(csv).toMatch(new RegExp(`;Daniel Carius;Aprovou;Saque #${saqueId};[^\\r\\n]*;servidor\\r\\n`))
+    expect(csv).toContain(`;Mário Marketing;${mkt.id};${mkt.email};Ligou;Promoção Boas-vindas;Promoção ligada;177.7.7.7;relatado pelo painel (não verificado)\r\n`)
+    expect(csv).toMatch(new RegExp(`;Daniel Carius;${daniel.user.id};${daniel.user.email.replace(/\./g, '\\.')};Aprovou;Saque #${saqueId};[^\\r\\n]*;servidor\\r\\n`))
   })
 
   it('inundar /api/audit/events não tira a aprovação real de saque da chave auditoria.registros', async () => {
@@ -752,4 +770,160 @@ describe('regressão r2-audit-forgery-attribution-3: inundação da auditoria', 
       await probe.close()
     }
   }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
+// Regressão r1-exposure-4: auditoria.registros devolvia a trilha inteira (IPs de login da equipe, e-mails, nomes de
+// jogadores e valores de saque) para cargos sem auditoria.ver que só leem a chave por Modo de ataque, Segurança do
+// painel ou Equipe. Agora cada um recebe só a fatia da própria tela, filtrada antes do limite, e IP só nos
+// registros da própria pessoa.
+// ---------------------------------------------------------------------------
+
+describe('regressão r1-exposure-4: auditoria.registros por fatia da tela', () => {
+  const ADMIN_IP = '203.0.113.77'
+  const VIEWER_IP = '198.51.100.23'
+  const NEW_EMAIL = 'nova.pessoa.poc@x2win.bet.br'
+  const PLAYER = 'Joana Pereira Poc'
+  let probe: FastifyInstance
+  let adminCookie: string
+  const viewers: Record<string, { cookie: string; id: string }> = {}
+
+  beforeAll(async () => {
+    probe = await createTestApp()
+    // Superadmin entra de verdade a partir de um IP público (auditoria 'login' com IP)
+    const adminUser = await createUser(probe, { roleId: 'superadmin', name: 'Admin Real', password: 'SenhaForte2026x' })
+    const login = await api(probe, 'POST', '/api/auth/login', { ip: ADMIN_IP, body: { email: adminUser.email, password: adminUser.password } })
+    expect(login.statusCode, login.body).toBe(200)
+    adminCookie = cookieFrom(login)!
+
+    // Equipe: acesso direto (resumo com o e-mail); Saques: aprovação (resumo com jogador e valor)
+    expect((await api(probe, 'POST', '/api/team/direct', { cookie: adminCookie, ip: ADMIN_IP, body: { name: 'Nova Pessoa', email: NEW_EMAIL, roleId: 'suporte' } })).statusCode).toBe(200)
+    const wid = newId('SQ')
+    await probe.db.query(
+      `insert into withdrawals (id, player_id, player_name, player_email, amount_cents, fee_cents, status, risk_level, risk_score,
+                                risk_reasons, pix_key_type, pix_key_enc, reference, created_at, updated_at)
+       values ($1, 'p1', $2, 'joana@exemplo.com', 123456, 0, 'pendente', 'baixo', 10, '["x"]'::jsonb, 'CPF', $3, 'E1', now(), now())`,
+      [wid, PLAYER, probe.cipher.encrypt('12345678909')],
+    )
+    expect((await api(probe, 'POST', `/api/withdrawals/${wid}/approve`, { cookie: adminCookie, ip: ADMIN_IP })).statusCode).toBe(200)
+    // Modo de ataque ligado (linha do servidor) e relato da lista de IPs da Segurança do painel
+    const attack = await api(probe, 'PUT', '/api/kv/seguranca.modo-ataque', {
+      cookie: adminCookie,
+      ip: ADMIN_IP,
+      body: { value: { active: true, autoOffMinutes: null, lowerLimits: false, closeSignups: false, captcha: true } },
+    })
+    expect(attack.statusCode, attack.body).toBe(200)
+    const body = { action: 'criar', entity: 'Segurança do painel', summary: 'IP permitido adicionado: 203.0.113.0/24 (Escritório)' }
+    expect((await api(probe, 'POST', '/api/audit/events', { cookie: adminCookie, ip: ADMIN_IP, body })).statusCode).toBe(201)
+
+    // cargos só de leitura (sem auditoria.ver); quem vê Segurança do painel entra de verdade (login dela, com IP)
+    for (const perm of ['modo-ataque.ver', 'seguranca-painel.ver', 'equipe.ver', 'mcp.ver']) {
+      const roleId = `so-${perm.replace('.ver', '')}`
+      await createRole(probe, roleId, [perm])
+      const u = await createUser(probe, { roleId, password: 'SenhaForte2026y' })
+      const r = await api(probe, 'POST', '/api/auth/login', { ip: VIEWER_IP, body: { email: u.email, password: u.password } })
+      expect(r.statusCode, r.body).toBe(200)
+      viewers[perm] = { cookie: cookieFrom(r)!, id: u.id }
+    }
+  })
+  afterAll(async () => probe.close())
+
+  const read = async (perm: string) => {
+    const r = await api(probe, 'GET', '/api/kv/auditoria.registros', { cookie: viewers[perm].cookie })
+    return { r, list: r.statusCode === 200 ? (r.json().value as AuditEntry[]) : [] }
+  }
+
+  it.each(['modo-ataque.ver', 'seguranca-painel.ver', 'equipe.ver', 'mcp.ver'])('%s: GET /api/audit continua 403 (sem auditoria.ver)', async (perm) => {
+    expect((await api(probe, 'GET', '/api/audit', { cookie: viewers[perm].cookie })).statusCode).toBe(403)
+  })
+
+  it('Modo de ataque: só os registros do Modo de ataque, sem IP de outra pessoa', async () => {
+    const { r, list } = await read('modo-ataque.ver')
+    expect(r.statusCode).toBe(200)
+    expect(list.length).toBeGreaterThan(0)
+    expect(list.every((e) => e.entity === 'Modo de ataque')).toBe(true)
+    expect(list[0]).toMatchObject({ action: 'ligar', actorName: 'Admin Real', ip: '' })
+    for (const leaked of [ADMIN_IP, NEW_EMAIL, PLAYER]) expect(r.body).not.toContain(leaked)
+  })
+
+  it('Segurança do painel: configuração e logins; login de outra pessoa sem IP, o próprio com IP', async () => {
+    const { r, list } = await read('seguranca-painel.ver')
+    expect(r.statusCode).toBe(200)
+    const entities = new Set(list.map((e) => e.entity))
+    expect([...entities].sort()).toEqual(['Acesso ao painel', 'Segurança do painel'])
+    expect(list.filter((e) => e.entity === 'Acesso ao painel').every((e) => e.action === 'login')).toBe(true)
+    const adminLogin = list.find((e) => e.action === 'login' && e.actorName === 'Admin Real')
+    expect(adminLogin).toMatchObject({ ip: '' })
+    const own = list.find((e) => e.action === 'login' && e.actorId === viewers['seguranca-painel.ver'].id)
+    expect(own?.ip).toBe(VIEWER_IP)
+    for (const leaked of [ADMIN_IP, NEW_EMAIL, PLAYER]) expect(r.body).not.toContain(leaked)
+  })
+
+  it('Equipe: registros sobre pessoas da equipe, sem saques, logins nem IP de outra pessoa', async () => {
+    const { r, list } = await read('equipe.ver')
+    expect(r.statusCode).toBe(200)
+    expect(list.some((e) => e.entity === 'Equipe · Nova Pessoa')).toBe(true)
+    expect(list.every((e) => e.entity === 'Equipe' || e.entity.startsWith('Equipe · ') || e.entity === 'Dados · Equipe' || e.entity.startsWith('2FA · '))).toBe(true)
+    for (const leaked of [ADMIN_IP, PLAYER]) expect(r.body).not.toContain(leaked)
+  })
+
+  it('mcp.ver não lê a chave; auditoria.ver lê a trilha inteira (com IPs)', async () => {
+    expect((await read('mcp.ver')).r.statusCode).toBe(403)
+    const full = await api(probe, 'GET', '/api/kv/auditoria.registros', { cookie: adminCookie })
+    expect(full.statusCode).toBe(200)
+    for (const seen of [ADMIN_IP, NEW_EMAIL, PLAYER]) expect(full.body).toContain(seen)
+  })
+
+  it('o limite vale depois do filtro: muitos registros de outras áreas não tiram a fatia da tela', async () => {
+    const a = await createTestApp()
+    try {
+      await a.db.query(
+        `insert into audit_log (at, actor_id, actor_name, action, entity, summary, ip) values (now() - interval '1 day', 'u1', 'Ana', 'ligar', 'Modo de ataque', 'Ligado', '1.1.1.1')`,
+      )
+      await a.db.query(
+        `insert into audit_log (at, actor_id, actor_name, action, entity, summary, ip)
+         select now() - (g || ' seconds')::interval, 'u2', 'Bia', 'aprovar', 'Saque #' || g, 'Saque aprovado', '2.2.2.2' from generate_series(1, ${AUDIT_KV_LIMIT + 50}) g`,
+      )
+      await createRole(a, 'so-ataque', ['modo-ataque.ver'])
+      const list = (await kvHandlers.audit!.read(kvCtx(a, await authFor(a, 'so-ataque'))))!.value as AuditEntry[]
+      expect(list).toHaveLength(1)
+      expect(list[0]).toMatchObject({ entity: 'Modo de ataque', actorName: 'Ana', ip: '' })
+    } finally {
+      await a.close()
+    }
+  })
+
+  it('auditSliceWhere: trilha inteira só com auditoria.ver; sem tela de leitura, nada', () => {
+    expect(auditSliceWhere(new Set(['auditoria.ver']))).toBeNull()
+    expect(auditSliceWhere(new Set(['modo-ataque.editar']))).toContain('Modo de ataque')
+    expect(auditSliceWhere(new Set(['equipe.ver', 'seguranca-painel.ver']))).toMatch(/Equipe.*Segurança do painel|Segurança do painel.*Equipe/s)
+    expect(auditSliceWhere(new Set(['financeiro.ver']))).toBe('false')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// r2 identity evidence: a exportação identifica quem fez por id e e-mail (o nome pode repetir ou ser trocado)
+// ---------------------------------------------------------------------------
+
+describe('exportação CSV: id e e-mail de quem fez', () => {
+  it('homônimos ficam distinguíveis; células do e-mail também são neutralizadas', async () => {
+    const probe = await createTestApp()
+    try {
+      const exporter = await loginAs(probe, 'superadmin', { name: 'Exportadora' })
+      const a = await createUser(probe, { roleId: 'suporte', name: 'Carla Souza', email: 'carla.a@x2win.test' })
+      const b = await createUser(probe, { roleId: 'suporte', name: 'Carla Souza', email: '+carla.b@x2win.test' })
+      await insertAudit(probe, { at: '2026-05-01T10:00:00Z', actorId: a.id, actorName: 'Carla Souza', action: 'editar', entity: 'Jogador #1', summary: 'a' })
+      await insertAudit(probe, { at: '2026-05-01T11:00:00Z', actorId: b.id, actorName: 'Carla Souza', action: 'editar', entity: 'Jogador #2', summary: 'b' })
+      await insertAudit(probe, { at: '2026-05-01T12:00:00Z', actorId: null, actorName: 'Sistema', action: 'editar', entity: 'Jogador #3', summary: 'c' })
+      const r = await api(probe, 'GET', '/api/audit/export.csv?from=2026-05-01&to=2026-05-01', { cookie: exporter.cookie })
+      expect(r.statusCode).toBe(200)
+      const lines = r.rawPayload.toString('utf8').replace(/^﻿/, '').trim().split('\r\n')
+      expect(lines).toHaveLength(4)
+      expect(lines[1]).toContain(';Sistema;;;Editou;Jogador #3;')
+      expect(lines[2]).toContain(`;Carla Souza;${b.id};'+carla.b@x2win.test;Editou;Jogador #2;`)
+      expect(lines[3]).toContain(`;Carla Souza;${a.id};carla.a@x2win.test;Editou;Jogador #1;`)
+    } finally {
+      await probe.close()
+    }
+  })
 })

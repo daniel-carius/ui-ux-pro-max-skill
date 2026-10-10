@@ -72,11 +72,3 @@ export function otpauthUrl(secretB32: string, account: string, issuer = 'X2Win B
   const label = encodeURIComponent(`${issuer}:${account}`)
   return `otpauth://totp/${label}?secret=${secretB32}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`
 }
-
-/** Códigos de recuperação de uso único (mostrados uma vez). */
-export function newRecoveryCodes(count = 8): string[] {
-  return Array.from({ length: count }, () => {
-    const s = randomBytes(5).toString('hex').toUpperCase()
-    return `${s.slice(0, 5)}-${s.slice(5)}`
-  })
-}

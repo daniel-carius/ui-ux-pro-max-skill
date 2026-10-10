@@ -182,7 +182,7 @@ export function ceilingLabel(role: Role) {
 /**
  * Permissões que dão poder administrativo sobre pessoas e acessos, ou sobre para onde vão as ordens de pagamento
  * assinadas (webhooks.editar troca o endereço/evento dos destinos de saque.pago): só quem tem cargos.conceder
- * dá, tira ou mexe em cargo que tenha alguma delas.
+ * dá, tira ou mexe em cargo que tenha alguma delas. Fazem parte das permissões de governança (GOVERNED_PERMISSIONS).
  */
 export const ADMIN_LEVEL_PERMISSIONS = [
   'cargos.conceder',
@@ -196,6 +196,44 @@ export const ADMIN_LEVEL_PERMISSIONS = [
 /** Cargos com poder de conceder/retirar cargos administrativos ou de mexer em acessos. */
 export function isAdminLevelRole(role: Pick<Role, 'permissions'>) {
   return ADMIN_LEVEL_PERMISSIONS.some((p) => role.permissions.includes(p))
+}
+
+/**
+ * Permissões de governança: as administrativas e as que decidem dinheiro ou obrigação regulatória (aprovar saques de
+ * jogadores, pagar saques de afiliados, limites de jogo responsável, países bloqueados). Junto com o teto de
+ * aprovação de saques (approvalCeiling), só quem tem cargos.conceder dá ou tira alguma delas de um cargo, cria ou
+ * exclui cargo com alguma delas, muda o teto e põe alguém num cargo que tenha alguma delas (veja isGovernedChange e
+ * isGovernedRole). Pagar saque de afiliado entra porque teto 0 ali não limita o valor.
+ */
+export const GOVERNED_PERMISSIONS = [
+  ...ADMIN_LEVEL_PERMISSIONS,
+  'saques.aprovar',
+  'afiliados-saques.aprovar',
+  'jogo-responsavel.editar',
+  'paises.editar',
+] as const
+
+/** O cargo tem alguma permissão de governança (inclui as administrativas)? Pôr alguém nele exige cargos.conceder. */
+export function isGovernedRole(role: Pick<Role, 'permissions'>) {
+  return GOVERNED_PERMISSIONS.some((p) => role.permissions.includes(p))
+}
+
+type GovernedState = Pick<Role, 'permissions' | 'approvalCeiling'>
+
+/** Cargo que não existe (antes de criar, depois de excluir): sem permissões e sem aprovar saques. */
+const NO_ROLE: GovernedState = { permissions: [], approvalCeiling: 0 }
+
+const ceilingCents = (v: number | null) => (v === null ? null : Math.round(v * 100))
+
+/**
+ * A mudança de `before` para `after` (null = cargo inexistente: criação ou exclusão) dá ou tira alguma permissão de
+ * governança ou muda o teto de aprovação de saques? Se sim, exige cargos.conceder.
+ */
+export function isGovernedChange(before: GovernedState | null, after: GovernedState | null): boolean {
+  const a = before ?? NO_ROLE
+  const b = after ?? NO_ROLE
+  if (ceilingCents(a.approvalCeiling) !== ceilingCents(b.approvalCeiling)) return true
+  return GOVERNED_PERMISSIONS.some((p) => a.permissions.includes(p) !== b.permissions.includes(p))
 }
 
 /** Permissões que o cargo tem e que existem no catálogo (ignora chaves desconhecidas). */

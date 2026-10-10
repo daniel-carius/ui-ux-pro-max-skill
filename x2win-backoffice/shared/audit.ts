@@ -119,8 +119,11 @@ export function isServerOnlyAuditAction(a: AuditAction): boolean {
   return SERVER_ONLY.has(a)
 }
 
-/** Entidades que só o servidor grava (dados por chave, login, 2FA, senha e saques). */
-const SERVER_ONLY_ENTITY = /^(Dados · |Acesso ao painel$|2FA($| · )|Senha$|Saque #)/
+/**
+ * Entidades que só o servidor grava (dados por chave, login, 2FA, senha, saques e as telas cujo estado o servidor
+ * registra ao gravar a chave: modo de ataque, manutenção e empresa).
+ */
+const SERVER_ONLY_ENTITY = /^(Dados · |Acesso ao painel$|2FA($| · )|Senha$|Saque #|Modo de ataque$|Manutenção$|Empresa e licença$)/
 
 interface PanelEventRule {
   /** tela (id em shared/pages.ts) cuja permissão o evento exige */
@@ -140,9 +143,6 @@ interface PanelEventRule {
  */
 const PANEL_EVENT_RULES: readonly PanelEventRule[] = [
   // telas cujo estado é mostrado a partir da auditoria: ações fechadas e permissão de edição da tela
-  { page: 'modo-ataque', exact: ['Modo de ataque'], actions: ['ligar', 'desligar'] },
-  { page: 'manutencao', exact: ['Manutenção'], actions: ['ligar', 'desligar', 'editar'] },
-  { page: 'empresa', exact: ['Empresa e licença'], actions: ['editar'] },
   { page: 'seguranca-painel', exact: ['Segurança do painel'], actions: ['criar', 'excluir'] },
   { page: 'cargos', exact: ['Cargos e permissões'], actions: ['ligar', 'editar'] },
   // geral / operação

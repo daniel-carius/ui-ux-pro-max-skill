@@ -23,7 +23,7 @@
 // exigência; o extrato (geral.transacoes) não muda e a remoção fica na auditoria.
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { canWriteKey, findKvRule } from '@shared/kv-registry'
+import { canWriteKey, findKvRule, KV_BODY_LIMIT } from '@shared/kv-registry'
 import { brl } from '@shared/money'
 import { SUPERADMIN_ROLE_ID } from '@shared/permissions'
 import { AppError, Errors } from '../../errors'
@@ -241,7 +241,8 @@ export const kvHandlers: KvHandlers = {
 
 export const MAX_IMPORT_PLAYERS = 5000
 
-const importedPlayer = z.looseObject({
+/** Jogador vindo da plataforma (importação e dados de demonstração). */
+export const importedPlayer = z.looseObject({
   id: z.string('Jogador sem identificador.').trim().min(1, 'Jogador sem identificador.').max(64, 'Identificador de jogador inválido.'),
   name: z.string('Nome inválido.').trim().min(1, 'Informe o nome do jogador.').max(120, 'Nome com mais de 120 caracteres.'),
   status: z.enum(PLAYER_STATUSES, { error: 'Status de jogador inválido.' }),
@@ -307,7 +308,7 @@ export function registerPlayerImportRoute(app: FastifyInstance) {
     return { ok: true as const, ...out }
   })
 
-  app.post(`/${PLAYERS_KEY}/import`, async (req, reply) => {
+  app.post(`/${PLAYERS_KEY}/import`, { bodyLimit: KV_BODY_LIMIT }, async (req, reply) => {
     const auth = requireImporter(req)
     const { players } = importBody.parse(req.body ?? {})
     const rule = findKvRule(PLAYERS_KEY)!

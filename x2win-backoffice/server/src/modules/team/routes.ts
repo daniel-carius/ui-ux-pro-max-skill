@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import type { CreateMemberResponse, InviteMemberResponse } from '@shared/api'
 import { requirePerm } from '../../http'
+import { withPasswordSlot } from '../auth/password-gate'
 import {
   acceptInvite,
   canSeeLastIp,
@@ -71,10 +72,10 @@ export default async function routes(app: FastifyInstance) {
   })
 
   // ---------- POST /direct ----------
-  app.post('/direct', async (req) => {
+  app.post('/direct', async (req, reply) => {
     const auth = requirePerm(req, 'equipe.editar')
     const body = directBody.parse(req.body ?? {})
-    const { member, temporaryPassword } = await createDirectMember(app.db, auth, body)
+    const { member, temporaryPassword } = await createDirectMember(app.db, auth, body, (work) => withPasswordSlot(reply, work))
     const res: CreateMemberResponse = { member: { ...toPanelMember(member, canSeeLastIp(auth)) }, temporaryPassword }
     return res
   })
@@ -89,9 +90,9 @@ export default async function routes(app: FastifyInstance) {
   })
 
   // ---------- POST /invites/accept (pública) ----------
-  app.post('/invites/accept', TEN_PER_MINUTE, async (req) => {
+  app.post('/invites/accept', TEN_PER_MINUTE, async (req, reply) => {
     const { token, password } = acceptBody.parse(req.body ?? {})
-    await acceptInvite(app.db, { token, password }, req.clientIp)
+    await acceptInvite(app.db, { token, password }, req.clientIp, (work) => withPasswordSlot(reply, work))
     return { ok: true as const }
   })
 

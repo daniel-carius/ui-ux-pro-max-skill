@@ -17,6 +17,7 @@ import type { FastifyInstance } from 'fastify'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { connectedAsOwner } from '../src/db'
+import { MIGRATIONS } from '../src/db/migrations'
 import { api, createTestApp, TEST_ENV } from './helpers'
 
 const PGBIN = '/usr/lib/postgresql/16/bin'
@@ -35,6 +36,9 @@ function pgAvailable(): boolean {
   }
 }
 const PG = pgAvailable()
+/** Todas as migrações, na ordem (a lista cresce com o projeto). */
+const ALL = MIGRATIONS.map((m) => m.id)
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 let dir = ''
 let port = 0
@@ -111,14 +115,14 @@ describe.skipIf(!PG)('PostgreSQL 16: papel de execução criado depois das migra
   it('sem o papel: o CLI grava as migrações, mostra o aviso do Postgres e sai com erro', () => {
     const r = migrateCli(ownerUrl())
     expect(r.status, r.stdout + r.stderr).not.toBe(0)
-    expect(r.stdout).not.toContain('Migrações aplicadas: 001_init, 002_audit_append_only\n')
+    expect(r.stdout).not.toContain(`Migrações aplicadas: ${ALL.join(', ')}\n`)
     // o NOTICE da 002 não é mais descartado
     expect(r.stderr).toContain('[postgres] sem permissão para criar o papel x2win_app')
-    expect(r.stderr).toMatch(/Migrações aplicadas: 001_init, 002_audit_append_only\. Mas o papel x2win_app, com que a API conecta, não existe/)
+    expect(r.stderr).toMatch(new RegExp(`Migrações aplicadas: ${escapeRe(ALL.join(', '))}\\. Mas o papel x2win_app, com que a API conecta, não existe`))
   }, 90_000)
 
   it('criado o papel (deploy/db-init), rodar o CLI de novo concede os privilégios', async () => {
-    expect((await asDba<{ id: string }>('select id from schema_migrations order by id')).map((r) => r.id)).toEqual(['001_init', '002_audit_append_only'])
+    expect((await asDba<{ id: string }>('select id from schema_migrations order by id')).map((r) => r.id)).toEqual(ALL)
     await admin.query(`create role x2win_app login password 'app' nosuperuser nocreatedb nocreaterole noreplication nobypassrls`)
     const r = migrateCli(ownerUrl())
     expect(r.status, r.stdout + r.stderr).toBe(0)

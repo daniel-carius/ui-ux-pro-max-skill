@@ -6,9 +6,10 @@
 import { randomBytes } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
-import { findKvRule } from '@shared/kv-registry'
+import { findKvRule, KV_RULES } from '@shared/kv-registry'
+import { KV_HISTORY_ENCRYPTED_KEYS, kvHistoryImmutableSql, RUNTIME_ROLE } from '../src/db/migrations'
 import { manualCreditors, payoutHold } from '../src/modules/kv/payout-guards'
-import { encryptAtRest, loadRow, saveRow } from '../src/modules/kv/store'
+import { encryptAtRest, encryptPlainRows, loadRow, saveRow } from '../src/modules/kv/store'
 import { api, createTestApp, loginAs } from './helpers'
 
 // ---------- utilitários ----------
@@ -711,6 +712,62 @@ describe('kv: versões substituídas ficam guardadas e cada auditoria aponta a v
     const [hk] = await app.db.query<{ key: string }>(`select key from kv_store where key like '~hist:%' limit 1`)
     expect(hk.key).toMatch(/^~hist:config\.paises\.bloqueados@\d+$/)
     expect((await get(app, root, encodeURIComponent(hk.key))).statusCode).toBe(404)
+  })
+
+  it('linha de histórico em claro não aceita UPDATE nenhum (nem a troca por um valor cifrado qualquer): a versão guardada continua a original', async () => {
+    // a chave não tem pii nem segredos: a cifra na subida (encryptPlainRows) nunca toca as linhas de histórico dela
+    expect(encryptAtRest(findKvRule(KEY)!)).toBe(false)
+    expect(KV_HISTORY_ENCRYPTED_KEYS).not.toContain(KEY)
+    const hk = `~hist:${KEY}@1`
+    const forged = app.cipher.encrypt(JSON.stringify([{ id: 'XX', code: 'XX', reason: 'FORJADO' }]))
+    await expect(app.db.query('update kv_store set value = null, value_enc = $2 where key = $1', [hk, forged])).rejects.toThrow(/apenas inclusão/)
+    await expect(app.db.query(`update kv_store set value = null, value_enc = 'x' where key = $1`, [`~hist:${KEY}@2`])).rejects.toThrow(/apenas inclusão/)
+    await expect(app.db.query(`update kv_store set value = '[]'::jsonb where key = $1`, [hk])).rejects.toThrow(/apenas inclusão/)
+    await expect(app.db.query('delete from kv_store where key = $1', [hk])).rejects.toThrow(/apenas inclusão/)
+    const e1 = await get(app, root, `${KEY}/history/1`)
+    expect(e1.statusCode, e1.body).toBe(200)
+    expect(e1.json()).toMatchObject({ version: 1, value: [{ id: 'GB', code: 'GB', reason: 'MARCADOR-ORIGINAL' }] })
+    const e2 = await get(app, root, `${KEY}/history/2`)
+    expect(e2.statusCode, e2.body).toBe(200)
+    expect(e2.json()).toMatchObject({ version: 2, value: [{ id: 'GB', code: 'GB', reason: 'outro' }] })
+  })
+
+  it('a cifra na subida de linhas de histórico vale só para as chaves com histórico cifradas em repouso (lista da migração = regras)', async () => {
+    const expected = [
+      ...new Set(
+        KV_RULES.flatMap((r) => [r.prefix, ...(r.children ?? []).map((c) => `${r.prefix}.${c}`)]).filter((k) => {
+          const r = findKvRule(k)
+          return !!r?.history && encryptAtRest(r)
+        }),
+      ),
+    ].sort()
+    // mudou? Crie uma migração nova que recrie kv_history_immutable() com a lista nova (kvHistoryImmutableSql)
+    expect([...KV_HISTORY_ENCRYPTED_KEYS].sort(), 'chave com histórico ganhou pii/segredos sem migração nova').toEqual(expected)
+
+    // com a chave na lista, a linha de histórico em claro é cifrada uma vez, sem mudar versão, data nem autor
+    const fresh = await createTestApp()
+    try {
+      // o papel de execução da API não recria a função; o dono das tabelas (uma migração nova) recria
+      await expect(fresh.db.exec(kvHistoryImmutableSql([KEY]))).rejects.toThrow()
+      await fresh.db.exec('reset role')
+      await fresh.db.exec(kvHistoryImmutableSql([KEY]))
+      await fresh.db.exec(`set role ${RUNTIME_ROLE}`)
+      const cookie = (await loginAs(fresh, 'superadmin')).cookie
+      expect((await put(fresh, cookie, KEY, [{ id: 'GB', code: 'GB', reason: 'antes' }], 0)).statusCode).toBe(200)
+      expect((await put(fresh, cookie, KEY, [], 1)).statusCode).toBe(200)
+      const hk = `~hist:${KEY}@1`
+      const before = await fresh.db.one<Row>('select version, updated_at, updated_by from kv_store where key = $1', [hk])
+      const n = await encryptPlainRows(fresh.db, fresh.cipher, (k) => k === hk)
+      expect(n).toBe(1)
+      const after = await fresh.db.one<Row>('select value, value_enc, version, updated_at, updated_by from kv_store where key = $1', [hk])
+      expect(after).toMatchObject({ ...before, value: null })
+      expect(JSON.parse(fresh.cipher.decrypt(after!.value_enc))).toMatchObject([{ id: 'GB', code: 'GB', reason: 'antes' }])
+      // cifrada, não muda mais
+      await expect(fresh.db.query(`update kv_store set value_enc = $2 where key = $1`, [hk, fresh.cipher.encrypt('[]')])).rejects.toThrow(/apenas inclusão/)
+      await expect(fresh.db.query(`update kv_store set value = '[]'::jsonb, value_enc = null where key = $1`, [hk])).rejects.toThrow(/apenas inclusão/)
+    } finally {
+      await fresh.close()
+    }
   })
 
   it('registros financeiros: alterar ou apagar é recusado, então os valores continuam no banco', async () => {

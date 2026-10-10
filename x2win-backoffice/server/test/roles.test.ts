@@ -1,7 +1,17 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { findKvRule } from '@shared/kv-registry'
-import { ADMIN_LEVEL_PERMISSIONS, effectivePermissions, isAdminLevelRole, seedRoles, type Role } from '@shared/permissions'
+import {
+  ADMIN_LEVEL_PERMISSIONS,
+  effectivePermissions,
+  GOVERNED_PERMISSIONS,
+  isAdminLevelRole,
+  isGovernedChange,
+  isGovernedRole,
+  PERMISSION_BY_KEY,
+  seedRoles,
+  type Role,
+} from '@shared/permissions'
 import { bootstrap, ensureRoles } from '../src/bootstrap'
 import type { KvContext, KvValue } from '../src/kv/types'
 import { totpCode } from '../src/lib/totp'
@@ -293,6 +303,91 @@ describe('cargos.lista', () => {
     })
     expect(created.statusCode).toBe(403)
     expect((await app.db.one<{ role_id: string }>('select role_id from users where id = $1', [target.id]))?.role_id).toBe('suporte')
+  })
+
+  // Governança: aprovar saques (com o teto), jogo responsável e países bloqueados. O Administrador (cargos.editar sem
+  // cargos.conceder) montava um cargo com usuarios.editar + transacoes.editar + saques.aprovar sem teto e punha
+  // alguém nele: a mesma pessoa mexia no saldo do jogador e aprovava o saque sem limite, sem ninguém que concede
+  // cargos aprovar.
+  it('permissões de governança e teto de aprovação: só quem tem cargos.conceder dá, tira ou muda', async () => {
+    expect(GOVERNED_PERMISSIONS).toEqual(
+      expect.arrayContaining([...ADMIN_LEVEL_PERMISSIONS, 'saques.aprovar', 'afiliados-saques.aprovar', 'jogo-responsavel.editar', 'paises.editar']),
+    )
+    for (const k of GOVERNED_PERMISSIONS) expect(PERMISSION_BY_KEY.has(k), k).toBe(true)
+    expect(isGovernedRole({ permissions: ['saques.ver', 'saques.aprovar'] })).toBe(true)
+    expect(isGovernedRole({ permissions: ['saques.ver', 'usuarios.editar'] })).toBe(false)
+    expect(isGovernedChange(null, { permissions: ['usuarios.ver'], approvalCeiling: 0 })).toBe(false)
+    expect(isGovernedChange(null, { permissions: ['usuarios.ver'], approvalCeiling: null })).toBe(true)
+    expect(isGovernedChange({ permissions: ['saques.aprovar'], approvalCeiling: 1234.56 }, { permissions: ['saques.aprovar', 'ggr.ver'], approvalCeiling: 1234.56 })).toBe(false)
+    expect(isGovernedChange({ permissions: ['paises.editar'], approvalCeiling: 0 }, null)).toBe(true)
+
+    const toxic = {
+      id: 'tx',
+      name: 'Caixa Total',
+      description: '',
+      system: false,
+      permissions: ['usuarios.ver', 'usuarios.editar', 'transacoes.ver', 'transacoes.editar', 'saques.ver', 'saques.aprovar'],
+      require2fa: true,
+      approvalCeiling: null,
+      color: 'rose',
+    }
+    await expect(save(adm, (rs) => [...rs, toxic])).rejects.toMatchObject({ status: 403, code: 'sem_permissao' })
+    // cada peça sozinha também
+    for (const extra of [
+      { permissions: ['saques.ver', 'saques.aprovar'], approvalCeiling: 0 },
+      // pagar saque de afiliado: teto 0 ali não limita o valor
+      { permissions: ['afiliados-saques.ver', 'afiliados-saques.aprovar'], approvalCeiling: 0 },
+      { permissions: ['jogo-responsavel.ver', 'jogo-responsavel.editar'], approvalCeiling: 0 },
+      { permissions: ['paises.ver', 'paises.editar'], approvalCeiling: 0 },
+      { permissions: ['usuarios.ver'], approvalCeiling: null },
+      { permissions: ['usuarios.ver'], approvalCeiling: 100 },
+    ]) {
+      await expect(save(adm, (rs) => [...rs, { ...toxic, ...extra }]), JSON.stringify(extra)).rejects.toMatchObject({ status: 403, code: 'sem_permissao' })
+    }
+    expect((await roles.read(ctx(app, sa)))!.value as Role[]).not.toContainEqual(expect.objectContaining({ name: 'Caixa Total' }))
+
+    // cargo existente: dar ou tirar permissão de governança, ou mudar o teto (para cima ou para baixo)
+    const fin = (rs: Role[]) => rs.find((r) => r.id === 'financeiro')!
+    const mk = (rs: Role[]) => rs.find((r) => r.id === 'marketing')!.permissions
+    const finBefore = await getRole(app.db, 'financeiro')
+    const mkBefore = await getRole(app.db, 'marketing')
+    await expect(save(adm, (rs) => patch(rs, 'financeiro', { approvalCeiling: null }))).rejects.toMatchObject({ status: 403 })
+    await expect(save(adm, (rs) => patch(rs, 'financeiro', { approvalCeiling: (fin(rs).approvalCeiling ?? 0) + 1000 }))).rejects.toMatchObject({ status: 403 })
+    await expect(save(adm, (rs) => patch(rs, 'financeiro', { approvalCeiling: 1 }))).rejects.toMatchObject({ status: 403 })
+    await expect(save(adm, (rs) => patch(rs, 'financeiro', { permissions: fin(rs).permissions.filter((p) => p !== 'saques.aprovar') }))).rejects.toMatchObject({
+      status: 403,
+    })
+    for (const k of ['saques.aprovar', 'afiliados-saques.aprovar', 'jogo-responsavel.editar', 'paises.editar']) {
+      await expect(save(adm, (rs) => patch(rs, 'marketing', { permissions: [...mk(rs), k] })), k).rejects.toMatchObject({ status: 403 })
+    }
+    expect(await getRole(app.db, 'financeiro')).toEqual(finBefore)
+    expect(await getRole(app.db, 'marketing')).toEqual(mkBefore)
+    // o resto do cargo segue com cargos.editar
+    const desc = await save(adm, (rs) => patch(rs, 'financeiro', { description: 'Depósitos, saques e conciliação' }))
+    expect((desc.value as Role[]).find((r) => r.id === 'financeiro')).toMatchObject({ description: 'Depósitos, saques e conciliação', approvalCeiling: finBefore!.approvalCeiling })
+
+    // Superadmin cria e muda o teto; o Administrador depois não sobe o teto nem exclui
+    const s = await save(sa, (rs) => [...rs, toxic])
+    const caixa = (s.value as Role[]).find((r) => r.name === 'Caixa Total')!
+    expect(caixa).toMatchObject({ approvalCeiling: null, permissions: expect.arrayContaining(['saques.aprovar', 'transacoes.editar']) })
+    await save(sa, (rs) => patch(rs, caixa.id, { approvalCeiling: 2000 }))
+    await expect(save(adm, (rs) => patch(rs, caixa.id, { approvalCeiling: null }))).rejects.toMatchObject({ status: 403 })
+    await expect(save(adm, (rs) => rs.filter((r) => r.id !== caixa.id))).rejects.toMatchObject({ status: 403 })
+    expect((await getRole(app.db, caixa.id))?.approvalCeiling).toBe(2000)
+
+    // e pela equipe: o Administrador não põe ninguém no cargo; o Superadmin põe
+    const target = await createUser(app, { roleId: 'suporte', name: 'Alvo Caixa' })
+    const admCookie = (await loginAs(app, 'administrador', { name: 'Adm Caixa' })).cookie
+    // com 2FA: o cargo Superadmin já exige o fator neste ponto da suíte
+    const saCookie = (await loginAs(app, 'superadmin', { name: 'Sa Caixa', totp: true })).cookie
+    const moved = await api(app, 'POST', `/api/team/${target.id}/role`, { cookie: admCookie, body: { roleId: caixa.id } })
+    expect(moved.statusCode).toBe(403)
+    expect(moved.json().error.code).toBe('sem_permissao')
+    const direct = await api(app, 'POST', '/api/team/direct', { cookie: admCookie, body: { name: 'Caixa Novo', email: 'caixa.novo@x2win.bet', roleId: caixa.id } })
+    expect(direct.statusCode).toBe(403)
+    expect((await app.db.one<{ role_id: string }>('select role_id from users where id = $1', [target.id]))?.role_id).toBe('suporte')
+    const bySa = await api(app, 'POST', `/api/team/${target.id}/role`, { cookie: saCookie, body: { roleId: caixa.id } })
+    expect(bySa.statusCode, bySa.body).toBe(200)
   })
 
   it('tudo ou nada: um erro na lista desfaz as outras mudanças', async () => {

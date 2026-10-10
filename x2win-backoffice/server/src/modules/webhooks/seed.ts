@@ -2,8 +2,9 @@
 // Cópia dos destinos de src/domain/webhooks.ts (aquele arquivo importa o React).
 import type { FastifyInstance } from 'fastify'
 import { newId, randomToken } from '../../lib/crypto'
+import { maskUrlTokens } from '../../lib/mask'
 import { DESTINATIONS_VERSION_KEY } from './kv'
-import type { WebhookEvent } from './url'
+import { hostOf, type WebhookEvent } from './url'
 
 const DAY = 86_400_000
 
@@ -29,7 +30,7 @@ function pickWeighted<T>(items: T[], weights: number[]): T {
   return items[items.length - 1]
 }
 
-/** Destinos de demonstração (segredos cifrados) e 134 execuções dos últimos 30 dias. Não faz nada se já houver destinos. */
+/** Destinos de demonstração (endereços e segredos cifrados) e 134 execuções dos últimos 30 dias. Não faz nada se já houver destinos. */
 export async function seedDemo(app: FastifyInstance): Promise<string> {
   const count = await app.db.one<{ n: number }>('select count(*)::int as n from webhook_destinations')
   if ((count?.n ?? 0) > 0) return `já existem ${count?.n} destinos; nada a semear`
@@ -38,9 +39,9 @@ export async function seedDemo(app: FastifyInstance): Promise<string> {
   await app.db.tx(async (t) => {
     for (const d of DEMO_DESTINATIONS) {
       await t.query(
-        `insert into webhook_destinations (id, event, url, active, secret_enc, created_at, updated_at)
-         values ($1, $2, $3, $4, $5, $6, $6) on conflict (id) do nothing`,
-        [d.id, d.event, d.url, d.active, app.cipher.encrypt(d.secret), createdAt],
+        `insert into webhook_destinations (id, event, url, url_enc, host, active, secret_enc, created_at, updated_at)
+         values ($1, $2, null, $3, $4, $5, $6, $7, $7) on conflict (id) do nothing`,
+        [d.id, d.event, app.cipher.encrypt(d.url), hostOf(d.url), d.active, app.cipher.encrypt(d.secret), createdAt],
       )
     }
     await t.query(
@@ -55,7 +56,7 @@ export async function seedDemo(app: FastifyInstance): Promise<string> {
       await t.query(
         `insert into webhook_executions (id, at, event, destination_id, url, status, http_status, duration_ms, payload, test)
          values ($1, $2, $3, $4, $5, 'sucesso', 200, $6, $7, false)`,
-        [newId('ex'), at, d.event, d.id, d.url, 80 + Math.floor(Math.random() * 561), payload],
+        [newId('ex'), at, d.event, d.id, maskUrlTokens(d.url), 80 + Math.floor(Math.random() * 561), payload],
       )
     }
   })

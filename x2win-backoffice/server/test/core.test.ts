@@ -1,13 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { migrate, openDb, pingDb, type Db } from '../src/db'
-import { RUNTIME_ROLE } from '../src/db/migrations'
+import { MIGRATIONS, RUNTIME_ROLE } from '../src/db/migrations'
 import { api, createTestApp, loginAs, sessionCookie, createUser } from './helpers'
+
+/** Todas as migrações, na ordem (a lista cresce com o projeto). */
+const ALL = MIGRATIONS.map((m) => m.id)
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 describe('banco', () => {
   it('aplica migrações, converte tipos e bloqueia alteração da auditoria', async () => {
     const db = openDb('memory://')
-    expect(await migrate(db)).toEqual(['001_init', '002_audit_append_only'])
+    expect(ALL.slice(0, 2)).toEqual(['001_init', '002_audit_append_only'])
+    expect(await migrate(db)).toEqual(ALL)
     expect(await migrate(db)).toEqual([])
     await db.query(`insert into roles (id, name, approval_ceiling_cents) values ('r', 'R', 500000)`)
     const r = await db.one<{ approval_ceiling_cents: number; created_at: string }>('select approval_ceiling_cents, created_at from roles')
@@ -49,9 +54,11 @@ describe('privilégios do papel de execução', () => {
     // dono do banco como num Postgres gerenciado: não é superusuário nem cria papéis
     await db.exec(`create role x2win nologin nosuperuser nocreaterole; alter database postgres owner to x2win`)
     await db.exec('set role x2win')
-    await expect(migrate(db)).rejects.toThrow(/Migrações aplicadas: 001_init, 002_audit_append_only\. Mas o papel x2win_app, com que a API conecta, não existe/)
+    await expect(migrate(db)).rejects.toThrow(
+      new RegExp(`Migrações aplicadas: ${escapeRe(ALL.join(', '))}\\. Mas o papel x2win_app, com que a API conecta, não existe`),
+    )
     await db.exec('reset role')
-    expect((await db.query<{ id: string }>('select id from schema_migrations order by id')).map((r) => r.id)).toEqual(['001_init', '002_audit_append_only'])
+    expect((await db.query<{ id: string }>('select id from schema_migrations order by id')).map((r) => r.id)).toEqual(ALL)
     expect(await db.one('select 1 from pg_roles where rolname = $1', [RUNTIME_ROLE])).toBeNull()
 
     // o administrador cria o papel (deploy/db-init) e as migrações rodam de novo, com o dono
@@ -91,7 +98,7 @@ describe('privilégios do papel de execução', () => {
   it('a API (requireRuntimeRole: false) sobe mesmo sem o papel; quem falha é o npm run migrate', async () => {
     const db = openDb('memory://')
     await db.exec(`create role x2win nologin nosuperuser nocreaterole; alter database postgres owner to x2win; set role x2win`)
-    expect(await migrate(db, { requireRuntimeRole: false })).toEqual(['001_init', '002_audit_append_only'])
+    expect(await migrate(db, { requireRuntimeRole: false })).toEqual(ALL)
     await expect(migrate(db)).rejects.toThrow(/Migrações em dia\. Mas o papel x2win_app/)
     await db.close()
   })

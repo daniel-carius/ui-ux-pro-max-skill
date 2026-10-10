@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createCipher, hashPassword, passwordProblem, verifyPassword } from '../src/lib/crypto'
 import { ipAllowed, ipMatches, isIpOrCidr } from '../src/lib/ip'
+import * as totp from '../src/lib/totp'
 import { base32Decode, base32Encode, newTotpSecret, totpCode, verifyTotp } from '../src/lib/totp'
 
 describe('senha', () => {
@@ -47,6 +48,11 @@ describe('TOTP', () => {
   it('base32 vai e volta', () => {
     const b = Buffer.from('backoffice!')
     expect(base32Decode(base32Encode(b)).equals(b)).toBe(true)
+  })
+  // o gerador antigo (newRecoveryCodes, 40 bits por código) não era usado e podia voltar por engano: os códigos de
+  // recuperação saem só de generateRecoveryCodes (modules/auth/service.ts, ≥ 80 bits, testado em auth-security)
+  it('o módulo do TOTP não gera códigos de recuperação', () => {
+    expect(Object.keys(totp).sort()).toEqual(['base32Decode', 'base32Encode', 'newTotpSecret', 'otpauthUrl', 'totpCode', 'verifyTotp'])
   })
 })
 

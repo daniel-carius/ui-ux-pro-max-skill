@@ -1,12 +1,20 @@
-// Regressões de segurança do núcleo (achados r1-web-1, r1-authn-8 e r1-logic-7). Cada bloco afirma o
-// comportamento seguro.
+// Regressões de segurança do núcleo (achados r1-web-1, r1-authn-8 e r1-logic-7, e as pendências da revisão: NODE_ENV
+// ausente vale produção, Cache-Control em toda resposta, saída fora da lista de IPs, limite de corpo de 1 MiB e
+// conflitos de concorrência do Postgres). Cada bloco afirma o comportamento seguro.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify'
+import { BODY_LIMIT } from '../src/app'
 import { loadConfig, SECURITY } from '../src/config'
 import { migrate, openDb } from '../src/db'
 import { RUNTIME_ROLE } from '../src/db/migrations'
+import { webhookStrictMode } from '../src/modules/webhooks/url'
 import { invalidateAllowlistCache } from '../src/plugins/security'
 import { TEST_ENV, api, cookieFrom, createTestApp, createUser, sessionCookie } from './helpers'
+
+function expectError(r: LightMyRequestResponse, status: number, code: string) {
+  expect(r.statusCode, r.body).toBe(status)
+  expect(r.json().error.code).toBe(code)
+}
 
 // r1-web-1: o gancho de segurança decidia pelo texto cru de req.url ("/api/..."), mas o roteador decodifica o
 // caminho: "/%61pi/auth/me" chegava na rota /api/auth/me sem lista de IPs nem checagem de CSRF.
@@ -78,6 +86,34 @@ describe('lista de IPs e CSRF valem para a rota escolhida, não para o texto da 
     const r = await api(app, 'GET', '/api/health', { ip: OUTSIDE, csrf: false })
     expect(r.statusCode).toBe(200)
   })
+
+  // Quem ficou fora da lista (IP trocado, lista alterada por outra pessoa) não conseguia sair: o 403 deixava a
+  // sessão valendo no servidor. A saída só encerra a sessão do próprio cookie, então fica fora da lista de IPs.
+  it('saída fora da lista: 204, encerra só a sessão do próprio cookie e apaga o cookie', async () => {
+    const u = await createUser(app, { roleId: 'suporte' })
+    const own = await sessionCookie(app, u.id)
+    const r = await api(app, 'POST', '/api/auth/logout', { cookie: own, ip: OUTSIDE })
+    expect(r.statusCode, r.body).toBe(204)
+    const cleared = r.cookies.find((k) => k.name === SECURITY.sessionCookie)
+    expect(cleared?.value).toBe('')
+    // a sessão caiu de verdade (conferido de dentro da lista); a de outra pessoa continua
+    expectError(await api(app, 'GET', '/api/auth/me', { cookie: own, ip: INSIDE }), 401, 'nao_autenticado')
+    expect((await api(app, 'GET', '/api/auth/me', { cookie, ip: INSIDE })).statusCode).toBe(200)
+    // pelo caminho codificado é a mesma rota, com as mesmas regras
+    const other = await sessionCookie(app, u.id)
+    expect((await api(app, 'POST', '/%61pi/auth/logout', { cookie: other, ip: OUTSIDE })).statusCode).toBe(204)
+    expectError(await api(app, 'GET', '/api/auth/me', { cookie: other, ip: INSIDE }), 401, 'nao_autenticado')
+  })
+
+  it('a exceção é só a saída: CSRF continua valendo nela, e o resto de /api/auth continua barrado fora da lista', async () => {
+    expectError(await api(app, 'POST', '/api/auth/logout', { cookie, ip: OUTSIDE, csrf: false }), 403, 'requisicao_invalida')
+    expectError(await api(app, 'GET', '/api/auth/logout', { cookie, ip: OUTSIDE }), 403, 'ip_nao_autorizado')
+    expectError(await api(app, 'GET', '/api/auth/me', { cookie, ip: OUTSIDE }), 403, 'ip_nao_autorizado')
+    expectError(await api(app, 'POST', '/api/auth/2fa/verify', { cookie, ip: OUTSIDE, body: { code: '123456' } }), 403, 'ip_nao_autorizado')
+    expectError(await api(app, 'POST', '/api/auth/password', { cookie, ip: OUTSIDE, body: { newPassword: 'OutraSenha123' } }), 403, 'ip_nao_autorizado')
+    // a sessão do cookie compartilhado segue valendo (nenhuma das recusas acima a encerrou)
+    expect((await api(app, 'GET', '/api/auth/me', { cookie, ip: INSIDE })).statusCode).toBe(200)
+  })
 })
 
 // r1-authn-8: atrás do proxy, a API só atende o que chegou ao proxy por HTTPS; produção exige cookie Secure.
@@ -130,6 +166,13 @@ describe('HTTPS atrás do proxy e cookie Secure em produção', () => {
     it('/api/health responde sem cabeçalho de proxy (HEALTHCHECK direto no contêiner)', async () => {
       const r = await api(app, 'GET', '/api/health', { csrf: false })
       expect(r.statusCode).toBe(200)
+    })
+
+    it('a saída (fora da lista de IPs) continua exigindo HTTPS', async () => {
+      const u = await createUser(app, { roleId: 'suporte' })
+      const cookie = await sessionCookie(app, u.id)
+      expectError(await api(app, 'POST', '/api/auth/logout', { cookie, headers: proto('http') }), 403, 'https_obrigatorio')
+      expect((await api(app, 'GET', '/api/auth/me', { cookie, headers: proto('https') })).statusCode).toBe(200)
     })
   })
 
@@ -230,5 +273,191 @@ describe('auditoria só aceita inclusão', () => {
       const rows = await app.db.query<{ n: number }>('select count(*)::int as n from audit_log where actor_id = $1', [admin.id])
       expect(rows[0].n).toBeGreaterThanOrEqual(1)
     })
+  })
+})
+
+// NODE_ENV ausente valia "development": cookie sem Secure e, sem a variável, nada lembrava a produção. Agora o padrão
+// é produção (falha segura), e WEBHOOK_ALLOW_LOCAL_TARGETS (antes descartada pela validação) chega à configuração.
+describe('configuração: sem NODE_ENV vale produção', () => {
+  const minimal = { APP_SECRET: TEST_ENV.APP_SECRET, ENCRYPTION_KEY: TEST_ENV.ENCRYPTION_KEY }
+
+  it('só com os segredos: NODE_ENV production, cookie Secure e webhooks estritos', () => {
+    const c = loadConfig(minimal)
+    expect(c.NODE_ENV).toBe('production')
+    expect(c.COOKIE_SECURE).toBe(true)
+    expect(c.WEBHOOK_ALLOW_LOCAL_TARGETS).toBe(false)
+    expect(webhookStrictMode(c)).toBe(true)
+    // a produção implícita recusa o cookie sem Secure, como a explícita
+    expect(() => loadConfig({ ...minimal, COOKIE_SECURE: 'false' })).toThrow(/COOKIE_SECURE/)
+  })
+
+  it('a API montada sem NODE_ENV emite o cookie de sessão Secure', async () => {
+    const app = await createTestApp({ NODE_ENV: undefined })
+    try {
+      expect(app.config.NODE_ENV).toBe('production')
+      const u = await createUser(app, { roleId: 'suporte' })
+      const r = await api(app, 'POST', '/api/auth/login', { body: { email: u.email, password: u.password } })
+      expect(r.statusCode, r.body).toBe(200)
+      expect(r.cookies.find((k) => k.name === SECURITY.sessionCookie)?.secure).toBe(true)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('WEBHOOK_ALLOW_LOCAL_TARGETS vira booleano e só vale fora de produção', () => {
+    const dev = (v?: string) => loadConfig({ ...minimal, NODE_ENV: 'development', WEBHOOK_ALLOW_LOCAL_TARGETS: v })
+    expect(dev('true').WEBHOOK_ALLOW_LOCAL_TARGETS).toBe(true)
+    expect(webhookStrictMode(dev('true'))).toBe(false)
+    expect(dev('false').WEBHOOK_ALLOW_LOCAL_TARGETS).toBe(false)
+    expect(webhookStrictMode(dev('false'))).toBe(true)
+    expect(webhookStrictMode(dev())).toBe(true)
+    expect(() => dev('sim')).toThrow(/WEBHOOK_ALLOW_LOCAL_TARGETS/)
+    // em produção (explícita ou pelo padrão) a liberação impede a API de subir
+    expect(() => loadConfig({ ...minimal, WEBHOOK_ALLOW_LOCAL_TARGETS: 'true' })).toThrow(/WEBHOOK_ALLOW_LOCAL_TARGETS/)
+    expect(() => loadConfig({ ...minimal, NODE_ENV: 'production', WEBHOOK_ALLOW_LOCAL_TARGETS: 'true' })).toThrow(/WEBHOOK_ALLOW_LOCAL_TARGETS/)
+  })
+
+  it('os testes rodam com NODE_ENV=test (definido pelo vitest e pelo kit de testes)', async () => {
+    expect(process.env.NODE_ENV).toBe('test')
+    expect(TEST_ENV.NODE_ENV).toBe('test')
+  })
+})
+
+// Só algumas rotas marcavam no-store: /api/health, 404, erros (inclusive os 403 da lista de IPs e do CSRF) e rotas
+// novas podiam ficar no cache do navegador ou de um proxy.
+describe('Cache-Control: no-store em toda resposta da API', () => {
+  let app: FastifyInstance
+  let cookie: string
+  const noStore = (r: LightMyRequestResponse) => expect(r.headers['cache-control'], `${r.statusCode} ${r.body.slice(0, 120)}`).toBe('no-store')
+
+  beforeAll(async () => {
+    app = await createTestApp()
+    // rotas novas, sem gancho próprio de Cache-Control
+    app.get('/api/_teste/dados', async () => ({ ok: true }))
+    app.get('/api/_teste/falha', async () => {
+      throw new Error('falha de teste')
+    })
+    // rota que define o próprio Cache-Control fica com ele
+    app.get('/api/_teste/cache-proprio', async (_req, reply) => reply.header('cache-control', 'private, max-age=60').send({ ok: true }))
+    cookie = await sessionCookie(app, (await createUser(app, { roleId: 'superadmin' })).id)
+  })
+  afterAll(async () => app.close())
+
+  it('saúde, rota nova, 404 e 500', async () => {
+    noStore(await api(app, 'GET', '/api/health'))
+    noStore(await api(app, 'GET', '/api/_teste/dados'))
+    const notFound = await api(app, 'GET', '/api/nao-existe', { cookie })
+    expect(notFound.statusCode).toBe(404)
+    noStore(notFound)
+    const boom = await api(app, 'GET', '/api/_teste/falha')
+    expectError(boom, 500, 'erro_interno')
+    noStore(boom)
+  })
+
+  it('recusas: sem sessão, CSRF, corpo grande, lista de IPs', async () => {
+    noStore(await api(app, 'GET', '/api/withdrawals'))
+    noStore(await api(app, 'POST', '/api/team/direct', { cookie, csrf: false, body: {} }))
+    noStore(await api(app, 'POST', '/api/team/direct', { cookie, body: { pad: 'x'.repeat(BODY_LIMIT) } }))
+    await app.db.query('update panel_security set allowlist = $1::jsonb where id = 1', [JSON.stringify([{ id: 'ip', value: '10.0.0.0/8', label: 'x' }])])
+    invalidateAllowlistCache()
+    try {
+      const blocked = await api(app, 'GET', '/api/_teste/dados', { ip: '198.51.100.9' })
+      expectError(blocked, 403, 'ip_nao_autorizado')
+      noStore(blocked)
+    } finally {
+      await app.db.query(`update panel_security set allowlist = '[]'::jsonb where id = 1`)
+      invalidateAllowlistCache()
+    }
+  })
+
+  it('rota que já definiu o próprio Cache-Control fica com ele', async () => {
+    const r = await api(app, 'GET', '/api/_teste/cache-proprio')
+    expect(r.statusCode).toBe(200)
+    expect(r.headers['cache-control']).toBe('private, max-age=60')
+  })
+})
+
+// O bodyLimit da API era de 12 MB para todas as rotas (por causa das imagens em /api/kv): qualquer rota com sessão
+// lia e parseava 12 MB. Agora 1 MiB, com limite próprio só nas rotas de dados por chave.
+describe('limite de corpo: 1 MiB, com limite próprio só nas rotas de /api/kv', () => {
+  let app: FastifyInstance
+  let cookie: string
+  beforeAll(async () => {
+    app = await createTestApp()
+    app.post('/api/_teste/eco', async (req) => ({ bytes: JSON.stringify(req.body).length }))
+    cookie = await sessionCookie(app, (await createUser(app, { roleId: 'superadmin' })).id)
+  })
+  afterAll(async () => app.close())
+
+  it('a API sobe com bodyLimit de 1 MiB', () => {
+    expect(BODY_LIMIT).toBe(1024 * 1024)
+    expect(app.initialConfig.bodyLimit).toBe(BODY_LIMIT)
+  })
+
+  it('sessão ativa, rota sem limite próprio: até 1 MiB passa; acima, 413 corpo_grande_demais (pt-BR) sem chegar na rota', async () => {
+    const ok = await api(app, 'POST', '/api/_teste/eco', { cookie, body: { pad: 'x'.repeat(BODY_LIMIT - 64) } })
+    expect(ok.statusCode, ok.body.slice(0, 200)).toBe(200)
+    const big = await api(app, 'POST', '/api/_teste/eco', { cookie, body: { pad: 'x'.repeat(BODY_LIMIT) } })
+    expectError(big, 413, 'corpo_grande_demais')
+    expect(big.json().error.message).toBe('Os dados enviados passam do tamanho permitido.')
+    // numa rota real: nada gravado
+    const email = 'grande-demais@teste.x2win'
+    const direct = await api(app, 'POST', '/api/team/direct', {
+      cookie,
+      body: { name: 'Pessoa', email, roleId: 'suporte', password: 'SenhaForte2027', pad: 'x'.repeat(BODY_LIMIT) },
+    })
+    expectError(direct, 413, 'corpo_grande_demais')
+    expect(await app.db.one('select id from users where email = $1', [email])).toBeNull()
+  })
+
+  it('PUT /api/kv/:key continua lendo mais de 1 MiB (limite da rota): quem decide é a rota', async () => {
+    const r = await api(app, 'PUT', '/api/kv/x', { cookie, body: { value: 'y'.repeat(2 * BODY_LIMIT) } })
+    expectError(r, 404, 'chave_desconhecida')
+  })
+})
+
+// Impasse (40P01) e falha de serialização (40001) do Postgres viravam 500 erro_interno ("a equipe técnica foi
+// avisada"), apesar de a transação ter sido desfeita inteira e repetir resolver. Em qualquer rota.
+describe('conflito de concorrência no Postgres → 409 versao_desatualizada', () => {
+  let app: FastifyInstance
+  let cookie: string
+  const raise = (errcode: string) => `do $$ begin raise exception 'conflito simulado' using errcode = '${errcode}'; end $$`
+
+  beforeAll(async () => {
+    app = await createTestApp()
+    // erros de verdade do banco: dentro de db.tx (rola tudo para trás) e fora dela
+    app.post('/api/_teste/impasse', async () =>
+      app.db.tx(async (t) => {
+        await t.query(`insert into audit_log (actor_name, action, entity, summary) values ('t', 'teste', 'impasse', 'desfeito')`)
+        await t.query(raise('deadlock_detected'))
+      }),
+    )
+    app.post('/api/_teste/serializacao', async () => app.db.query(raise('serialization_failure')))
+    app.post('/api/_teste/outro-erro', async () => app.db.query(raise('unique_violation')))
+    app.get('/api/_teste/lancado', async () => {
+      throw Object.assign(new Error('could not serialize access due to concurrent update'), { code: '40001' })
+    })
+    cookie = await sessionCookie(app, (await createUser(app, { roleId: 'superadmin' })).id)
+  })
+  afterAll(async () => app.close())
+
+  for (const [path, method] of [
+    ['/api/_teste/impasse', 'POST'],
+    ['/api/_teste/serializacao', 'POST'],
+    ['/api/_teste/lancado', 'GET'],
+  ] as const) {
+    it(`${method} ${path} → 409 com mensagem para recarregar`, async () => {
+      const r = await api(app, method, path, { cookie })
+      expectError(r, 409, 'versao_desatualizada')
+      expect(r.json().error.message).toBe('Outra pessoa alterou estes dados ao mesmo tempo. Recarregue e tente de novo.')
+      expect(r.body).not.toMatch(/conflito simulado|serialize|deadlock/)
+    })
+  }
+
+  it('a transação do impasse foi desfeita; outros erros do banco continuam 500 sem detalhe', async () => {
+    expect(await app.db.one(`select id from audit_log where entity = 'impasse'`)).toBeNull()
+    const r = await api(app, 'POST', '/api/_teste/outro-erro', { cookie })
+    expectError(r, 500, 'erro_interno')
+    expect(r.body).not.toContain('conflito simulado')
   })
 })

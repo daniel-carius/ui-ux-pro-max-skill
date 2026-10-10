@@ -147,6 +147,11 @@ describe('escrita sem sessão é recusada antes de ler o corpo (r2-resource-exha
     const over = await raw(app, 'PUT', '/api/kv/x', 'x'.repeat(13 * 1024 * 1024))
     expectError(over, 401, 'nao_autenticado')
     expect(over.headers.connection).toBe('close')
+
+    // fora de /api/kv o limite é o da API (1 MiB): 2 MiB anônimos já passam dele e a conexão fecha
+    const direct = await raw(app, 'POST', '/api/team/direct', JSON.stringify({ pad: 'x'.repeat(2 * 1024 * 1024) }))
+    expectError(direct, 401, 'nao_autenticado')
+    expect(direct.headers.connection).toBe('close')
   })
 
   it('a recusa sem sessão continua contando para o limite de taxa da rota', async () => {

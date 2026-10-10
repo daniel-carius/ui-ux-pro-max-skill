@@ -58,12 +58,37 @@ export function checkApprovalCeiling(role: RoleLike, amount: number): DecisionRe
   return { ok: true, message: '' }
 }
 
+/**
+ * O cargo pode deixar a aprovação automática em `next` (antes `previous`)? Ligar ou mudar o teto da aprovação
+ * automática equivale a aprovar saques até esse valor: só quem decide saques, e nunca acima do próprio teto.
+ * Desligar (0) ou manter o valor gravado é sempre aceito.
+ */
+export function checkAutoApproveCeiling(role: RoleLike, next: number, previous: number): DecisionResult {
+  if (next === 0 || next === previous) return { ok: true, message: '' }
+  if (!canDecideWithdrawals(role)) {
+    return { ok: false, message: `O cargo ${role.name} não aprova saques e por isso não pode ligar nem mudar a aprovação automática.` }
+  }
+  if (role.approvalCeiling !== null && next > role.approvalCeiling) {
+    return {
+      ok: false,
+      message: `A aprovação automática não pode passar do teto do cargo ${role.name} (${brl(role.approvalCeiling)}).`,
+    }
+  }
+  return { ok: true, message: '' }
+}
+
+/** Valores em reais com no máximo 2 casas decimais (centavos). */
+function hasCents(n: number) {
+  return Math.abs(n * 100 - Math.round(n * 100)) < 1e-6
+}
+
 /** Valida as regras antes de salvar. Retorna a mensagem do primeiro erro ou null. */
 export function validateWithdrawalRules(v: WithdrawalRules): string | null {
   const nums: (keyof WithdrawalRules)[] = ['min', 'maxPerRequest', 'rolloverPct', 'fee', 'dailyLimit', 'autoApproveMax']
   for (const k of nums) {
     const n = v[k] as unknown
     if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return 'Use apenas números positivos nos limites.'
+    if (!hasCents(n)) return 'Use no máximo 2 casas decimais nos valores.'
   }
   if (v.min <= 0) return 'O valor mínimo precisa ser maior que zero.'
   if (v.maxPerRequest < v.min) return 'O valor máximo precisa ser maior que o mínimo.'

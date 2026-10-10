@@ -212,6 +212,31 @@ async function writeAffiliates(ctx: KvContext, value: unknown, expectedVersion: 
   })
 }
 
+/**
+ * Afiliados vindos da plataforma (dados de demonstração): campos exigidos e valores
+ * válidos como no afiliado novo, código e e-mail únicos, gerente existente. O saldo
+ * de comissão e a data de cadastro vêm da plataforma (não são zerados).
+ */
+export function checkAffiliateRecords(list: readonly JsonObject[]) {
+  const ids = new Set(list.map(idOf))
+  const codes = new Set<string>()
+  const emails = new Set<string>()
+  for (const a of list) {
+    const id = idOf(a)
+    for (const f of NEW_REQUIRED) if (!hasOwn(a, f)) throw Errors.invalid(`Afiliado ${id}: informe ${f}.`, { id, field: f })
+    for (const f of Object.keys(a)) validateField(id, f, a[f])
+    const code = String(a.code).trim().toLowerCase()
+    const email = String(a.email).trim().toLowerCase()
+    if (codes.has(code)) throw Errors.invalid(`O código ${code.toUpperCase()} já é de outro afiliado.`, { id, field: 'code' })
+    if (emails.has(email)) throw Errors.invalid('Já existe um afiliado com este e-mail.', { id, field: 'email' })
+    codes.add(code)
+    emails.add(email)
+    if (typeof a.managerId === 'string' && a.managerId && (a.managerId === id || !ids.has(a.managerId))) {
+      throw Errors.invalid(`Afiliado ${id}: o gerente não existe.`, { id, field: 'managerId' })
+    }
+  }
+}
+
 // Regras de comissão ---------------------------------------------------------------
 
 const commissionRule = z.object({

@@ -2,10 +2,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { findKvRule } from '@shared/kv-registry'
 import { effectivePermissions, seedRoles } from '@shared/permissions'
+import { seedTeam } from '@/data/team'
 import { ensureAdmin, warnLookAlikeNames } from '../src/bootstrap'
 import { newId, passwordProblem, sha256 } from '../src/lib/crypto'
 import type { KvContext } from '../src/kv/types'
+import { PASSWORD_BUSY_RETRY_AFTER_SECONDS, PASSWORD_GATE_LIMITS, passwordGate } from '../src/modules/auth/password-gate'
 import { kvHandlers } from '../src/modules/team/kv'
+import { checkMemberName } from '../src/modules/team/service'
 import { seedDemo } from '../src/modules/team/seed'
 import { getRole, toCents } from '../src/services/roles-repo'
 import type { AuthContext } from '../src/types'
@@ -687,10 +690,164 @@ describe('equipe.membros (chave)', () => {
     await expect(team.write!(ctxFor(app, admAuth), renameBoss, cur!.version)).rejects.toMatchObject({ status: 403 })
     const offBoss = (cur!.value as Record<string, unknown>[]).map((m) => (m.id === boss.id ? { ...m, status: 'desligado' } : m))
     await expect(team.write!(ctxFor(app, admAuth), offBoss, cur!.version)).rejects.toMatchObject({ status: 403 })
+    // nem põe ninguém em cargo com governança (Financeiro aprova saques)
+    const toFin = (cur!.value as Record<string, unknown>[]).map((m) => (m.id === target.id ? { ...m, roleId: 'financeiro' } : m))
+    await expect(team.write!(ctxFor(app, admAuth), toFin, cur!.version)).rejects.toMatchObject({ status: 403, code: 'sem_permissao' })
+    expect((await userRow(app, target.id))?.role_id).toBe('suporte')
     // mexer em cargo comum pode
-    const lateral = (cur!.value as Record<string, unknown>[]).map((m) => (m.id === target.id ? { ...m, roleId: 'financeiro' } : m))
+    const lateral = (cur!.value as Record<string, unknown>[]).map((m) => (m.id === target.id ? { ...m, roleId: 'marketing' } : m))
     const ok = await team.write!(ctxFor(app, admAuth), lateral, cur!.version)
-    expect((ok.value as { id: string; roleId: string }[]).find((m) => m.id === target.id)?.roleId).toBe('financeiro')
+    expect((ok.value as { id: string; roleId: string }[]).find((m) => m.id === target.id)?.roleId).toBe('marketing')
+  })
+
+  // A tela Auditoria agrupa as linhas por quem fez ("nome (e-mail)", pelo id): quem lê a auditoria precisa do id e do
+  // e-mail de cada pessoa da equipe, inclusive de quem foi desligado.
+  it('leitura para a auditoria: quem só vê a auditoria recebe id e e-mail de cada pessoa', async () => {
+    await createRole(app, 'so-auditoria', ['auditoria.ver'])
+    const viewer = await loginAs(app, 'so-auditoria', { name: 'Leitora Auditoria' })
+    await createUser(app, { roleId: 'suporte', name: 'Pessoa Desligada', status: 'desligado' })
+    const r = await api(app, 'GET', '/api/kv/equipe.membros', { cookie: viewer.cookie })
+    expect(r.statusCode, r.body).toBe(200)
+    const byId = (a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    const got = (r.json().value as { id: string; email: string; lastIp: string | null }[]).sort(byId)
+    const rows = (await app.db.query<{ id: string; email: string }>('select id, email from users')).sort(byId)
+    expect(got.map((m) => ({ id: m.id, email: m.email }))).toEqual(rows)
+    expect(got.every((m) => m.lastIp === null)).toBe(true)
+  })
+})
+
+// ---------- cargos com permissão de governança ----------
+// Aprovar saques (com o teto), jogo responsável e países bloqueados são decisões de governança: quem tem só
+// equipe.editar (Administrador, sem cargos.conceder) não põe ninguém num cargo com alguma delas. Tirar pode.
+
+describe('equipe: cargo com permissão de governança', () => {
+  let app: FastifyInstance
+  let sa: Awaited<ReturnType<typeof loginAs>>
+  let adm: Awaited<ReturnType<typeof loginAs>>
+  beforeAll(async () => {
+    app = await createTestApp()
+    sa = await loginAs(app, 'superadmin', { name: 'Dona Superadmin' })
+    adm = await loginAs(app, 'administrador', { name: 'Admin Sem Conceder' })
+    await createRole(app, 'jr', ['jogo-responsavel.ver', 'jogo-responsavel.editar'])
+    await createRole(app, 'geo', ['paises.ver', 'paises.editar'])
+    await createRole(app, 'atendimento', ['usuarios.ver'])
+  })
+  afterAll(async () => app.close())
+
+  it('Administrador não troca ninguém para cargo com governança (rota e chave); Superadmin troca; tirar de lá pode', async () => {
+    const target = await createUser(app, { roleId: 'suporte', name: 'Alvo Governanca' })
+    for (const roleId of ['financeiro', 'jr', 'geo']) {
+      const r = await api(app, 'POST', `/api/team/${target.id}/role`, { cookie: adm.cookie, body: { roleId } })
+      expect(r.statusCode, roleId).toBe(403)
+      expect(r.json().error.code).toBe('sem_permissao')
+    }
+    const auth = await authFor(app, adm.user.id)
+    const cur = await team.read(ctxFor(app, auth))
+    const into = (cur!.value as Record<string, unknown>[]).map((m) => (m.id === target.id ? { ...m, roleId: 'financeiro' } : m))
+    await expect(team.write!(ctxFor(app, auth), into, cur!.version)).rejects.toMatchObject({ status: 403, code: 'sem_permissao' })
+    expect((await userRow(app, target.id))?.role_id).toBe('suporte')
+    // cargo sem governança: pode
+    expect((await api(app, 'POST', `/api/team/${target.id}/role`, { cookie: adm.cookie, body: { roleId: 'atendimento' } })).statusCode).toBe(200)
+    // o Superadmin põe; o Administrador tira (para cargo comum)
+    expect((await api(app, 'POST', `/api/team/${target.id}/role`, { cookie: sa.cookie, body: { roleId: 'financeiro' } })).statusCode).toBe(200)
+    const out = await api(app, 'POST', `/api/team/${target.id}/role`, { cookie: adm.cookie, body: { roleId: 'suporte' } })
+    expect(out.statusCode, out.body).toBe(200)
+  })
+
+  it('Administrador não cria acesso, não convida nem reenvia convite para cargo com governança', async () => {
+    const d = await api(app, 'POST', '/api/team/direct', { cookie: adm.cookie, body: { name: 'Nova Financeira', email: 'nova.fin@x2win.bet', roleId: 'financeiro' } })
+    expect(d.statusCode).toBe(403)
+    expect(d.json().error.code).toBe('sem_permissao')
+    const i = await api(app, 'POST', '/api/team/invite', {
+      cookie: adm.cookie,
+      body: { email: 'conv.fin@x2win.bet', roleId: 'financeiro', name: 'Convidada Financeira' },
+    })
+    expect(i.statusCode).toBe(403)
+    expect(await app.db.one(`select id from users where email in ('nova.fin@x2win.bet', 'conv.fin@x2win.bet')`)).toBeNull()
+    // convite feito pelo Superadmin: o link reenviado volta para quem reenvia, então reenviar é pôr alguém no cargo
+    const inv = await api(app, 'POST', '/api/team/invite', {
+      cookie: sa.cookie,
+      body: { email: 'conv.fin@x2win.bet', roleId: 'financeiro', name: 'Convidada Financeira' },
+    })
+    expect(inv.statusCode, inv.body).toBe(200)
+    const re = await api(app, 'POST', `/api/team/${inv.json().member.id}/resend-invite`, { cookie: adm.cookie })
+    expect(re.statusCode).toBe(403)
+    expect(re.json()).not.toHaveProperty('inviteUrl')
+    expect((await api(app, 'POST', `/api/team/${inv.json().member.id}/resend-invite`, { cookie: sa.cookie })).statusCode).toBe(200)
+    // cargo comum: o Administrador cria
+    const ok = await api(app, 'POST', '/api/team/direct', { cookie: adm.cookie, body: { name: 'Atendente Nova', email: 'atend@x2win.bet', roleId: 'atendimento' } })
+    expect(ok.statusCode, ok.body).toBe(200)
+  })
+
+  it('Administrador desativa quem está em cargo com governança, mas só quem concede cargos reativa', async () => {
+    const fin = await createUser(app, { roleId: 'financeiro', name: 'Financeira Ativa' })
+    const off = await api(app, 'POST', `/api/team/${fin.id}/deactivate`, { cookie: adm.cookie })
+    expect(off.statusCode, off.body).toBe(200)
+    const back = await api(app, 'POST', `/api/team/${fin.id}/reactivate`, { cookie: adm.cookie })
+    expect(back.statusCode).toBe(403)
+    expect(back.json().error.code).toBe('sem_permissao')
+    // pela chave também
+    const auth = await authFor(app, adm.user.id)
+    const cur = await team.read(ctxFor(app, auth))
+    const on = (cur!.value as Record<string, unknown>[]).map((m) => (m.id === fin.id ? { ...m, status: 'ativo' } : m))
+    await expect(team.write!(ctxFor(app, auth), on, cur!.version)).rejects.toMatchObject({ status: 403 })
+    expect((await userRow(app, fin.id))?.status).toBe('desligado')
+    expect((await api(app, 'POST', `/api/team/${fin.id}/reactivate`, { cookie: sa.cookie })).statusCode).toBe(200)
+  })
+})
+
+// ---------- senha pela fila do processo ----------
+// O scrypt de criar acesso e de aceitar convite passa pela mesma fila do login (auth/password-gate): sem ela, uma
+// enxurrada de aceites (rota pública) ocupava o pool de threads do libuv, como o login fazia.
+
+describe('equipe: cálculo de senha pela fila do processo', () => {
+  let app: FastifyInstance
+  let admin: Awaited<ReturnType<typeof loginAs>>
+  beforeAll(async () => {
+    app = await createTestApp()
+    admin = await loginAs(app, 'superadmin')
+  })
+  afterAll(async () => app.close())
+
+  /** Ocupa todas as vagas e a espera da fila; devolve quem as libera. */
+  async function saturate() {
+    let release!: () => void
+    const hold = new Promise<void>((r) => (release = r))
+    const held = Array.from({ length: PASSWORD_GATE_LIMITS.maxActive + PASSWORD_GATE_LIMITS.maxQueued }, () => passwordGate.run(() => hold))
+    await new Promise((r) => setImmediate(r))
+    expect(passwordGate.queued).toBe(PASSWORD_GATE_LIMITS.maxQueued)
+    return async () => {
+      release()
+      await Promise.all(held)
+    }
+  }
+
+  it('com a fila cheia, criar acesso e aceitar convite recusam na hora com 503 e Retry-After, sem gravar nada', async () => {
+    const inv = await api(app, 'POST', '/api/team/invite', { cookie: admin.cookie, body: { email: 'fila@x2win.bet', roleId: 'suporte', name: 'Pessoa Da Fila' } })
+    expect(inv.statusCode, inv.body).toBe(200)
+    const token = tokenOf(inv.json().inviteUrl)
+    const release = await saturate()
+    try {
+      const d = await api(app, 'POST', '/api/team/direct', { cookie: admin.cookie, body: { name: 'Direto Na Fila', email: 'direto.fila@x2win.bet', roleId: 'suporte' } })
+      expect(d.statusCode, d.body).toBe(503)
+      expect(d.json().error.code).toBe('servidor_ocupado')
+      expect(d.headers['retry-after']).toBe(String(PASSWORD_BUSY_RETRY_AFTER_SECONDS))
+      const a = await accept(app, { token, password: 'SenhaForte123' })
+      expect(a.statusCode, a.body).toBe(503)
+      expect(a.json().error.code).toBe('servidor_ocupado')
+      expect(a.headers['retry-after']).toBe(String(PASSWORD_BUSY_RETRY_AFTER_SECONDS))
+    } finally {
+      await release()
+    }
+    expect(await app.db.one(`select id from users where email = 'direto.fila@x2win.bet'`)).toBeNull()
+    expect((await userRow(app, inv.json().member.id))?.status).toBe('convidado')
+
+    // fila livre: os dois passam (o convite continuou valendo)
+    const d2 = await api(app, 'POST', '/api/team/direct', { cookie: admin.cookie, body: { name: 'Direto Na Fila', email: 'direto.fila@x2win.bet', roleId: 'suporte' } })
+    expect(d2.statusCode, d2.body).toBe(200)
+    const a2 = await accept(app, { token, password: 'SenhaForte123' })
+    expect(a2.statusCode, a2.body).toBe(200)
+    expect((await userRow(app, inv.json().member.id))?.status).toBe('ativo')
   })
 })
 
@@ -896,9 +1053,9 @@ describe('equipe: nomes na subida e na semente de demonstração', () => {
   it('semente de demonstração não cria xará de quem já existe', async () => {
     const app = await createTestApp()
     try {
-      await createUser(app, { email: 'outro.rafael@x2win.bet', name: 'Rafael Lima', roleId: 'suporte' })
+      await createUser(app, { email: 'outro.adm@x2win.bet', name: 'Demonstração ADM 1', roleId: 'suporte' })
       const summary = await seedDemo(app)
-      expect(summary).toContain('rafael@x2win.bet (nome Rafael Lima já usado)')
+      expect(summary).toContain('rafael@x2win.bet (nome Demonstração ADM 1 já usado)')
       expect(await app.db.one(`select id from users where email = 'rafael@x2win.bet'`)).toBeNull()
     } finally {
       await app.close()
@@ -921,10 +1078,23 @@ describe('equipe: seed de demonstração', () => {
     expect(summary).toMatch(/5 pessoas criadas/)
     expect(summary).not.toContain('daniel@x2win.bet:')
     expect(summary).toContain('daniel@x2win.bet (já cadastrado)')
-    const rows = await app.db.query<{ email: string; must_change_password: boolean; status: string; totp_enabled: boolean }>(
-      `select email, must_change_password, status, totp_enabled from users where email like '%@x2win.bet' and email <> 'daniel@x2win.bet' order by email`,
+    const rows = await app.db.query<{ email: string; name: string; last_ip: string | null; must_change_password: boolean; status: string; totp_enabled: boolean }>(
+      `select email, name, last_ip, must_change_password, status, totp_enabled from users where email like '%@x2win.bet' and email <> 'daniel@x2win.bet' order by email`,
     )
     expect(rows).toHaveLength(5)
+    // nome genérico pelo cargo (nunca o de alguém da equipe real, ex.: Rafael Lima) e IP fictício
+    expect(rows.map((r) => [r.email, r.name])).toEqual([
+      ['beatriz@x2win.bet', 'Demonstração ADM 2'],
+      ['camila.mkt@x2win.bet', 'Demonstração Marketing oficial'],
+      ['lucas.mkt@x2win.bet', 'Demonstração marketing'],
+      ['pedro@x2win.bet', 'Demonstração Suporte'],
+      ['rafael@x2win.bet', 'Demonstração ADM 1'],
+    ])
+    for (const r of rows) {
+      expect(checkMemberName(r.name)).toEqual({ name: r.name })
+      expect(r.last_ip).toMatch(/^10\./)
+    }
+    for (const real of seedTeam().map((m) => m.name)) expect(summary).not.toContain(real)
     expect(rows.every((r) => r.must_change_password && !r.totp_enabled)).toBe(true)
     expect(rows.find((r) => r.email === 'pedro@x2win.bet')?.status).toBe('desligado')
     // a senha mostrada no resumo entra (e pede troca)

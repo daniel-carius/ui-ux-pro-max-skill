@@ -3,6 +3,7 @@
 // auditoria com valores (antes → depois) para dados financeiros e regulados.
 import type { FastifyInstance } from 'fastify'
 import type { z } from 'zod'
+import type { AuditAction } from '@shared/audit'
 import { brl } from '@shared/money'
 import type { Db } from '../../db'
 import { AppError, Errors } from '../../errors'
@@ -27,6 +28,11 @@ export interface KvCheckResult {
   value: unknown
   /** resumo da auditoria (com valores); sem resumo, vale o resumo padrão */
   summary?: string
+  /**
+   * ação e entidade da linha da auditoria (ex.: 'ligar' em "Modo de ataque"), no
+   * lugar de 'editar' em "Dados · <tela>". Continua uma linha só por gravação.
+   */
+  audit?: { action: AuditAction; entity: string }
 }
 
 export type KvValidator = (c: KvWriteCheck) => KvCheckResult | Promise<KvCheckResult>

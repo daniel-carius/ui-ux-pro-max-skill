@@ -6,7 +6,7 @@ import type { AuditListResponse } from '@shared/api'
 import { AppError, Errors } from '../../errors'
 import { requireActive, requirePerm } from '../../http'
 import { writeAudit } from '../../services/audit'
-import { auditCsv, auditFilterSchema, auditListSchema, buildAuditWhere, describeFilter, toAuditEntry, type AuditRow } from './format'
+import { auditCsv, auditFilterSchema, auditListSchema, buildAuditWhere, describeFilter, toAuditEntry, toAuditExportEntry, type AuditRow } from './format'
 
 /** Teto de linhas por exportação (as mais recentes que casam com os filtros). */
 export const EXPORT_MAX_ROWS = 50_000
@@ -106,11 +106,15 @@ export default async function routes(app: FastifyInstance) {
     const auth = requirePerm(req, 'auditoria.exportar')
     const f = auditFilterSchema.parse(req.query ?? {})
     const { where, params } = buildAuditWhere(f)
-    const rows = await app.db.query<AuditRow>(`select * from audit_log ${where} order by at desc, id desc limit $${params.length + 1}`, [
-      ...params,
-      EXPORT_MAX_ROWS,
-    ])
-    const csv = auditCsv(rows.map(toAuditEntry))
+    // e-mail atual de quem fez, juntado na hora da exportação (a auditoria guarda id e nome)
+    const rows = await app.db.query<AuditRow>(
+      `select a.*, u.email as actor_email
+         from (select * from audit_log ${where} order by at desc, id desc limit $${params.length + 1}) a
+         left join users u on u.id = a.actor_id
+        order by a.at desc, a.id desc`,
+      [...params, EXPORT_MAX_ROWS],
+    )
+    const csv = auditCsv(rows.map(toAuditExportEntry))
     const filters = describeFilter(f)
     await writeAudit(app.db, auth, {
       action: 'exportar',

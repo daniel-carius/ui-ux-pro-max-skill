@@ -5,7 +5,7 @@
 // da outra. A gravação de cargos (cargos.lista) pega esta mesma trava antes da
 // dela (ordem fixa: equipe.membros, depois cargos.lista), porque as duas mexem
 // em users.role_id e em roles.
-import { isAdminLevelRole, type Role } from '@shared/permissions'
+import { isAdminLevelRole, isGovernedRole, type Role } from '@shared/permissions'
 import { z } from 'zod'
 import { SECURITY } from '../../config'
 import type { Db } from '../../db'
@@ -329,6 +329,19 @@ export function assertMayHandleRole(auth: AuthContext, role: Pick<Role, 'permiss
   if (role && isAdminLevelRole(role) && !auth.perms.has(GRANT_PERM)) throw TeamErrors.needsGrant(msg)
 }
 
+/**
+ * Pôr alguém num cargo com permissão de governança (aprovar saques de jogadores ou de afiliados, jogo responsável,
+ * países bloqueados e as administrativas) só com cargos.conceder: trocar o cargo, criar acesso, convidar, reenviar convite e reativar.
+ * Tirar alguém desse cargo segue só a regra de cargo administrativo (assertMayHandleRole).
+ */
+export function assertMayPlaceInRole(auth: AuthContext, role: Pick<Role, 'name' | 'permissions'> | null) {
+  if (role && isGovernedRole(role) && !auth.perms.has(GRANT_PERM)) {
+    throw TeamErrors.needsGrant(
+      `Só quem pode conceder cargos põe pessoas no cargo ${role.name} (aprova saques ou altera jogo responsável ou países bloqueados).`,
+    )
+  }
+}
+
 /** Recusa se a pessoa é o último Superadmin ativo (chamar antes de tirá-la desse papel). */
 async function assertNotLastSuperadmin(t: Db, m: Pick<MemberRow, 'id' | 'role_id' | 'status'>) {
   if (m.role_id !== SUPERADMIN_ROLE_ID || m.status !== 'ativo') return
@@ -385,7 +398,9 @@ export async function deactivateMember(t: Db, auth: AuthContext, id: string): Pr
 /** Reativa quem estava desligado. Quem nunca definiu senha volta como convidado (reenviar convite). */
 export async function reactivateMember(t: Db, auth: AuthContext, id: string): Promise<MemberRow> {
   const m = await requireMember(t, id)
-  assertMayHandleRole(auth, await getRole(t, m.role_id), 'Só quem pode conceder cargos administrativos reativa pessoas com cargo administrativo.')
+  const role = await getRole(t, m.role_id)
+  assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos reativa pessoas com cargo administrativo.')
+  assertMayPlaceInRole(auth, role)
   if (m.status !== 'desligado') throw Errors.invalid('Esta pessoa não está desligada.')
   const next: MemberStatus = m.has_password ? 'ativo' : 'convidado'
   await t.query(`update users set status = $2, failed_logins = 0, locked_until = null, updated_at = now() where id = $1`, [m.id, next])
@@ -397,7 +412,7 @@ export async function reactivateMember(t: Db, auth: AuthContext, id: string): Pr
   return requireMember(t, m.id)
 }
 
-/** Troca o cargo. Cargo administrativo (atual ou novo) exige cargos.conceder. */
+/** Troca o cargo. Cargo administrativo (atual ou novo) ou novo cargo com governança exige cargos.conceder. */
 export async function changeMemberRole(t: Db, auth: AuthContext, id: string, roleId: string): Promise<MemberRow> {
   const m = await requireMember(t, id)
   if (m.id === auth.user.id) throw Errors.invalid('Você não pode mudar o próprio cargo. Peça a outra pessoa com acesso à equipe.')
@@ -407,6 +422,7 @@ export async function changeMemberRole(t: Db, auth: AuthContext, id: string, rol
   if (((from && isAdminLevelRole(from)) || isAdminLevelRole(to)) && !auth.perms.has(GRANT_PERM)) {
     throw TeamErrors.needsGrant('Só quem pode conceder cargos administrativos dá ou retira cargos administrativos.')
   }
+  assertMayPlaceInRole(auth, to)
   if (to.id !== SUPERADMIN_ROLE_ID) await assertNotLastSuperadmin(t, m)
   await t.query(`update users set role_id = $2, updated_at = now() where id = $1`, [m.id, to.id])
   await writeAudit(t, auth, {
@@ -463,6 +479,12 @@ export interface InviteInput {
   name?: string
 }
 
+/**
+ * Cálculo de senha (hashPassword) pela fila única do processo. A rota passa withPasswordSlot (auth/password-gate):
+ * com a fila cheia, 503 servidor_ocupado com Retry-After, sem calcular nada.
+ */
+export type PasswordSlot = <T>(work: () => Promise<T>) => Promise<T>
+
 /** Senha temporária que já atende à regra de senha forte. */
 export function strongTemporaryPassword(): string {
   for (;;) {
@@ -472,11 +494,17 @@ export function strongTemporaryPassword(): string {
 }
 
 /** Cria a pessoa já ativa com senha temporária (troca obrigatória no 1º acesso). */
-export async function createDirectMember(db: Db, auth: AuthContext, input: DirectInput): Promise<{ member: MemberRow; temporaryPassword: string }> {
+export async function createDirectMember(
+  db: Db,
+  auth: AuthContext,
+  input: DirectInput,
+  slot: PasswordSlot,
+): Promise<{ member: MemberRow; temporaryPassword: string }> {
   const name = memberNameSchema.parse(input.name)
   const check = async (t: Db, lock: boolean) => {
     const role = await requireRole(t, input.roleId, lock)
     assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos cria acessos com cargo administrativo.')
+    assertMayPlaceInRole(auth, role)
     await assertEmailFree(t, input.email)
     await assertNameFree(t, name)
     return role
@@ -484,7 +512,7 @@ export async function createDirectMember(db: Db, auth: AuthContext, input: Direc
   // o hash é lento: confere o barato antes e calcula fora da transação (que confere de novo, com trava)
   await check(db, false)
   const password = strongTemporaryPassword()
-  const hash = await hashPassword(password)
+  const hash = await slot(() => hashPassword(password))
   try {
     const member = await withTeamLock(db, auth.user.id, async (t) => {
       const role = await check(t, true)
@@ -536,6 +564,7 @@ export async function inviteMember(db: Db, auth: AuthContext, input: InviteInput
     return await withTeamLock(db, auth.user.id, async (t) => {
       const role = await requireRole(t, input.roleId)
       assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos convida pessoas para cargo administrativo.')
+      assertMayPlaceInRole(auth, role)
       await assertEmailFree(t, input.email)
       await assertNameFree(t, name)
       const id = newId('u')
@@ -562,7 +591,10 @@ export async function inviteMember(db: Db, auth: AuthContext, input: InviteInput
 export async function resendInvite(db: Db, auth: AuthContext, id: string, origin: string): Promise<{ member: MemberRow; inviteUrl: string }> {
   return withTeamLock(db, auth.user.id, async (t) => {
     const m = await requireMember(t, id)
-    assertMayHandleRole(auth, await getRole(t, m.role_id), 'Só quem pode conceder cargos administrativos reenvia convite para cargo administrativo.')
+    const role = await getRole(t, m.role_id)
+    assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos reenvia convite para cargo administrativo.')
+    // o link volta para quem reenvia: equivale a pôr alguém no cargo
+    assertMayPlaceInRole(auth, role)
     if (m.status !== 'convidado') throw Errors.invalid('Só dá para reenviar o convite de quem ainda não aceitou.')
     await t.query('delete from invites where user_id = $1 and used_at is null', [m.id])
     const token = await issueInvite(t, m.id, auth.user.id)
@@ -609,12 +641,12 @@ function assertInviteUsable(inv: InviteRow | null): asserts inv is InviteRow {
  * (a rota é pública: quem tem o link não escolhe como aparece na auditoria); trocar o nome é pela tela Equipe,
  * com auditoria. Um `name` enviado é ignorado.
  */
-export async function acceptInvite(db: Db, input: { token: string; password: string }, ip: string): Promise<void> {
+export async function acceptInvite(db: Db, input: { token: string; password: string }, ip: string, slot: PasswordSlot): Promise<void> {
   const problem = passwordProblem(input.password, SECURITY.passwordMinLength)
   if (problem) throw Errors.invalid(problem, { field: 'password' })
   // confere antes de gastar o hash; confere de novo com trava dentro da transação
   assertInviteUsable(await findInvite(db, input.token, false))
-  const hash = await hashPassword(input.password)
+  const hash = await slot(() => hashPassword(input.password))
   await db.tx(async (t) => {
     const current = await lockKvVersion(t, TEAM_VERSION_KEY)
     const inv = await findInvite(t, input.token, true)

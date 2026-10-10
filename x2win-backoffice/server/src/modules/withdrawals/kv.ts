@@ -3,7 +3,13 @@ import { z } from 'zod'
 import { canReadKey, canWriteKey } from '@shared/kv-registry'
 import { brl } from '@shared/money'
 import { PAGE_INFO_BY_ID } from '@shared/pages'
-import { DEFAULT_WITHDRAWAL_RULES, validateWithdrawalRules, type WithdrawalRules } from '@shared/withdrawals'
+import {
+  canDecideWithdrawals,
+  checkAutoApproveCeiling,
+  DEFAULT_WITHDRAWAL_RULES,
+  validateWithdrawalRules,
+  type WithdrawalRules,
+} from '@shared/withdrawals'
 import type { Db } from '../../db'
 import { AppError, Errors } from '../../errors'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
@@ -88,10 +94,12 @@ export const kvHandlers: KvHandlers = {
     async read(ctx): Promise<KvValue> {
       assertRead(ctx)
       const rows = await ctx.app.db.query<WithdrawalRow>(
-        `select * from withdrawals
-          where status in ('criado', 'pendente', 'em_analise')
-             or id in (select id from withdrawals order by created_at desc limit $1)
-          order by created_at desc, id desc`,
+        `select w.*, u.email as decided_by_email
+           from withdrawals w
+           left join users u on u.id = w.decided_by_id
+          where w.status in ('criado', 'pendente', 'em_analise')
+             or w.id in (select id from withdrawals order by created_at desc limit $1)
+          order by w.created_at desc, w.id desc`,
         [LIST_LIMIT],
       )
       const updatedAt = rows.reduce<string | null>((max, r) => (!max || r.updated_at > max ? r.updated_at : max), null)
@@ -128,6 +136,14 @@ export const kvHandlers: KvHandlers = {
         if (existed && expectedVersion !== current) throw versionConflict(current)
 
         const before: WithdrawalRules = { ...DEFAULT_WITHDRAWAL_RULES, ...(row?.value?.rules ?? {}) }
+        // aprovação automática = aprovar sem análise: só até o teto de quem grava (comparado com o valor gravado)
+        const auto = checkAutoApproveCeiling(ctx.auth.role, rules.autoApproveMax, before.autoApproveMax)
+        if (!auto.ok) {
+          throw new AppError(403, 'teto_excedido', auto.message, {
+            ceiling: canDecideWithdrawals(ctx.auth.role) ? ctx.auth.role.approvalCeiling : 0,
+            autoApproveMax: rules.autoApproveMax,
+          })
+        }
         const next = current + 1
         const saved = await t.one<{ updated_at: string }>(
           `update settings set value = $2::jsonb, updated_at = now(), updated_by = $3 where key = $1 returning updated_at`,

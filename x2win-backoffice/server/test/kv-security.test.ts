@@ -549,10 +549,13 @@ describe('kv: afiliados.saques mascara e-mail e dados bancários sem afiliados-s
   })
   afterAll(async () => app.close())
 
-  it('quem tem ver-pix vê tudo; os demais leitores recebem mascarado', async () => {
-    expect((await current(app, admin, 'afiliados.saques')).value).toEqual(ITEMS)
-    for (const perms of [['afiliados-visao-geral.ver'], ['afiliados-saques.ver']]) {
-      const cookie = await customRole(app, `r-${perms[0]}`, perms)
+  it('a lista sai mascarada para todos, inclusive quem tem ver-pix (o dado em claro sai por registro: kv-followups.test.ts)', async () => {
+    const [aTed, aPix] = (await current(app, admin, 'afiliados.saques')).value as typeof ITEMS
+    expect(aPix.pixKey).toBe('123.***.***-09')
+    expect(aTed.affiliateEmail).toBe('jo***@gmail.com')
+    expect(aTed.bank).toEqual({ bank: '341 · Itaú', agency: '••34', account: '•••65-4', holder: 'J*** S***' })
+    for (const perms of [['afiliados-visao-geral.ver'], ['afiliados-saques.ver'], ['afiliados-saques.ver', 'afiliados-saques.ver-pix']]) {
+      const cookie = await customRole(app, `r-${perms.join('+')}`, perms)
       const [ted, pix] = (await current(app, cookie, 'afiliados.saques')).value as typeof ITEMS
       expect(pix.pixKey).toBe('123.***.***-09')
       expect(ted.affiliateEmail).toBe('jo***@gmail.com')

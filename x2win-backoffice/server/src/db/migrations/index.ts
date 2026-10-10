@@ -218,9 +218,78 @@ end
 $$;
 `
 
+/**
+ * Chaves com histórico cifradas em repouso (regra com `history` e `pii`/`secrets`), na versão em vigor de
+ * kv_history_immutable(): só as linhas de histórico delas aceitam a cifra feita na subida. Vazia: nenhuma chave com
+ * histórico tem dado pessoal nem segredo, então toda linha de histórico recusa qualquer UPDATE (o gatilho não tem como
+ * conferir que value_enc é a cifra de value: com a exceção aberta, a linha podia ser trocada por qualquer valor).
+ * Chave com histórico que ganhar `pii`/`secrets` precisa de uma migração nova que recrie a função com a lista nova
+ * (kvHistoryImmutableSql) e atualize esta lista; o teste do histórico em kv-records.test.ts compara com KV_RULES.
+ */
+export const KV_HISTORY_ENCRYPTED_KEYS: readonly string[] = []
+
+/** Função do gatilho do histórico (create or replace), com as chaves cujas linhas de histórico aceitam a cifra. */
+export function kvHistoryImmutableSql(encryptedKeys: readonly string[]): string {
+  const keys = encryptedKeys.map((k) => `'${k.replace(/'/g, "''")}'`).join(', ')
+  return `
+create or replace function kv_history_immutable() returns trigger language plpgsql as $$
+begin
+  if tg_op = 'DELETE' then
+    if left(old.key, 6) = '~hist:' then
+      raise exception 'o histórico de dados aceita apenas inclusão';
+    end if;
+    return old;
+  end if;
+  if left(old.key, 6) = '~hist:' or left(new.key, 6) = '~hist:' then
+    if new.key = old.key
+       and split_part(substr(old.key, 7), '@', 1) = any (array[${keys}]::text[])
+       and old.value is not null and old.value_enc is null
+       and new.value is null and new.value_enc is not null
+       and new.version = old.version
+       and new.updated_at = old.updated_at
+       and new.updated_by is not distinct from old.updated_by then
+      return new;
+    end if;
+    raise exception 'o histórico de dados aceita apenas inclusão';
+  end if;
+  return new;
+end
+$$;
+`
+}
+
+const m003 = `
+-- Histórico das chaves (linhas "~hist:<chave>@<versão>" de kv_store): só inclusão, como a auditoria. A única mudança
+-- aceita numa linha de histórico é a cifra em repouso feita na subida (kv/store.ts › encryptPlainRows), e só nas
+-- chaves com histórico cifradas em repouso (KV_HISTORY_ENCRYPTED_KEYS, hoje nenhuma): value vira null e value_enc é
+-- preenchido, sem mudar chave, versão, data nem autor. Também não deixa uma linha comum virar histórico (troca de chave).
+${kvHistoryImmutableSql(KV_HISTORY_ENCRYPTED_KEYS)}
+create trigger kv_history_no_change before update or delete on kv_store
+  for each row execute function kv_history_immutable();
+
+-- Leitura da auditoria por origem (janelas separadas de servidor e painel em auditoria.registros).
+create index audit_source_at_idx on audit_log (source, at desc, id desc);
+
+-- Endereço do destino de webhook cifrado em repouso (pode ter token no caminho ou na query): url_enc (AES-256-GCM)
+-- e só o host em claro. SQL não cifra: as linhas antigas são cifradas na subida da API (webhooks/routes.ts, onReady),
+-- e até lá o código ainda lê url.
+alter table webhook_destinations alter column url drop not null;
+alter table webhook_destinations add column url_enc text;
+alter table webhook_destinations add column host text;
+alter table webhook_destinations add constraint webhook_destinations_url_ck check (url is not null or url_enc is not null);
+
+-- Excluir um destino não apaga mais em silêncio as entregas da fila (ordens saque.pago já aprovadas): a gravação da
+-- lista marca as pendentes como 'falhou' ('Destino removido') e o item fica na fila, sem destino.
+alter table webhook_outbox alter column destination_id drop not null;
+alter table webhook_outbox drop constraint webhook_outbox_destination_id_fkey;
+alter table webhook_outbox add constraint webhook_outbox_destination_id_fkey
+  foreign key (destination_id) references webhook_destinations(id) on delete set null;
+`
+
 export const MIGRATIONS: Migration[] = [
   { id: '001_init', sql: m001 },
   { id: '002_audit_append_only', sql: m002 },
+  { id: '003_ops_integrity', sql: m003 },
 ]
 
 /**

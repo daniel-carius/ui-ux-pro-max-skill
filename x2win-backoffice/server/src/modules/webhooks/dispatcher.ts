@@ -5,10 +5,13 @@ import https from 'node:https'
 import type { FastifyInstance } from 'fastify'
 import type { Db } from '../../db'
 import { hmacSha256, newId } from '../../lib/crypto'
+import { maskUrlTokens } from '../../lib/mask'
+import { destinationUrl, OUTBOX_CANCEL_REASON, type DestinationRow as StoredDestination } from './kv'
 import {
   BLOCKED_PRIVATE_CODE,
   hostOf,
   INTERNAL_TARGET_MESSAGE,
+  isDemoHost,
   isDemoWebhookHost,
   isWebhookEvent,
   safeLookup,
@@ -155,7 +158,7 @@ export function buildBody(p: { id: string; event: string; createdAt: string; dat
   return JSON.stringify(p.test ? { id: p.id, event: p.event, createdAt: p.createdAt, test: true, data: p.data } : { id: p.id, event: p.event, createdAt: p.createdAt, data: p.data })
 }
 
-/** Grava uma tentativa em webhook_executions. */
+/** Grava uma tentativa em webhook_executions (endereço já com os tokens mascarados: o histórico não guarda o token). */
 export async function recordExecution(
   db: Db,
   e: { id?: string; event: string; destinationId: string | null; url: string; result: DeliveryResult; payload: string; test: boolean },
@@ -164,7 +167,7 @@ export async function recordExecution(
   await db.query(
     `insert into webhook_executions (id, event, destination_id, url, status, http_status, duration_ms, payload, test)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [id, e.event, e.destinationId, e.url, e.result.ok ? 'sucesso' : 'falha', e.result.httpStatus, e.result.durationMs, e.payload, e.test],
+    [id, e.event, e.destinationId, maskUrlTokens(e.url), e.result.ok ? 'sucesso' : 'falha', e.result.httpStatus, e.result.durationMs, e.payload, e.test],
   )
   return id
 }
@@ -182,13 +185,14 @@ export async function enqueueWebhook(db: Db, event: string, payload: Record<stri
   if (!isWebhookEvent(event)) throw new Error(`Evento de webhook desconhecido: ${event}`)
   // o mesmo id de evento vai para todos os destinos (o destino deduplica por ele)
   const envelope = { id: newId('evt'), data: payload }
-  const dests = await db.query<{ id: string; url: string }>(
-    'select id, url from webhook_destinations where event = $1 and active order by id for key share',
+  const dests = await db.query<{ id: string; url: string | null; host: string | null }>(
+    'select id, url, host from webhook_destinations where event = $1 and active order by id for key share',
     [event],
   )
   // destino de demonstração (host de terceiro, segredo público no bundle) nunca recebe evento real, mesmo se
-  // estiver gravado e ativo (ex.: gravado antes de a chave recusar o seed do painel)
-  const ids = dests.filter((d) => !isDemoWebhookHost(d.url)).map((d) => d.id)
+  // estiver gravado e ativo (ex.: gravado antes de a chave recusar o seed do painel). O endereço fica cifrado:
+  // basta o host em claro (linha antiga, ainda não cifrada na subida: o endereço)
+  const ids = dests.filter((d) => !(d.host ? isDemoHost(d.host) : isDemoWebhookHost(d.url ?? ''))).map((d) => d.id)
   if (!ids.length) return 0
   // só os ids travados acima (nada de reler webhook_destinations aqui: a releitura veria outro estado)
   const rows = await db.query<{ id: number }>(
@@ -204,26 +208,36 @@ interface OutboxItem {
   id: number
   event: string
   payload: { id?: string; data?: unknown } | null
-  destination_id: string
+  /** null = destino excluído depois de enfileirar (a fila guarda o item, sem destino) */
+  destination_id: string | null
   attempts: number
   created_at: string
 }
 
-interface DestinationRow {
-  id: string
-  url: string
-  active: boolean
-  secret_enc: string
-}
+type DestinationRow = Pick<StoredDestination, 'id' | 'url' | 'url_enc' | 'active' | 'secret_enc'>
+
+const failItem = (db: Db, id: number, reason: string) =>
+  db.query(`update webhook_outbox set status = 'falhou', last_error = $2 where id = $1 and status = 'pendente'`, [id, reason])
 
 async function deliverItem(app: FastifyInstance, item: OutboxItem, dest: DestinationRow | undefined) {
   const db = app.db
+  if (item.destination_id === null) {
+    await failItem(db, item.id, OUTBOX_CANCEL_REASON.removed)
+    return
+  }
   if (!dest || !dest.active) {
-    await db.query(`update webhook_outbox set status = 'falhou', last_error = $2 where id = $1`, [item.id, 'Destino desativado antes do envio.'])
+    await failItem(db, item.id, 'Destino desativado antes do envio.')
+    return
+  }
+  let url: string
+  try {
+    url = destinationUrl(dest, app.cipher)
+  } catch {
+    await failItem(db, item.id, 'Não foi possível ler o endereço do destino.')
     return
   }
   // item enfileirado antes da trava (destino de demonstração gravado pelo seed do painel): não sai
-  if (isDemoWebhookHost(dest.url)) {
+  if (isDemoWebhookHost(url)) {
     await db.query(`update webhook_outbox set status = 'falhou', last_error = $2 where id = $1`, [
       item.id,
       'Destino de demonstração (host de terceiro): evento real não enviado.',
@@ -239,13 +253,13 @@ async function deliverItem(app: FastifyInstance, item: OutboxItem, dest: Destina
   let result: DeliveryResult
   try {
     const secret = app.cipher.decrypt(dest.secret_enc)
-    result = await sendWebhook(app, { url: dest.url, secret, event: item.event, deliveryId: String(item.id), body })
+    result = await sendWebhook(app, { url, secret, event: item.event, deliveryId: String(item.id), body })
   } catch {
     result = { ok: false, httpStatus: null, durationMs: 0, error: 'Não foi possível ler o segredo do destino.' }
   }
   const attempts = item.attempts + 1
   await db.tx(async (t) => {
-    await recordExecution(t, { event: item.event, destinationId: dest.id, url: dest.url, result, payload: body, test: false })
+    await recordExecution(t, { event: item.event, destinationId: dest.id, url, result, payload: body, test: false })
     if (result.ok) {
       await t.query(`update webhook_outbox set status = 'entregue', attempts = $2, last_error = null where id = $1`, [item.id, attempts])
     } else if (attempts >= MAX_ATTEMPTS) {
@@ -276,10 +290,23 @@ export async function processOutboxOnce(app: FastifyInstance): Promise<number> {
     [BATCH_SIZE, LEASE_SECONDS],
   )
   if (!due.length) return 0
-  const ids = [...new Set(due.map((d) => d.destination_id))]
-  const dests = await app.db.query<DestinationRow>('select id, url, active, secret_enc from webhook_destinations where id = any($1::text[])', [ids])
+  const ids = [...new Set(due.map((d) => d.destination_id).filter((id): id is string => id !== null))]
+  const dests = await app.db.query<DestinationRow>(
+    'select id, url, url_enc, active, secret_enc from webhook_destinations where id = any($1::text[])',
+    [ids],
+  )
   const byId = new Map(dests.map((d) => [d.id, d]))
-  const results = await Promise.allSettled(due.map((item) => deliverItem(app, item, byId.get(item.destination_id))))
+  // relê o estado DEPOIS de ler os destinos: a gravação que troca endereço/evento (ou exclui) cancela as pendentes na
+  // mesma transação; se o endereço lido acima já é o novo, o item reservado antes dela aparece aqui como 'falhou' e
+  // não segue o endereço novo
+  const live = new Set(
+    (await app.db.query<{ id: number }>(`select id from webhook_outbox where id = any($1::bigint[]) and status = 'pendente'`, [due.map((d) => d.id)])).map((r) =>
+      Number(r.id),
+    ),
+  )
+  const results = await Promise.allSettled(
+    due.filter((item) => live.has(Number(item.id))).map((item) => deliverItem(app, item, item.destination_id === null ? undefined : byId.get(item.destination_id))),
+  )
   for (const r of results) if (r.status === 'rejected') app.log.error({ err: r.reason }, 'webhooks: falha ao registrar entrega')
   return due.length
 }

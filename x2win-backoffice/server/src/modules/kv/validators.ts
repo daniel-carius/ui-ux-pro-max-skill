@@ -6,15 +6,24 @@
 //
 // Conteúdo do site público (Personalização, popups/inbox, notificações, disparos e
 // textos legais): rules-content.ts. Contas de e-mail/SMS: rules-integrations.ts.
+// Modo de ataque, manutenção e empresa (auditoria com ação e entidade próprias):
+// rules-system.ts.
 import { CAMPAIGN_VALIDATORS } from './rules-campaigns'
 import { CONTENT_VALIDATORS } from './rules-content'
 import { INTEGRATION_VALIDATORS } from './rules-integrations'
 import { REGULATED_VALIDATORS } from './rules-regulated'
+import { SYSTEM_VALIDATORS } from './rules-system'
 import type { KvValidator } from './validate-util'
 
 export type { KvCheckResult, KvValidator, KvWriteCheck } from './validate-util'
 
-const VALIDATORS: Record<string, KvValidator> = { ...REGULATED_VALIDATORS, ...CAMPAIGN_VALIDATORS, ...CONTENT_VALIDATORS, ...INTEGRATION_VALIDATORS }
+const VALIDATORS: Record<string, KvValidator> = {
+  ...REGULATED_VALIDATORS,
+  ...CAMPAIGN_VALIDATORS,
+  ...CONTENT_VALIDATORS,
+  ...INTEGRATION_VALIDATORS,
+  ...SYSTEM_VALIDATORS,
+}
 
 /** Validador da chave (chave exata), ou undefined. */
 export function validatorFor(key: string): KvValidator | undefined {

@@ -41,8 +41,8 @@ async function authFor(app: FastifyInstance, userId: string, ip: string): Promis
   }
 }
 
-async function asRole(app: FastifyInstance, roleId: string, ip = '10.1.1.1', name?: string) {
-  const u = await createUser(app, { roleId, name })
+async function asRole(app: FastifyInstance, roleId: string, ip = '10.1.1.1', name?: string, opts: { totp?: boolean } = {}) {
+  const u = await createUser(app, { roleId, name, totp: opts.totp })
   return authFor(app, u.id, ip)
 }
 
@@ -62,7 +62,8 @@ describe('config.seguranca-painel', () => {
   let sa: AuthContext
   beforeAll(async () => {
     app = await createTestApp()
-    sa = await asRole(app, 'superadmin', '10.1.1.1', 'Dona do Painel')
+    // com 2FA: ligar o 2FA para todos exige que quem grava já tenha o fator
+    sa = await asRole(app, 'superadmin', '10.1.1.1', 'Dona do Painel', { totp: true })
   })
   afterAll(async () => app.close())
 
@@ -214,7 +215,7 @@ describe('config.seguranca-painel', () => {
   })
 
   it('incluir ou retirar IPs exige cargos.conceder; o resto segue com seguranca-painel.editar', async () => {
-    const adm = await asRole(app, 'administrador', '10.1.1.1', 'Admin Sem Conceder')
+    const adm = await asRole(app, 'administrador', '10.1.1.1', 'Admin Sem Conceder', { totp: true })
     expect(adm.perms.has('seguranca-painel.editar')).toBe(true)
     expect(adm.perms.has('cargos.conceder')).toBe(false)
     // lista vazia → não vazia: recusado
@@ -243,6 +244,44 @@ describe('config.seguranca-painel', () => {
     await save(base())
     const { invalidateAllowlistCache } = await import('../src/plugins/security')
     invalidateAllowlistCache()
+  })
+
+  // Ligar o 2FA para todos sem ter 2FA derrubava a sessão de quem salvou logo na requisição seguinte.
+  it('ligar o 2FA para todos exige que quem grava já tenha 2FA (400); desligar ou manter não exige', async () => {
+    const semFator = await asRole(app, 'administrador', '10.1.1.1', 'Admin Sem Fator')
+    expect(semFator.user.totpEnabled).toBe(false)
+    const before = await handler.read(ctx(app, sa))
+    const err = await save(base({ enforce2faForAll: true }), semFator).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toMatchObject({ status: 400, code: 'dados_invalidos', details: { field: 'enforce2faForAll' } })
+    expect((err as Error).message).toMatch(/Cadastre o 2FA na sua conta/)
+    const after = await handler.read(ctx(app, sa))
+    expect(after!.version).toBe(before!.version)
+    expect((after!.value as PanelSecurity).enforce2faForAll).toBe(false)
+    // o resto da tela segue gravando sem 2FA
+    await expect(save(base({ sessionTimeoutMinutes: 120 }), semFator)).resolves.toMatchObject({ value: { enforce2faForAll: false, sessionTimeoutMinutes: 120 } })
+
+    // com 2FA liga; desligar não depende do fator de quem grava
+    const comFator = await asRole(app, 'administrador', '10.1.1.1', 'Admin Com Fator', { totp: true })
+    await expect(save(base({ enforce2faForAll: true }), comFator)).resolves.toMatchObject({ value: { enforce2faForAll: true } })
+    await expect(save(base(), semFator)).resolves.toMatchObject({ value: { enforce2faForAll: false } })
+
+    // pela rota: 400 e a sessão de quem tentou continua de pé
+    const u = await createUser(app, { roleId: 'administrador', name: 'Admin Pela Rota' })
+    const cookie = await sessionCookie(app, u.id, 'active', '10.1.1.1')
+    const cur = await api(app, 'GET', `/api/kv/${KEY}`, { cookie, ip: '10.1.1.1' })
+    expect(cur.statusCode, cur.body).toBe(200)
+    const put = await api(app, 'PUT', `/api/kv/${KEY}`, {
+      cookie,
+      ip: '10.1.1.1',
+      body: { value: { ...cur.json().value, enforce2faForAll: true }, version: cur.json().version },
+    })
+    expect(put.statusCode, put.body).toBe(400)
+    expect(put.json().error).toMatchObject({ code: 'dados_invalidos', details: { field: 'enforce2faForAll' } })
+    expect((await api(app, 'GET', '/api/auth/me', { cookie, ip: '10.1.1.1' })).statusCode).toBe(200)
+    expect((await app.db.one<{ enforce_2fa_all: boolean }>('select enforce_2fa_all from panel_security where id = 1'))?.enforce_2fa_all).toBe(false)
   })
 
   // Regressão r1-authz-9: Administrador (sem cargos.conceder) trancava todos os Superadmins fora do painel.

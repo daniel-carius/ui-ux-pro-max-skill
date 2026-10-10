@@ -1,4 +1,4 @@
-// Proteções de toda requisição: cabeçalhos, CORS, limite de taxa, CSRF e
+// Proteções de toda requisição: cabeçalhos (inclusive Cache-Control), CORS, limite de taxa, CSRF e
 // lista de IPs permitidos do painel.
 import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
@@ -12,6 +12,11 @@ import { ipAllowed, normalizeIp } from '../lib/ip'
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 /** Rotas públicas, fora das checagens abaixo (o HEALTHCHECK do contêiner chama a API direto, sem proxy). */
 const PUBLIC_ROUTES = new Set(['/api/health'])
+/**
+ * Fora da lista de IPs (CSRF e HTTPS continuam valendo): a saída só encerra a sessão do próprio cookie, e quem
+ * ficou de fora da lista (IP trocado, lista alterada) precisa conseguir sair. Método + padrão registrado da rota.
+ */
+const ALLOWLIST_EXEMPT = new Set(['POST /api/auth/logout'])
 
 let allowlistCache: { at: number; list: { value: string }[] } | null = null
 
@@ -49,7 +54,15 @@ export default fp(async function security(app: FastifyInstance) {
     if (requireHttps && req.protocol !== 'https') throw Errors.httpsRequired()
     // CSRF: o cookie é SameSite=Strict e toda escrita exige o cabeçalho do painel
     if (!SAFE_METHODS.has(req.method) && req.headers[SECURITY.csrfHeader] !== SECURITY.csrfValue) throw Errors.csrf()
+    if (ALLOWLIST_EXEMPT.has(`${req.method} ${req.routeOptions.url ?? ''}`)) return
     const list = await loadAllowlist(app)
     if (!ipAllowed(req.clientIp, list)) throw Errors.ipBlocked()
+  })
+
+  // Nenhuma resposta da API fica em cache do navegador ou de proxy: dados, saúde, 404, erros e rotas futuras.
+  // Rota que já definiu o próprio Cache-Control (ex.: exportação da auditoria) fica com o dela.
+  app.addHook('onSend', async (_req, reply, payload) => {
+    if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store')
+    return payload
   })
 })

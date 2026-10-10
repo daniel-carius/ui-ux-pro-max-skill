@@ -5,6 +5,8 @@
 // exclusão confirmava: a decisão inteira voltava atrás e quem aprovou recebia 500, com o saque ainda pendente.
 // enqueueWebhook agora trava os destinos que lê (FOR KEY SHARE) e enfileira só esses ids; a gravação da lista
 // trava os excluídos na mesma ordem (id), sem impasse.
+// Também aqui: aprovações simultâneas do mesmo jogador x limite diário (trava por jogador) e aprovação x lançamento no
+// extrato para outro jogador (as duas leem/travam extrato e base de jogadores na mesma ordem, sem impasse 40P01).
 //
 // O PGlite (memory://) tem uma conexão só: as duas transações nunca se sobrepõem lá. Este arquivo sobe um cluster
 // descartável do PostgreSQL 16 (initdb/pg_ctl), roda as migrações com o dono das tabelas e a API com x2win_app
@@ -20,7 +22,9 @@ import { join } from 'node:path'
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { DEFAULT_WITHDRAWAL_RULES } from '@shared/withdrawals'
 import { newId } from '../src/lib/crypto'
+import { RULES_SETTINGS_KEY } from '../src/modules/withdrawals/kv'
 import { api, createTestApp, loginAs } from './helpers'
 
 const PGBIN = process.env.X2W_PGBIN ?? '/usr/lib/postgresql/16/bin'
@@ -36,7 +40,11 @@ let admin: pg.Client
 let app: FastifyInstance
 let cookie = ''
 const dbErrors: DbError[] = []
-let gate: { parked: () => void; wait: Promise<void> } | null = null
+/**
+ * Para a transação logo depois da instrução que começa com `match` (padrão: o DELETE dos destinos) e, com `param`,
+ * cujo primeiro parâmetro é `param`.
+ */
+let gate: { parked: () => void; wait: Promise<void>; match?: string; param?: string } | null = null
 
 function asPostgres(cmd: string, args: string[]) {
   const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
@@ -56,7 +64,7 @@ function freePort(): Promise<number> {
   })
 }
 
-/** Envolve app.db.tx: anota erros do banco e, com `gate` armado, para a transação logo depois do DELETE dos destinos. */
+/** Envolve app.db.tx: anota erros do banco e, com `gate` armado, para a transação logo depois da instrução escolhida. */
 function installGate(a: FastifyInstance) {
   const db = a.db as unknown as { tx: <T>(fn: (t: unknown) => Promise<T>) => Promise<T> }
   const origTx = db.tx.bind(db)
@@ -74,7 +82,7 @@ function installGate(a: FastifyInstance) {
             dbErrors.push({ code: err.code, message: err.message, sql: sql.replace(/\s+/g, ' ').slice(0, 80) })
             throw e
           }
-          if (gate && sql.startsWith('delete from webhook_destinations')) {
+          if (gate && sql.startsWith(gate.match ?? 'delete from webhook_destinations') && (gate.param === undefined || params?.[0] === gate.param)) {
             const g = gate
             gate = null
             g.parked()
@@ -82,18 +90,22 @@ function installGate(a: FastifyInstance) {
           }
           return r
         },
+        async one(sql: string, params?: unknown[]) {
+          return ((await wrapped.query(sql, params)) as unknown[])[0] ?? null
+        },
       }
       return fn(wrapped)
     })
 }
 
-async function insertWithdrawal(a: FastifyInstance) {
+/** Saque de R$ 100 (jogador próprio por padrão: o limite diário de saques aprovados vale por jogador). */
+async function insertWithdrawal(a: FastifyInstance, playerId = newId('pl')) {
   const id = newId('SQ')
   await a.db.query(
     `insert into withdrawals (id, player_id, player_name, player_email, amount_cents, fee_cents, status, risk_level, risk_score,
                               risk_reasons, pix_key_type, pix_key_enc, reference, created_at, updated_at)
-     values ($1, 'p1', 'Jogador Teste', 'jogador@exemplo.com', 10000, 0, 'pendente', 'baixo', 10, '["motivo"]'::jsonb, 'CPF', $2, 'E123', now(), now())`,
-    [id, a.cipher.encrypt('12345678909')],
+     values ($1, $2, 'Jogador Teste', 'jogador@exemplo.com', 10000, 0, 'pendente', 'baixo', 10, '["motivo"]'::jsonb, 'CPF', $3, 'E123', now(), now())`,
+    [id, playerId, a.cipher.encrypt('12345678909')],
   )
   return id
 }
@@ -280,4 +292,101 @@ describe.skipIf(!HAVE_PG)('saque x exclusão concorrente do destino de webhook (
       expect([...new Set(dbErrors.map((e) => e.code))]).toEqual([])
     }
   }, 60_000)
+  // Limite diário de saques aprovados por jogador: duas aprovações de saques DIFERENTES do mesmo jogador travam
+  // linhas diferentes; sem a trava por jogador as duas contavam 0 aprovados e passavam juntas.
+  it('duas aprovações simultâneas do mesmo jogador com limite diário 1: a segunda espera a primeira e recebe 409 fora_das_regras', async () => {
+    dbErrors.length = 0
+    await app.db.query(`insert into settings (key, value) values ($1, $2::jsonb) on conflict (key) do update set value = excluded.value`, [
+      RULES_SETTINGS_KEY,
+      JSON.stringify({ version: 1, rules: { ...DEFAULT_WITHDRAWAL_RULES, dailyLimit: 1 } }),
+    ])
+    try {
+      const player = newId('pl')
+      const a = await insertWithdrawal(app, player)
+      const b = await insertWithdrawal(app, player)
+      // a aprovação de A para logo depois de contar os aprovados do jogador (sem confirmar)
+      let parked!: () => void
+      let release!: () => void
+      const isParked = new Promise<void>((r) => (parked = r))
+      gate = { parked, wait: new Promise<void>((r) => (release = r)), match: 'select count(*)::int as n from withdrawals' }
+      const first = api(app, 'POST', `/api/withdrawals/${a}/approve`, { cookie })
+      await isParked
+      const second = api(app, 'POST', `/api/withdrawals/${b}/approve`, { cookie })
+      const blocked = await waitFor(async () => {
+        const r = await admin.query(`select count(*)::int as n from pg_stat_activity where datname = 'x2win' and wait_event_type = 'Lock'`)
+        return r.rows[0].n >= 1
+      })
+      release()
+      const [ra, rb] = await Promise.all([first, second])
+      expect(blocked).toBe(true) // B esperou A (trava por jogador)
+      expect(ra.statusCode, ra.body).toBe(200)
+      expect(rb.statusCode, rb.body).toBe(409)
+      expect(rb.json().error).toMatchObject({ code: 'fora_das_regras', details: { rule: 'dailyLimit', limit: 1, count: 1 } })
+      const rows = await app.db.query<{ id: string; status: string }>('select id, status from withdrawals where id = any($1::text[]) order by id', [[a, b]])
+      expect(rows.map((r) => r.status).sort()).toEqual(['aprovado', 'pendente'])
+      expect(dbErrors).toEqual([])
+    } finally {
+      gate = null
+      await app.db.query('delete from settings where key = $1', [RULES_SETTINGS_KEY])
+    }
+  })
+
+  // Aprovação x lançamento no extrato para OUTRO jogador: as duas transações travam as mesmas linhas de kv_store (extrato
+  // e base de jogadores). O lançamento trava o extrato e depois a base (kv/transactions.ts); a aprovação lia a base
+  // (for share) antes do extrato: na ordem inversa, o PostgreSQL desfazia uma delas por impasse (40P01, 409 para quem
+  // salvou). A aprovação agora lê o extrato primeiro, na mesma ordem.
+  it('aprovar enquanto o extrato lança crédito manual para outro jogador: as duas passam, sem impasse (40P01)', async () => {
+    dbErrors.length = 0
+    const pa = newId('pl')
+    const pb = newId('pl')
+    const person = (id: string) => ({ id, name: `Jogador ${id}`, email: `${id}@exemplo.com`, status: 'ativo', balanceReal: 1000, balanceBonus: 0, tags: [] })
+    const seedKv = (key: string, value: unknown) =>
+      app.db.query(
+        `insert into kv_store (key, value, value_enc, version) values ($1, null, $2, 1)
+         on conflict (key) do update set value = null, value_enc = excluded.value_enc, version = kv_store.version + 1`,
+        [key, app.cipher.encrypt(JSON.stringify(value))],
+      )
+    await seedKv('geral.jogadores', [person(pa), person(pb)])
+    await seedKv('geral.transacoes', [])
+    await seedKv('seguranca.bloqueios', [])
+    const adm = (await loginAs(app, 'administrador', { totp: true, name: 'Adm Bruno' })).cookie
+    const wid = await insertWithdrawal(app, pa)
+    const ledger = await api(app, 'GET', '/api/kv/geral.transacoes', { cookie: adm })
+    expect(ledger.statusCode, ledger.body).toBe(200)
+    try {
+      // a aprovação para logo depois de ler a base de jogadores (for share), sem confirmar
+      let parked!: () => void
+      let release!: () => void
+      const isParked = new Promise<void>((r) => (parked = r))
+      gate = {
+        parked,
+        wait: new Promise<void>((r) => (release = r)),
+        match: 'select key, value, value_enc, version, updated_at from kv_store where key = $1 for share',
+        param: 'geral.jogadores',
+      }
+      const approve = api(app, 'POST', `/api/withdrawals/${wid}/approve`, { cookie })
+      await isParked
+      const credit = { id: newId('tx'), playerId: pb, type: 'credito_manual', amount: 50, wallet: 'real', reference: 'AJUSTE', note: 'ajuste' }
+      const save = api(app, 'PUT', '/api/kv/geral.transacoes', { cookie: adm, body: { value: [credit, ...ledger.json().value], version: ledger.json().version } })
+      const blocked = await waitFor(async () => {
+        const r = await admin.query(`select count(*)::int as n from pg_stat_activity where datname = 'x2win' and wait_event_type = 'Lock'`)
+        return r.rows[0].n >= 1
+      })
+      release()
+      const [ra, rs] = await Promise.all([approve, save])
+      expect(blocked).toBe(true) // o lançamento esperou a aprovação (sem isso o teste não exercita a corrida)
+      expect(ra.statusCode, ra.body).toBe(200)
+      expect(rs.statusCode, rs.body).toBe(200)
+      expect(dbErrors).toEqual([])
+      expect((await app.db.one<{ status: string }>('select status from withdrawals where id = $1', [wid]))?.status).toBe('aprovado')
+      const players = await app.db.one<{ value_enc: string }>(`select value_enc from kv_store where key = 'geral.jogadores'`)
+      const balances = (JSON.parse(app.cipher.decrypt(players!.value_enc)) as { id: string; balanceReal: number }[]).map((p) => [p.id, p.balanceReal])
+      expect(balances).toEqual([
+        [pa, 1000],
+        [pb, 1050],
+      ])
+    } finally {
+      gate = null
+    }
+  })
 })

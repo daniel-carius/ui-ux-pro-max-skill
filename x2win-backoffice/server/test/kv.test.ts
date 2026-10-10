@@ -181,7 +181,8 @@ describe('kv: acesso, chaves e versão', () => {
   })
 
   it('aceita qualquer JSON (objeto, lista, texto, número, null)', async () => {
-    const keys = ['campanhas.missoes', 'campanhas.templates', 'campanhas.roleta', 'campanhas.notificacoes.historico', 'campanhas.popups-inbox.popups', 'campanhas.popups-inbox.inbox']
+    // chaves sem regra de formato no servidor (missões, roleta e torneios têm validador: rules-campaigns.ts)
+    const keys = ['cassino.vitrines', 'campanhas.templates', 'config.suporte', 'campanhas.notificacoes.historico', 'campanhas.popups-inbox.popups', 'campanhas.popups-inbox.inbox']
     for (const [i, value] of [{ a: { b: [1, 2] } }, 'texto', 42, true, null, []].entries()) {
       const key = keys[i]
       const w = await put(app, admin.cookie, key, value)
@@ -192,7 +193,7 @@ describe('kv: acesso, chaves e versão', () => {
   })
 
   it('valida o corpo', async () => {
-    const key = 'campanhas.torneios'
+    const key = 'config.modulos'
     const cases: unknown[] = [{}, { version: 1 }, { value: 1, version: 'x' }, { value: 1, version: -1 }, { value: 1, version: 1.5 }, [1], 'texto']
     for (const body of cases) {
       const r = await api(app, 'PUT', `/api/kv/${key}`, { cookie: admin.cookie, body })
@@ -563,24 +564,24 @@ describe('kv: auditoria das gravações', () => {
   afterAll(async () => app.close())
 
   it('registra quem, IP, entidade e resumo (listas com id)', async () => {
-    const w1 = await put(app, admin.cookie, 'campanhas.missoes', [{ id: 'c1', v: 1 }, { id: 'c2', v: 1 }])
+    const w1 = await put(app, admin.cookie, 'campanhas.jornadas', [{ id: 'c1', v: 1 }, { id: 'c2', v: 1 }])
     expect(w1.statusCode).toBe(200)
     const a1 = await lastAudit(app)
     expect(a1).toMatchObject({
       actor_id: admin.user.id,
       action: 'editar',
-      entity: 'Dados · Missões',
-      summary: 'campanhas.missoes — Primeira gravação com 2 itens (v0→v1)',
+      entity: 'Dados · Jornadas',
+      summary: 'campanhas.jornadas — Primeira gravação com 2 itens (v0→v1)',
       ip: '127.0.0.1',
       source: 'servidor',
     })
-    const w2 = await put(app, admin.cookie, 'campanhas.missoes', [{ id: 'c1', v: 2 }, { id: 'c3', v: 1 }], 1)
+    const w2 = await put(app, admin.cookie, 'campanhas.jornadas', [{ id: 'c1', v: 2 }, { id: 'c3', v: 1 }], 1)
     expect(w2.statusCode).toBe(200)
-    expect((await lastAudit(app)).summary).toBe('campanhas.missoes — Itens: 1 incluído (c3); 1 alterado (c1); 1 removido (c2) (v1→v2)')
-    await put(app, admin.cookie, 'campanhas.missoes', [{ id: 'c3', v: 1 }, { id: 'c1', v: 2 }], 2)
-    expect((await lastAudit(app)).summary).toBe('campanhas.missoes — Itens: ordem alterada (v2→v3)')
-    await put(app, admin.cookie, 'campanhas.missoes', [{ id: 'c3', v: 1 }, { id: 'c1', v: 2 }], 3)
-    expect((await lastAudit(app)).summary).toBe('campanhas.missoes — Salvo sem alterações (v3→v4)')
+    expect((await lastAudit(app)).summary).toBe('campanhas.jornadas — Itens: 1 incluído (c3); 1 alterado (c1); 1 removido (c2) (v1→v2)')
+    await put(app, admin.cookie, 'campanhas.jornadas', [{ id: 'c3', v: 1 }, { id: 'c1', v: 2 }], 2)
+    expect((await lastAudit(app)).summary).toBe('campanhas.jornadas — Itens: ordem alterada (v2→v3)')
+    await put(app, admin.cookie, 'campanhas.jornadas', [{ id: 'c3', v: 1 }, { id: 'c1', v: 2 }], 3)
+    expect((await lastAudit(app)).summary).toBe('campanhas.jornadas — Salvo sem alterações (v3→v4)')
   })
 
   it('objetos: campos de 1º nível alterados', async () => {
@@ -588,7 +589,8 @@ describe('kv: auditoria das gravações', () => {
     expect((await lastAudit(app)).summary).toBe('config.empresa — Primeira gravação. Campos: name, cnpj, address (v0→v1)')
     await put(app, admin.cookie, 'config.empresa', { name: 'X2Win', cnpj: '11.111.111/0001-11', address: { city: 'RJ' }, phone: '1' }, 1)
     const a = await lastAudit(app)
-    expect(a.entity).toBe('Dados · Empresa e licença')
+    // config.empresa tem entidade própria na auditoria (rules-system.ts)
+    expect(a.entity).toBe('Empresa e licença')
     expect(a.summary).toBe('config.empresa — Campos alterados: cnpj, address, phone (incluído) (v1→v2)')
   })
 

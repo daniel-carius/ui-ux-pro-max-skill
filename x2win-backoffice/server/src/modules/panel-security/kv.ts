@@ -2,6 +2,7 @@
 // Formato do painel: { allowlist: [{ id, value, label, createdAt, createdBy }], enforce2faForAll, sessionTimeoutMinutes }.
 // Incluir ou retirar IPs da lista exige cargos.conceder (a lista pode deixar Superadmins de fora, como mexer
 // no cargo deles); descrição, 2FA para todos e tempo de inatividade seguem com seguranca-painel.editar.
+// Ligar o 2FA para todos exige que quem grava já tenha 2FA (senão a própria sessão cairia logo depois).
 // Recuperação sem SQL: PANEL_ALLOWLIST_RESET=<valor novo> no ambiente da API esvazia a lista na subida, uma vez
 // por valor, com auditoria (resetAllowlistFromEnv, chamada pelo bootstrap).
 import type { FastifyInstance } from 'fastify'
@@ -176,6 +177,13 @@ export const kvHandlers: KvHandlers = {
         // a lista de IPs vale para todos, inclusive Superadmins: mexer nela segue a regra de cargos administrativos
         if (allowlistValuesChanged(before.allowlist, input.allowlist) && !ctx.auth.perms.has(GRANT_PERM)) {
           throw Errors.forbidden('Só quem pode conceder cargos administrativos inclui ou retira IPs da lista de acesso do painel.')
+        }
+        // a sessão sem 2FA cai na requisição seguinte quando o 2FA passa a valer para todos (plugins/session)
+        if (input.enforce2faForAll && !before.enforce2faForAll && !ctx.auth.user.totpEnabled) {
+          throw Errors.invalid(
+            'Cadastre o 2FA na sua conta antes de exigir o 2FA de todos: sem ele, a sua sessão seria encerrada logo depois de salvar.',
+            { field: 'enforce2faForAll' },
+          )
         }
         const beforeById = new Map(before.allowlist.map((e) => [e.id, e]))
         const now = new Date().toISOString()

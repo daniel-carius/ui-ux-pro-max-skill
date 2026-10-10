@@ -1,6 +1,7 @@
 // Regras de status do jogador (jogo responsável, Lei 14.790/2023), aplicadas pelo
-// servidor nas gravações de geral.jogadores. Espelham statusActions do painel
-// (src/domain/geral.ts):
+// servidor nas gravações de geral.jogadores. A tabela de transições e a regra do
+// motivo ficam em shared/players.ts (mesmas regras de statusActions do painel,
+// src/domain/geral.ts):
 //  - autoexclusão é decisão do jogador: o painel não tira nem põe ninguém em
 //    'autoexcluido' (só a plataforma, quando o jogador pede ou o prazo acaba);
 //  - pausa pedida pelo jogador só termina no prazo; pausa sem registro conta como
@@ -15,48 +16,19 @@
 // jogador desde o início da pausa (com folga para o histórico chegar antes):
 // basta um registro de pedido do jogador ainda no prazo para a pausa não poder
 // ser encerrada. Registro novo só pode endurecer, nunca afrouxar.
+import { isPlayerStatus, STATUS_LABEL, STATUS_TRANSITIONS, type PlayerStatus } from '@shared/players'
 import { AppError } from '../../errors'
 import { isPlainObject, type JsonObject } from './json'
+
+// tabela de transições e regra do motivo "pedido do jogador": shared/players.ts (painel e servidor)
+export { isPlayerRequestedReason, isPlayerStatus, PAUSE_MAX_DAYS, PLAYER_STATUSES, STATUS_LABEL, STATUS_TRANSITIONS, type PlayerStatus } from '@shared/players'
 
 export const PLAYERS_KEY = 'geral.jogadores'
 export const PAUSES_KEY = 'geral.jogadores.pausas'
 export const STATUS_HISTORY_KEY = 'geral.usuarios.status'
 
-export const PLAYER_STATUSES = ['ativo', 'bloqueado', 'autoexcluido', 'pausa'] as const
-export type PlayerStatus = (typeof PLAYER_STATUSES)[number]
-
 /** Folga para o registro do histórico chegar antes da mudança de status (gravações paralelas do painel). */
 export const PAUSE_MATCH_WINDOW_MS = 10 * 60_000
-/** Prazo máximo de uma pausa lançada pelo painel (opções do painel: 24 h, 7 e 30 dias). */
-export const PAUSE_MAX_DAYS = 30
-
-const BOTH = ['usuarios.editar', 'antifraude.banir'] as const
-const EDIT = ['usuarios.editar'] as const
-
-/** Transições aceitas pelo painel e as permissões que autorizam cada uma (basta uma). */
-export const STATUS_TRANSITIONS: Record<PlayerStatus, Partial<Record<PlayerStatus, readonly string[]>>> = {
-  ativo: { pausa: EDIT, bloqueado: BOTH },
-  pausa: { ativo: EDIT, bloqueado: BOTH },
-  // bloqueado → pausa: desfazer o banimento de uma rede devolve o status de antes
-  bloqueado: { ativo: BOTH, pausa: BOTH },
-  autoexcluido: {},
-}
-
-export const STATUS_LABEL: Record<PlayerStatus, string> = {
-  ativo: 'ativo',
-  bloqueado: 'bloqueado',
-  autoexcluido: 'autoexcluído',
-  pausa: 'em pausa',
-}
-
-export function isPlayerStatus(v: unknown): v is PlayerStatus {
-  return typeof v === 'string' && (PLAYER_STATUSES as readonly string[]).includes(v)
-}
-
-/** Motivo de pausa que indica pedido do jogador (mesma regra do painel). */
-export function isPlayerRequestedReason(reason: unknown): boolean {
-  return typeof reason === 'string' && reason.trim().toLowerCase().startsWith('pedido do jogador')
-}
 
 /** Início da pausa em vigor de cada jogador. since null = pausa sem registro no servidor. */
 export interface PauseRecord {

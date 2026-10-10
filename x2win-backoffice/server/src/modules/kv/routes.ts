@@ -6,6 +6,8 @@
 //  - GET /api/kv/:key/history e /api/kv/:key/history/:entry: versões guardadas das
 //    chaves com `history` (quem lê a chave e vê a Auditoria);
 //  - POST /api/kv/afiliados.saques/:id/pay|reject (affiliate-withdrawals.ts);
+//  - POST /api/kv/afiliados.saques/:id/reveal e /api/kv/crescimento.afiliados/:id/reveal
+//    (dados de pagamento de um afiliado em claro, com auditoria; reveal.ts);
 //  - POST /api/kv/operacao.depositos/recheck (deposits.ts);
 //  - POST /api/kv/geral.jogadores/import e /api/kv/geral.transacoes/import
 //    (Superadmin com 2FA; players.ts e transactions.ts).
@@ -13,7 +15,7 @@
 // auditoria do servidor ('revelar'), uma vez por sessão e chave a cada 10 minutos.
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { canReadKey, canWriteKey, findKvRule, isLocalOnlyKey, seesOwnerPage, type KvRule } from '@shared/kv-registry'
+import { canReadKey, canWriteKey, findKvRule, isLocalOnlyKey, KV_BODY_LIMIT, seesOwnerPage, type KvRule } from '@shared/kv-registry'
 import type { KvGetResponse } from '@shared/api'
 import { AppError, Errors } from '../../errors'
 import { requireActive } from '../../http'
@@ -26,8 +28,10 @@ import { registerDepositRoutes } from './deposits'
 import { auditEntity, genericHandler } from './generic'
 import { kvHandlers as ggrKv } from './ggr'
 import { assertStorableJson } from './json'
+import { kvHandlers as projectionsKv } from './player-projections'
 import { kvHandlers as playersKv, registerPlayerImportRoute } from './players'
 import { project, readPolicy, redact } from './redact'
+import { registerRevealRoutes } from './reveal'
 import { kvHandlers as statusHistoryKv } from './status-history'
 import { decodeRow, encryptAtRest, encryptPlainRows, HISTORY_ENTRY, historyBaseKey, listHistory, loadHistory } from './store'
 import { kvHandlers as transactionsKv, registerTransactionImportRoute } from './transactions'
@@ -89,8 +93,16 @@ function countOf(v: unknown) {
 }
 
 export default async function routes(app: FastifyInstance, opts: { handlers?: KvHandlers }) {
-  // players/transactions/player-status/affiliates/ggr são deste módulo; os demais domínios vêm de app.ts
-  const handlers: KvHandlers = { ...playersKv, ...transactionsKv, ...statusHistoryKv, ...affiliatesKv, ...ggrKv, ...(opts.handlers ?? {}) }
+  // players/transactions/player-status/affiliates/ggr/player-projections são deste módulo; os demais domínios vêm de app.ts
+  const handlers: KvHandlers = {
+    ...playersKv,
+    ...transactionsKv,
+    ...statusHistoryKv,
+    ...affiliatesKv,
+    ...ggrKv,
+    ...projectionsKv,
+    ...(opts.handlers ?? {}),
+  }
 
   // leitura com dados pessoais em claro: um registro por sessão e chave a cada PII_READ_AUDIT_WINDOW_MS
   const piiReads = new Map<string, number>()
@@ -183,11 +195,13 @@ export default async function routes(app: FastifyInstance, opts: { handlers?: Kv
   })
 
   registerAffiliateWithdrawalRoutes(app)
+  registerRevealRoutes(app)
   registerDepositRoutes(app)
   registerPlayerImportRoute(app)
   registerTransactionImportRoute(app)
 
-  app.put('/:key', { config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (req, reply) => {
+  // corpo de até KV_BODY_LIMIT (imagens em data URL); o limite de cada chave é conferido depois (413)
+  app.put('/:key', { bodyLimit: KV_BODY_LIMIT, config: { rateLimit: { max: 240, timeWindow: '1 minute' } } }, async (req, reply) => {
     const { auth, key, rule } = resolve(req)
     if (!canWriteKey(rule, auth.perms)) {
       throw Errors.forbidden(rule.write === 'servidor' ? 'Estes dados são gravados só pelo servidor.' : 'Seu cargo não pode alterar estes dados.')

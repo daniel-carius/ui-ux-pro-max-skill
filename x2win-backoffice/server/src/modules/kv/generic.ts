@@ -2,7 +2,9 @@
 // versão, cifra em repouso para segredos/dados pessoais, restauração de valores
 // mascarados, validação das chaves com regra de negócio (validators.ts), limite de
 // tamanho por chave e auditoria com o resumo do que mudou e as versões (v1→v2):
-// cada linha da auditoria aponta para uma versão recuperável (rule.history).
+// cada linha da auditoria aponta para uma versão recuperável (rule.history). O
+// validador da chave pode trocar a ação e a entidade da linha (ex.: 'ligar' em
+// "Modo de ataque"); continua uma linha por gravação.
 import { KV_DEFAULT_MAX_BYTES, type KvRule } from '@shared/kv-registry'
 import { PAGE_INFO_BY_ID } from '@shared/pages'
 import { AppError } from '../../errors'
@@ -11,7 +13,7 @@ import { writeAudit } from '../../services/audit'
 import { summarizeChange } from './json'
 import { restoreMasked, writePolicy } from './redact'
 import { assertVersion, decodeRow, encryptAtRest, loadRow, saveRow, storedValue } from './store'
-import { validatorFor } from './validators'
+import { validatorFor, type KvCheckResult } from './validators'
 
 /** Entidade da auditoria: "Dados · <título da tela>". */
 export function auditEntity(page: string) {
@@ -58,17 +60,19 @@ export const genericHandler: Required<KvHandler> = {
       const stored = storedValue(row, app.cipher)
       let next = restoreMasked(value, stored, writePolicy(rule))
       let detail: string | undefined
+      let as: KvCheckResult['audit']
       const validate = validatorFor(key)
       if (validate) {
         const r = await validate({ t, app, auth, key, stored, next, now: Date.now() })
         next = r.value
         detail = r.summary
+        as = r.audit
       }
       assertSize(next, rule)
       const saved = await saveRow(t, app.cipher, key, next, encryptAtRest(rule), row, auth.user.id)
       await writeAudit(t, auth, {
-        action: 'editar',
-        entity: auditEntity(rule.page),
+        action: as?.action ?? 'editar',
+        entity: as?.entity ?? auditEntity(rule.page),
         summary: auditSummary(key, detail ?? summarizeChange(stored, next), row?.version ?? 0, saved.version),
       })
       return { value: next, version: saved.version, updatedAt: saved.updatedAt }
