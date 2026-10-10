@@ -47,7 +47,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: x2win-backoffice/server/package-lock.json
+          cache-dependency-path: |
+            x2win-backoffice/package-lock.json
+            x2win-backoffice/server/package-lock.json
+      # alguns testes do servidor exercitam código do painel (store, sessão, dados de demonstração)
+      - name: Dependências do painel
+        run: npm ci
+        working-directory: x2win-backoffice
       - run: npm ci
       - run: npx tsc --noEmit -p .
       - run: npx vitest run

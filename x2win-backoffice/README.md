@@ -231,6 +231,9 @@ npm run typecheck                 # painel
 cd server && npm run typecheck && npm test && npm run build
 ```
 
+Os testes do servidor também exercitam código do painel (store, sessão, dados de demonstração): rode
+`npm install` na pasta do painel antes de `npm test`.
+
 O CI do GitHub (`.github/workflows/x2win-backoffice.yml`) roda tudo isso a cada push nesta pasta.
 
 ## Próximos passos para produção
