@@ -102,7 +102,7 @@ src/
       - 400 `dados_invalidos` com `details.field` (ou 403 que aponta um campo, como `teto_excedido`): mostre ao
         lado do campo. Formulário: `useSettingsForm(key, padrao, { quiet })` e `form.error` (o rascunho fica na
         tela). Outra gravação: `dbSetAndWaitResult(key, next, seed, { quiet })`, que devolve o `ApiError`. Com
-        `quiet`, o erro não vira o aviso "Alteração desfeita". Credenciais: `saveKeyDirect`/`saveCredentialsDirect`
+        `quiet`, o erro não vira o aviso "Alteração não salva". Credenciais: `saveKeyDirect`/`saveCredentialsDirect`
         (`dbSaveDirect`) e `isDestinationChanged` (`details.reason: 'destino_mudou'`);
       - 403 `sem_permissao`, `campo_nao_permitido`, `transicao_nao_permitida`, `teto_excedido`,
         `segregacao_funcoes`: a ação não foi feita; mostre o motivo;

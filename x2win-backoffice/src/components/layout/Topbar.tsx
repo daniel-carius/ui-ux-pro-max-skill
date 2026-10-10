@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Search,
   ShieldAlert,
+  ShieldCheck,
   Siren,
   Sun,
   UserRound,
@@ -20,12 +21,13 @@ import {
   Globe2,
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { brl, date, relative } from '@/lib/format'
+import { brl, date, plural, relative } from '@/lib/format'
 import { useTheme } from '@/lib/theme'
 import { isApiMode } from '@/lib/api'
 import { resetDb } from '@/lib/store'
-import { useAuthApi, useRoles, useSession, useTeam } from '@/domain/session'
+import { canSimulate, useAuthApi, useRoles, useSession, useTeam } from '@/domain/session'
 import { useAttackMode, useMaintenance, usePanelSecurity } from '@/domain/system'
+import { riskyMembers } from '@/domain/config2-access'
 import { INVOICES_KEY, type Invoice } from '@/domain/config1-faturas'
 import { seedInvoices } from '@/data/config1-faturas'
 import { useCollection } from '@/lib/store'
@@ -34,6 +36,10 @@ import { Avatar, IconButton, Menu, Popover, confirm, toast, type MenuEntry } fro
 
 // só no modo API (carregado ao abrir)
 const ChangePasswordModal = lazy(() => import('@/pages/auth/ChangePasswordPage').then((m) => ({ default: m.ChangePasswordModal })))
+const EnableTwoFactorModal = lazy(() => import('@/pages/auth/EnableTwoFactorModal').then((m) => ({ default: m.EnableTwoFactorModal })))
+
+/** Saque aberto (ainda sem decisão): mesma lista de Saques. */
+const OPEN_WITHDRAWAL: readonly string[] = ['criado', 'pendente', 'em_analise']
 
 // modo API: faturas só do servidor (sem nada gravado, nenhum aviso de fatura)
 const NO_INVOICES: Invoice[] = []
@@ -50,15 +56,25 @@ interface Notice {
 function useNotices(): Notice[] {
   const { items: withdrawals } = useWithdrawals()
   const [team] = useTeam()
+  const [roles] = useRoles()
   const [panel] = usePanelSecurity()
   const { can } = useSession()
   const { items: invoices } = useCollection<Invoice>(INVOICES_KEY, isApiMode() ? NO_INVOICES : seedInvoices)
   return useMemo(() => {
     const out: Notice[] = []
-    const late = withdrawals.filter((w) => w.status === 'em_analise' || (w.status === 'pendente' && Date.now() - new Date(w.createdAt).getTime() > 24 * 3600_000))
+    // mesma regra e mesmas palavras de Saques ("Abertos há +24 h"): qualquer saque aberto criado há mais de 24 h
+    const late = withdrawals.filter((w) => OPEN_WITHDRAWAL.includes(w.status) && Date.now() - new Date(w.createdAt).getTime() > 24 * 3600_000)
     if (late.length && can('saques.ver'))
-      out.push({ id: 'late', icon: Clock, tone: 'warning', title: `${late.length} saques em análise há mais de 24 h`, detail: 'Decida para não estourar o prazo do jogador.', to: '/system/saques' })
-    const admins = team.filter((m) => m.status === 'ativo' && !m.twoFactor && ['superadmin', 'administrador', 'adm', 'financeiro'].includes(m.roleId))
+      out.push({
+        id: 'late',
+        icon: Clock,
+        tone: 'warning',
+        title: `${plural(late.length, 'saque aberto', 'saques abertos')} há mais de 24 h`,
+        detail: 'Decida para não estourar o prazo do jogador.',
+        to: '/system/saques',
+      })
+    // mesma definição de Equipe e Cargos (acesso amplo pelas permissões do cargo, não por uma lista fixa)
+    const admins = riskyMembers(team, roles).map((r) => r.member)
     if (admins.length && can('equipe.ver'))
       out.push({ id: '2fa', icon: KeyRound, tone: 'danger', title: `${admins.length} ${admins.length === 1 ? 'pessoa' : 'pessoas'} com acesso amplo sem 2FA`, detail: admins.map((a) => a.name).join(', '), to: '/settings/equipe' })
     if (!panel.allowlist.length && can('seguranca-painel.ver'))
@@ -77,7 +93,7 @@ function useNotices(): Notice[] {
       })
     }
     return out
-  }, [withdrawals, team, panel, can, invoices])
+  }, [withdrawals, team, roles, panel, can, invoices])
 }
 
 function StatusPill() {
@@ -85,17 +101,34 @@ function StatusPill() {
   // só leitura de `active`: quem não vê a tela Manutenção recebe do servidor só {active, message,
   // returnAt, since} (sem o link de testes); a barra nunca grava este valor
   const [maint] = useMaintenance()
-  if (attack.active)
+  // os dois estados podem valer juntos: a equipe precisa ver os dois (manutenção para depósitos, saques e jogos)
+  if (attack.active || maint.active)
     return (
-      <Link to="/settings/modo-ataque" className="inline-flex h-8 items-center gap-1.5 rounded-full bg-danger/10 px-3 text-xs font-semibold text-danger ring-1 ring-inset ring-danger/25 hover:bg-danger/15">
-        <Siren size={14} className="animate-pulse" aria-hidden /> Modo de ataque ligado
-      </Link>
-    )
-  if (maint.active)
-    return (
-      <Link to="/settings/manutencao" className="inline-flex h-8 items-center gap-1.5 rounded-full bg-warning/10 px-3 text-xs font-semibold text-warning ring-1 ring-inset ring-warning/25 hover:bg-warning/15">
-        <Construction size={14} aria-hidden /> Site em manutenção
-      </Link>
+      <span className="flex items-center gap-1.5">
+        {attack.active && (
+          <Link
+            to="/settings/modo-ataque"
+            title="Modo de ataque ligado"
+            aria-label="Modo de ataque ligado"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-danger/10 px-2.5 sm:px-3 text-xs font-semibold text-danger ring-1 ring-inset ring-danger/25 hover:bg-danger/15"
+          >
+            <Siren size={14} className="shrink-0 animate-pulse" aria-hidden />
+            {/* no celular só o ícone (o nome fica no title e no aria-label): o texto quebrava em duas linhas e esmagava a busca */}
+            <span className="hidden whitespace-nowrap sm:inline">Modo de ataque ligado</span>
+          </Link>
+        )}
+        {maint.active && (
+          <Link
+            to="/settings/manutencao"
+            title="Site em manutenção"
+            aria-label="Site em manutenção"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-warning/10 px-2.5 sm:px-3 text-xs font-semibold text-warning ring-1 ring-inset ring-warning/25 hover:bg-warning/15"
+          >
+            <Construction size={14} className="shrink-0" aria-hidden />
+            <span className="hidden whitespace-nowrap sm:inline">Site em manutenção</span>
+          </Link>
+        )}
+      </span>
     )
   return (
     <span className="hidden h-8 items-center gap-1.5 rounded-full bg-success/10 px-3 text-xs font-semibold text-success ring-1 ring-inset ring-success/20 sm:inline-flex">
@@ -116,11 +149,15 @@ export function Topbar({ onOpenMenu, onOpenSearch }: { onOpenMenu: () => void; o
   const navigate = useNavigate()
   const auth = useAuthApi()
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [twoFactorOpen, setTwoFactorOpen] = useState(false)
+  // 2FA voluntário: para quem o cargo não exige (quem é exigido cadastra no login)
+  const without2fa = auth.enabled && !!auth.me && !auth.me.user.twoFactor
 
   // modo API: conta real (trocar senha, sair de verdade); sem dados de demonstração para restaurar
   const accountMenu: MenuEntry[] = auth.enabled
     ? [
         { heading: 'Sua conta' },
+        ...(without2fa ? [{ label: 'Ativar 2FA', icon: ShieldCheck, onSelect: () => setTwoFactorOpen(true) }] : []),
         { label: 'Trocar senha', icon: KeyRound, onSelect: () => setPasswordOpen(true) },
         { label: 'Sair', icon: LogOut, danger: true, onSelect: () => void auth.logout() },
       ]
@@ -144,9 +181,11 @@ export function Topbar({ onOpenMenu, onOpenSearch }: { onOpenMenu: () => void; o
         { label: 'Sair', icon: LogOut, danger: true, onSelect: () => toast.info('Sessão encerrada (demonstração)') },
       ]
 
+  // só cargos que cabem nas suas permissões: "ver como" um cargo maior mostraria o nome dele sem as telas dele
+  const viewableRoles = roles.filter((r) => r.id === realRole.id || canSimulate(realRole, r))
   const viewAsMenu: MenuEntry[] = [
     { heading: 'Ver painel como cargo' },
-    ...roles.map((r) => ({
+    ...viewableRoles.map((r) => ({
       label: (
         <span className="flex items-center justify-between gap-2">
           {r.name}
@@ -166,8 +205,8 @@ export function Topbar({ onOpenMenu, onOpenSearch }: { onOpenMenu: () => void; o
     { divider: true },
   ]
 
-  // sem a lista de cargos (modo API, falha ao carregar), o menu mostra só a conta
-  const userMenu: MenuEntry[] = [...(roles.length ? viewAsMenu : []), ...accountMenu]
+  // sem a lista de cargos (modo API, falha ao carregar) ou sem outro cargo para simular, o menu mostra só a conta
+  const userMenu: MenuEntry[] = [...(viewableRoles.length > 1 ? viewAsMenu : []), ...accountMenu]
 
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-bg/85 backdrop-blur-md">
@@ -186,9 +225,10 @@ export function Topbar({ onOpenMenu, onOpenSearch }: { onOpenMenu: () => void; o
         <button
           type="button"
           onClick={onOpenSearch}
-          className="flex h-10 min-w-0 flex-1 items-center gap-2.5 rounded-xl border border-line bg-surface px-3 text-sm text-fg-3 shadow-sm transition-colors hover:border-line-strong sm:max-w-md lg:hidden"
+          aria-label="Buscar páginas"
+          className="flex h-10 min-w-[2.5rem] flex-1 items-center gap-2.5 rounded-xl border border-line bg-surface px-3 text-sm text-fg-3 shadow-sm transition-colors hover:border-line-strong sm:max-w-md lg:hidden"
         >
-          <Search size={16} aria-hidden />
+          <Search size={16} className="shrink-0" aria-hidden />
           <span className="truncate">Buscar páginas</span>
         </button>
         <div className="hidden min-w-0 flex-1 items-center gap-2 text-sm text-fg-3 lg:flex">
@@ -291,6 +331,11 @@ export function Topbar({ onOpenMenu, onOpenSearch }: { onOpenMenu: () => void; o
       {auth.enabled && passwordOpen && (
         <Suspense fallback={null}>
           <ChangePasswordModal open onClose={() => setPasswordOpen(false)} />
+        </Suspense>
+      )}
+      {auth.enabled && twoFactorOpen && auth.me && (
+        <Suspense fallback={null}>
+          <EnableTwoFactorModal open email={auth.me.user.email} onClose={() => setTwoFactorOpen(false)} />
         </Suspense>
       )}
     </header>

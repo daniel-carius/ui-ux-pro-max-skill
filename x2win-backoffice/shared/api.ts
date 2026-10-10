@@ -39,6 +39,59 @@ export interface MeResponse {
   sessionTimeoutMinutes?: number
 }
 
+/**
+ * Por que a sessão deste cookie terminou (GET /api/auth/session e details.reason do 401 nao_autenticado):
+ *  - inatividade: passou do tempo sem uso de Segurança do painel;
+ *  - expirada: passou da validade máxima (12 h) ou da etapa pendente do login;
+ *  - saida: a pessoa saiu (em outra aba);
+ *  - outro_login: um login novo neste navegador encerrou a sessão anterior;
+ *  - senha_trocada: a senha foi trocada em outra sessão;
+ *  - senha_redefinida: um administrador gerou uma senha temporária;
+ *  - desativado: o acesso foi desativado em Equipe;
+ *  - 2fa_exigido: o cargo passou a exigir 2FA e a pessoa ainda não tem;
+ *  - 2fa_exigido_todos: "2FA de todos" (Segurança do painel) foi ligado e a pessoa ainda não tem 2FA;
+ *  - 2fa_redefinido: um administrador redefiniu o 2FA;
+ *  - 2fa_ligado: a pessoa ligou o 2FA em outra sessão;
+ *  - bloqueio: senha atual ou código errados demais com a sessão aberta (acesso bloqueado por um tempo).
+ */
+export type SessionEndReason =
+  | 'inatividade'
+  | 'expirada'
+  | 'saida'
+  | 'outro_login'
+  | 'senha_trocada'
+  | 'senha_redefinida'
+  | 'desativado'
+  | '2fa_exigido'
+  | '2fa_exigido_todos'
+  | '2fa_redefinido'
+  | '2fa_ligado'
+  | 'bloqueio'
+
+export const SESSION_END_REASONS: readonly SessionEndReason[] = [
+  'inatividade',
+  'expirada',
+  'saida',
+  'outro_login',
+  'senha_trocada',
+  'senha_redefinida',
+  'desativado',
+  '2fa_exigido',
+  '2fa_exigido_todos',
+  '2fa_redefinido',
+  '2fa_ligado',
+  'bloqueio',
+]
+
+/**
+ * GET /api/auth/session: "há sessão?" sem erro. 200 sempre (fora a lista de IPs): `session` é o mesmo corpo de
+ * /me, ou null sem sessão; `ended` diz por que a sessão deste cookie terminou (ausente sem cookie ou sem motivo).
+ */
+export interface SessionResponse {
+  session: MeResponse | null
+  ended?: SessionEndReason
+}
+
 export interface LoginRequest {
   email: string
   password: string
@@ -145,6 +198,14 @@ export interface CreateMemberResponse {
   temporaryPassword: string
 }
 
+/** POST /api/team/:id/reset-password: senha temporária nova (mostrada uma vez), troca obrigatória e sessões encerradas. */
+export interface ResetPasswordResponse {
+  member: Record<string, unknown>
+  temporaryPassword: string
+  /** sessões da pessoa encerradas agora */
+  sessionsEnded: number
+}
+
 export interface InviteMemberRequest {
   email: string
   roleId: string
@@ -173,3 +234,6 @@ export interface ChangeMemberRoleRequest {
 export interface WebhookTestResponse {
   execution: Record<string, unknown>
 }
+
+/** Tentativas de uma entrega da fila (a primeira e mais 5, com espera crescente). Mesmo valor no painel e no servidor. */
+export const WEBHOOK_MAX_ATTEMPTS = 6

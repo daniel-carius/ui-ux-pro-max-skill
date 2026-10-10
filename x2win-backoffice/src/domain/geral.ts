@@ -8,7 +8,16 @@ import { cpf as fmtCpf } from '@/lib/format'
 export const GERAL_KEYS = {
   /** histórico de mudanças de status feitas pela equipe */
   statusHistory: 'geral.usuarios.status',
+  /** modo API: contas de redes banidas (jogador, rede e data), visão do servidor para quem não lê o Anti-fraude */
+  bannedNetworks: 'geral.jogadores.redes-banidas',
 } as const
+
+/** Linha de geral.jogadores.redes-banidas. */
+export interface BannedNetworkAccount {
+  playerId: string
+  network: string
+  bannedAt: string | null
+}
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 
@@ -216,12 +225,26 @@ export function walletBalance(p: Pick<Player, 'balanceReal' | 'balanceBonus'>, w
   return wallet === 'real' ? p.balanceReal : p.balanceBonus
 }
 
-/** Erros por campo (validação em linha). Vazio = pode lançar. */
-export function validateManualAdjust(input: ManualAdjustInput, p: Player): Partial<Record<'amount' | 'reason' | 'note' | 'kind', string>> {
+/** Teto de creditações manuais por jogador em 24 horas (mesmo valor do servidor: MANUAL_CREDIT_DAILY_LIMIT). */
+export const MANUAL_CREDIT_DAILY_LIMIT = MANUAL_ADJUST_LIMIT
+
+/** Soma das creditações manuais do jogador nas últimas 24 horas (como o servidor conta). */
+export function manualCreditsLast24h(txs: Pick<Transaction, 'playerId' | 'type' | 'amount' | 'at'>[], playerId: string, now = Date.now()) {
+  const since = now - 24 * 3600_000
+  return round2(txs.filter((t) => t.playerId === playerId && t.type === 'credito_manual' && new Date(t.at).getTime() >= since).reduce((s, t) => s + Math.abs(t.amount), 0))
+}
+
+/**
+ * Erros por campo (validação em linha). Vazio = pode lançar. `creditedLast24h`: creditações manuais do jogador nas
+ * últimas 24 h (a demonstração aplica a mesma regra do servidor; no modo API o servidor confere de novo).
+ */
+export function validateManualAdjust(input: ManualAdjustInput, p: Player, creditedLast24h = 0): Partial<Record<'amount' | 'reason' | 'note' | 'kind', string>> {
   const e: Partial<Record<'amount' | 'reason' | 'note' | 'kind', string>> = {}
   if (!(input.amount > 0)) e.amount = 'Informe um valor maior que zero.'
   else if (Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 1e-6) e.amount = 'Use no máximo duas casas decimais.'
   else if (input.amount > MANUAL_ADJUST_LIMIT) e.amount = `O teto por lançamento é R$ ${MANUAL_ADJUST_LIMIT.toLocaleString('pt-BR')},00.`
+  else if (input.kind === 'credito' && creditedLast24h + input.amount > MANUAL_CREDIT_DAILY_LIMIT)
+    e.amount = `As creditações manuais de um jogador somam no máximo ${MANUAL_CREDIT_DAILY_LIMIT.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })} em 24 horas (já lançado: ${creditedLast24h.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}). Acima disso, o ajuste vai pelo financeiro com documento.`
   else if (input.kind === 'debito' && input.amount > walletBalance(p, input.wallet))
     e.amount = `O saldo ${input.wallet === 'real' ? 'real' : 'bônus'} é de ${walletBalance(p, input.wallet).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}.`
   if (!input.reason) e.reason = 'Escolha o motivo.'

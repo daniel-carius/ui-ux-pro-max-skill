@@ -131,9 +131,9 @@ export default function RankingAfiliados() {
         </span>
       ),
     },
-    { id: 'deposited', header: 'Valor depositado', align: 'right', sortValue: (r) => r.deposited, csv: (r) => r.deposited.toFixed(2), cell: (r) => <span className="font-semibold">{brl(r.deposited)}</span> },
+    { id: 'deposited', money: true, header: 'Valor depositado', align: 'right', sortValue: (r) => r.deposited, csv: (r) => r.deposited.toFixed(2), cell: (r) => <span className="font-semibold">{brl(r.deposited)}</span> },
     {
-      id: 'cpa',
+      id: 'cpa', money: true,
       header: 'CPA',
       align: 'right',
       sortValue: (r) => r.cpaTotal,
@@ -146,7 +146,7 @@ export default function RankingAfiliados() {
       ),
     },
     {
-      id: 'rev',
+      id: 'rev', money: true,
       header: 'Rev Share',
       align: 'right',
       sortValue: (r) => r.revShareValue,
@@ -161,14 +161,14 @@ export default function RankingAfiliados() {
       ),
     },
     {
-      id: 'commission',
+      id: 'commission', money: true,
       header: 'Comissão total',
       align: 'right',
       sortValue: (r) => r.commission,
       csv: (r) => r.commission.toFixed(2),
       cell: (r) => <span className="font-bold text-primary-text">{brl(r.commission)}</span>,
     },
-    { id: 'ggr', header: 'GGR dos indicados', align: 'right', defaultHidden: true, sortValue: (r) => r.ggr, csv: (r) => r.ggr.toFixed(2), cell: (r) => brl(r.ggr) },
+    { id: 'ggr', money: true, header: 'GGR dos indicados', align: 'right', defaultHidden: true, sortValue: (r) => r.ggr, csv: (r) => r.ggr.toFixed(2), cell: (r) => brl(r.ggr) },
     { id: 'total', header: 'Indicados (total)', align: 'right', defaultHidden: true, sortValue: (r) => r.totalReferred, cell: (r) => num(r.totalReferred) },
   ]
 

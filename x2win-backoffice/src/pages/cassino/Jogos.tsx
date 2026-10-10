@@ -51,9 +51,11 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, date, num, numCompact, relative } from '@/lib/format'
 import { useDb } from '@/lib/store'
+import { csvMoney } from '@/lib/csv-format'
 import { useAggregators, useGames, useProviders } from '@/data/hooks'
 import { GAME_CATEGORY_LABEL, type Game, type GameCategory, type Provider } from '@/data/catalog'
 import { gameStatsForPeriod, getDailySeries, sumSeries, type GameStat } from '@/data/metrics'
+import { isApiMode } from '@/lib/api'
 import { CASSINO_KEYS, seedGameBadges } from '@/data/cassino'
 import { audit, usePageAccess } from '@/domain/session'
 import { reconcileStats } from '@/domain/ggr'
@@ -77,9 +79,15 @@ const STATUS_LABEL: Record<StatusFilter, string> = { todos: 'Todas as situaçõe
 const EXTRA_BADGES: GameBadge[] = ['em_alta', 'exclusivo', 'jackpot']
 const NO_EDIT = 'Seu cargo pode ver, mas não editar jogos'
 
-/** Desempenho de cada jogo nos últimos 30 dias (mesma base do GGR). */
+/**
+ * Desempenho de cada jogo nos últimos 30 dias (mesma base do GGR). Modo API: o serviço de métricas da plataforma
+ * ainda não está conectado, então não há número (a coluna e o bloco da ficha somem; nada gerado no navegador).
+ */
+const HAS_METRICS = !isApiMode()
+
 function useStats30() {
   return useMemo(() => {
+    if (!HAS_METRICS) return new Map<string, GameStat & { rank: number }>()
     const t = sumSeries(getDailySeries().slice(-30))
     const list = reconcileStats(gameStatsForPeriod(t.casinoBets, t.casinoWins, 30), t.casinoBets, t.casinoWins).sort((a, b) => b.ggr - a.ggr)
     return new Map(list.map((s, i) => [s.gameId, { ...s, rank: i + 1 }]))
@@ -251,13 +259,17 @@ export default function Jogos() {
         </div>
       ),
     },
-    {
-      id: 'ggr30',
-      header: 'GGR 30 dias',
-      align: 'right',
-      sortValue: (g) => stats30.get(g.id)?.ggr ?? 0,
-      cell: (g) => <span className="tnum">{brlCompact(stats30.get(g.id)?.ggr ?? 0)}</span>,
-    },
+    ...(HAS_METRICS
+      ? [
+          {
+            id: 'ggr30', money: true,
+            header: 'GGR 30 dias',
+            align: 'right',
+            sortValue: (g) => stats30.get(g.id)?.ggr ?? 0,
+            cell: (g) => <span className="tnum">{brlCompact(stats30.get(g.id)?.ggr ?? 0)}</span>,
+          } satisfies Column<Game>,
+        ]
+      : []),
     {
       id: 'badges',
       header: 'Selos',
@@ -295,7 +307,7 @@ export default function Jogos() {
         )
       },
     },
-    { id: 'bets', header: 'Aposta mín–máx', defaultHidden: true, csv: (g) => `${g.minBet}–${g.maxBet}`, cell: (g) => <span className="text-fg-2 tnum">{`${brl(g.minBet)} – ${brl(g.maxBet)}`}</span> },
+    { id: 'bets', header: 'Aposta mín–máx', defaultHidden: true, csv: (g) => `${csvMoney(g.minBet)} – ${csvMoney(g.maxBet)}`, cell: (g) => <span className="text-fg-2 tnum">{`${brl(g.minBet)} – ${brl(g.maxBet)}`}</span> },
     { id: 'createdAt', header: 'No catálogo desde', defaultHidden: true, sortValue: (g) => g.createdAt, csv: (g) => date(g.createdAt), cell: (g) => <span className="text-fg-2">{date(g.createdAt)}</span> },
     {
       id: 'active',

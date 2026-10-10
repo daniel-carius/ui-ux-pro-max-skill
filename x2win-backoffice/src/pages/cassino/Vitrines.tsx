@@ -225,11 +225,12 @@ export default function Vitrines() {
                   const short = r && r.games.length < s.limit
                   return (
                     <div className={cn('min-w-0 py-1', !s.visible && 'opacity-60')}>
-                      <div className="flex items-start gap-3">
+                      {/* no celular os botões descem para a linha de baixo: o nome e o resumo ficavam numa coluna de 40 px */}
+                      <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5 sm:flex-nowrap">
                         <span className="mt-0.5 hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary-text sm:flex">
                           <Icon size={17} aria-hidden />
                         </span>
-                        <div className="min-w-0 flex-1">
+                        <div className="min-w-[11rem] flex-1">
                           <p className="flex flex-wrap items-center gap-1.5">
                             <span className="truncate text-sm font-semibold text-fg">{s.name}</span>
                             {!s.visible && (
@@ -251,7 +252,7 @@ export default function Vitrines() {
                             </span>
                           </p>
                         </div>
-                        <div className="flex shrink-0 items-center gap-1">
+                        <div className="ml-auto flex shrink-0 items-center gap-1">
                           <span title={!canEdit ? NO_EDIT : s.visible ? 'Ocultar da home' : 'Exibir na home'} className="mr-1 inline-flex">
                             <Switch size="sm" checked={s.visible} onChange={(v) => toggleVisible(s, v)} disabled={!canEdit} ariaLabel={`${s.visible ? 'Ocultar' : 'Exibir'} ${s.name} na home`} />
                           </span>

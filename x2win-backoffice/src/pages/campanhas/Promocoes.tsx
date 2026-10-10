@@ -400,7 +400,7 @@ export default function Promocoes() {
     },
     { id: 'participants', header: 'Participantes', align: 'right', sortValue: (r) => r.participants, cell: (r) => num(r.participants) },
     {
-      id: 'cost',
+      id: 'cost', money: true,
       header: 'Custo',
       align: 'right',
       minWidth: 140,
@@ -417,7 +417,7 @@ export default function Promocoes() {
         </div>
       ),
     },
-    { id: 'budget', header: 'Orçamento', align: 'right', defaultHidden: true, sortValue: (r) => r.budget, cell: (r) => (r.budget ? brl(r.budget) : '—') },
+    { id: 'budget', money: true, header: 'Orçamento', align: 'right', defaultHidden: true, sortValue: (r) => r.budget, cell: (r) => (r.budget ? brl(r.budget) : '—') },
     { id: 'createdBy', header: 'Criada por', defaultHidden: true, sortValue: (r) => r.createdBy, cell: (r) => <span className="text-[13px] text-fg-2">{r.createdBy}</span> },
   ]
 

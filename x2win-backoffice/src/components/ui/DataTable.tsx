@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { exportCsv } from '@/lib/csv'
+import { csvMoney } from '@/lib/csv-format'
 import { num } from '@/lib/format'
 import { Button, IconButton } from './Button'
 import { Checkbox } from './Controls'
@@ -29,8 +30,10 @@ export interface Column<T> {
   cell?: (row: T) => ReactNode
   /** valor para ordenar; sem ele a coluna não ordena */
   sortValue?: (row: T) => number | string | null | undefined
-  /** valor no CSV; padrão: sortValue ou texto simples */
-  csv?: (row: T) => string | number | null | undefined
+  /** valor no CSV; padrão: sortValue ou texto simples. `false`: coluna só de tela (botões), fora do CSV */
+  csv?: ((row: T) => string | number | null | undefined) | false
+  /** valor em reais: no CSV sai sempre com duas casas no padrão brasileiro ("200,00", "13.714,70") */
+  money?: boolean
   align?: 'left' | 'right' | 'center'
   /** largura mínima em px */
   minWidth?: number
@@ -43,6 +46,8 @@ export interface Column<T> {
   label?: string
   /** permite quebrar linha (padrão: não quebra) */
   wrap?: boolean
+  /** vai para o CSV mesmo escondida na tela (ex.: e-mail e id de quem fez, na Auditoria) */
+  exportAlways?: boolean
 }
 
 export interface DataTableProps<T> {
@@ -83,6 +88,20 @@ export function normalize(s: string) {
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
+}
+
+function rawCsvValue<T>(c: Column<T>, r: T): string | number | null | undefined {
+  if (c.csv) return c.csv(r)
+  if (c.sortValue) return c.sortValue(r)
+  const v = (r as Record<string, unknown>)[c.id]
+  return typeof v === 'string' || typeof v === 'number' ? v : ''
+}
+
+/** Valor em reais do CSV: número (ou "1234.5" de toFixed) vira "1.234,50"; texto pronto fica como está. */
+function moneyCell(v: string | number | null | undefined): string | number | null | undefined {
+  if (typeof v === 'number') return csvMoney(v)
+  if (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v.trim())) return csvMoney(Number(v))
+  return v
 }
 
 function headerText<T>(c: Column<T>) {
@@ -155,16 +174,18 @@ export function DataTable<T>({
   }
 
   const doExport = () => {
+    // colunas só de tela (botões de ação, sem valor para o CSV) não viram coluna vazia no arquivo
+    const hasValue = (c: Column<T>) =>
+      c.csv !== false && (!!c.csv || !!c.sortValue || (sorted.length > 0 && Object.prototype.hasOwnProperty.call(sorted[0] as object, c.id)))
+    const exportCols = columns.filter((c) => (visibleCols.includes(c) || c.exportAlways) && hasValue(c))
     exportCsv(
       exportName!,
       sorted,
-      visibleCols.map((c) => ({
+      exportCols.map((c) => ({
         header: headerText(c),
         value: (r: T) => {
-          if (c.csv) return c.csv(r)
-          if (c.sortValue) return c.sortValue(r)
-          const v = (r as Record<string, unknown>)[c.id]
-          return typeof v === 'string' || typeof v === 'number' ? v : ''
+          const raw = rawCsvValue(c, r)
+          return c.money ? moneyCell(raw) : raw
         },
       })),
     )
@@ -203,7 +224,8 @@ export function DataTable<T>({
             )}
             {toolbar}
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          {/* quebra de linha no celular: ação em lote + Colunas + Exportar não cabem em 390 px (o card corta o que sobra) */}
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
             {toolbarRight}
             {columnPicker && (
               <Popover

@@ -76,12 +76,16 @@ export interface CheckboxProps {
 
 export function Checkbox({ checked, onChange, label, description, disabled, className, ariaLabel }: CheckboxProps) {
   const isOn = checked === true
+  // o texto ao lado dá o nome acessível (leitor de tela e getByRole('checkbox', { name })): antes ficava sem nome
+  const id = useId()
   const box = (
     <button
       type="button"
       role="checkbox"
       aria-checked={checked === 'indeterminate' ? 'mixed' : isOn}
       aria-label={ariaLabel}
+      aria-labelledby={!ariaLabel && label ? `${id}-label` : undefined}
+      aria-describedby={description ? `${id}-desc` : undefined}
       disabled={disabled}
       onClick={() => onChange(!isOn)}
       className={cn(
@@ -98,8 +102,14 @@ export function Checkbox({ checked, onChange, label, description, disabled, clas
     <div className={cn('flex items-start gap-2.5', className)}>
       {box}
       <div className="min-w-0 cursor-pointer" onClick={() => !disabled && onChange(!isOn)}>
-        <span className="text-sm text-fg">{label}</span>
-        {description && <p className="text-[13px] leading-5 text-fg-3">{description}</p>}
+        <span id={`${id}-label`} className="text-sm text-fg">
+          {label}
+        </span>
+        {description && (
+          <p id={`${id}-desc`} className="text-[13px] leading-5 text-fg-3">
+            {description}
+          </p>
+        )}
       </div>
     </div>
   )

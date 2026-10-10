@@ -1,6 +1,7 @@
 // Regras dos destinos de webhook: validação do endereço, detecção de token na URL
 // (achado #7 da auditoria), segredo de assinatura e entrega simulada.
-import type { WebhookExecution } from './webhooks'
+import { WEBHOOK_MAX_ATTEMPTS } from '@shared/api'
+import { isTestExecution, type WebhookExecution } from './webhooks'
 
 const PRIVATE_HOST = /^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?$)/i
 const SENSITIVE_PARAM = /(token|secret|senha|password|passwd|api[-_]?key|apikey|^key$|auth|signature|^sig$|access)/i
@@ -116,6 +117,35 @@ export function isDemoWebhookHost(url: string): boolean {
   return DEMO_WEBHOOK_HOSTS.some((d) => host === d || host.endsWith(`.${d}`))
 }
 
+/**
+ * Modo API: destino de demonstração (host de terceiro). O servidor nunca envia evento real nem teste para ele, então
+ * ele não conta como ativo em nenhuma tela (Webhooks, Templates, ficha do destino). `api`: isApiMode().
+ */
+export function isDemoDestination(d: { url: string }, api: boolean): boolean {
+  return api && isDemoWebhookHost(d.url)
+}
+
+/** O destino recebe eventos? Ativo e (modo API) fora dos hosts de demonstração. */
+export function destinationReceives(d: { active: boolean; url: string }, api: boolean): boolean {
+  return d.active && !isDemoDestination(d, api)
+}
+
+/**
+ * Modo API: execução para um host de demonstração = registro fictício semeado com DEMO_DATA (o servidor nunca envia
+ * para esses hosts). Fica fora das contagens e das listas de entregas.
+ */
+export function isDemoExecution(e: Pick<WebhookExecution, 'url'>, api: boolean): boolean {
+  return api && isDemoWebhookHost(e.url)
+}
+
+/**
+ * Entrega de verdade: a mesma definição em Webhooks e Estatísticas (contagens, taxa de sucesso, tempo médio).
+ * Não contam os envios de teste nem os registros de demonstração.
+ */
+export function isRealDelivery(e: Pick<WebhookExecution, 'url' | 'test' | 'payload'>, api: boolean): boolean {
+  return !isTestExecution(e) && !isDemoExecution(e, api)
+}
+
 /** Origem do endereço (esquema, host e porta), ou null se não for URL. */
 export function urlOrigin(url: string): string | null {
   try {
@@ -197,9 +227,49 @@ export function lastExecutionFor(execs: WebhookExecution[], destinationId: strin
   return best
 }
 
+/**
+ * Entrega a que a tentativa pertence: as tentativas da mesma entrega levam o mesmo X-X2W-Delivery (deliveryId,
+ * por destino). Registro sem o dado (demonstração, registro antigo) é uma entrega sozinho.
+ */
+export function deliveryKey(e: WebhookExecution): string {
+  return e.deliveryId ? `${e.destinationId}|${e.deliveryId}` : `#${e.id}`
+}
+
+/**
+ * "tentativa N de 6" quando a entrega precisou de nova tentativa (ou falhou); null sem o dado (registro antigo)
+ * e nos envios de teste, que saem uma vez só e nunca são tentados de novo.
+ */
+export function attemptLabel(e: WebhookExecution): string | null {
+  if (isTestExecution(e) || !e.attempt || (e.attempt === 1 && e.status === 'sucesso')) return null
+  return `tentativa ${e.attempt} de ${WEBHOOK_MAX_ATTEMPTS}`
+}
+
+/** Só a tentativa mais recente de cada entrega (listas de "entregas"), na ordem recebida. */
+export function latestAttempts(execs: WebhookExecution[]): WebhookExecution[] {
+  const best = new Map<string, WebhookExecution>()
+  for (const e of execs) {
+    const k = deliveryKey(e)
+    const cur = best.get(k)
+    if (!cur || e.at > cur.at || (e.at === cur.at && (e.attempt ?? 0) > (cur.attempt ?? 0))) best.set(k, e)
+  }
+  const keep = new Set(best.values())
+  return execs.filter((e) => keep.has(e))
+}
+
+/**
+ * Números das entregas: uma entrega conta uma vez, com todas as tentativas (antes cada tentativa contava como
+ * entrega, e um saque recusado com 6 tentativas virava "6 entregas · 6 falhas"). Entrega com sucesso = alguma
+ * tentativa 2xx. avgMs: média de todas as tentativas; null sem nenhuma (nada medido, a tela mostra "—").
+ */
 export function deliveryStats(execs: WebhookExecution[], sinceMs: number) {
   const list = execs.filter((e) => new Date(e.at).getTime() >= sinceMs)
-  const ok = list.filter((e) => e.status === 'sucesso').length
-  const avg = list.length ? list.reduce((s, e) => s + e.durationMs, 0) / list.length : 0
-  return { total: list.length, ok, failed: list.length - ok, rate: list.length ? ok / list.length : null, avgMs: Math.round(avg) }
+  const delivered = new Map<string, boolean>()
+  for (const e of list) {
+    const k = deliveryKey(e)
+    delivered.set(k, delivered.get(k) === true || e.status === 'sucesso')
+  }
+  const total = delivered.size
+  const ok = [...delivered.values()].filter(Boolean).length
+  const avgMs = list.length ? Math.round(list.reduce((s, e) => s + e.durationMs, 0) / list.length) : null
+  return { total, ok, failed: total - ok, attempts: list.length, rate: total ? ok / total : null, avgMs }
 }

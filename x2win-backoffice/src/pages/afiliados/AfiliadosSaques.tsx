@@ -95,7 +95,10 @@ function destination(w: AffiliateWithdrawal, clear: AffiliatePayoutDetails | nul
         : type === 'Celular'
           ? phone(clear.pixKey ?? '')
           : clear.pixKey
-      : maskPixKey(w.pixKeyType, w.pixKey)
+      : API
+        ? // modo API: o servidor já mascarou conforme o tipo (mascarar de novo deixava "•••7••••7o83")
+          w.pixKey
+        : maskPixKey(w.pixKeyType, w.pixKey)
     return { label: `Chave ${type}`, value: key || '—' }
   }
   if (w.method === 'ted' && w.bank) {
@@ -198,6 +201,15 @@ export default function AfiliadosSaques() {
   }
 
   const payFlow = async (w: AffiliateWithdrawal) => {
+    // teto do cargo (mesma regra do servidor): recusa antes da confirmação, sem "tente de novo"
+    const ceiling = role.approvalCeiling
+    if (typeof ceiling === 'number' && ceiling > 0 && w.amount > ceiling) {
+      toast.error('Acima do teto do seu cargo', {
+        description: `O cargo ${role.name} paga até ${brl(ceiling)}. Este pedido (${brl(w.amount)}) precisa de um Administrador ou Superadmin.`,
+        duration: 8000,
+      })
+      return
+    }
     const issues = withdrawalIssues(w, cfg, affById.get(w.affiliateId))
     const dest = destination(w, revealed.get(w.id) ?? null)
     const ok = await confirm({
@@ -256,7 +268,7 @@ export default function AfiliadosSaques() {
   const rejectFlow = async (w: AffiliateWithdrawal) => {
     const r = await confirmWithInput({
       title: `Recusar o pedido de ${brl(w.amount)}?`,
-      description: `O valor volta para o saldo de comissão de ${w.affiliateName}, que recebe o motivo por e-mail.`,
+      description: `O valor volta para o saldo de comissão de ${w.affiliateName}. O motivo fica registrado no pedido; o painel não envia e-mail.`,
       confirmLabel: 'Recusar pedido',
       tone: 'danger',
       icon: XCircle,
@@ -300,7 +312,7 @@ export default function AfiliadosSaques() {
     },
     { id: 'id', header: 'ID do pedido', defaultHidden: true, sortValue: (w) => w.id, cell: (w) => <Mono>{w.id}</Mono> },
     {
-      id: 'amount',
+      id: 'amount', money: true,
       header: 'Valor',
       align: 'right',
       sortValue: (w) => w.amount,
@@ -323,6 +335,9 @@ export default function AfiliadosSaques() {
       id: 'method',
       header: 'Forma',
       label: 'Forma de pagamento',
+      // a forma já aparece em "Dados do PIX / conta" (Chave CPF, Conta...): escondida por padrão, a coluna
+      // de decisão (Pagar / Recusar) cabe sem rolar a tabela em telas de 1440 px
+      defaultHidden: true,
       sortValue: (w) => w.method,
       csv: (w) => PAYOUT_METHOD_LABEL[w.method],
       cell: (w) => <MethodBadge method={w.method} />,
@@ -374,8 +389,11 @@ export default function AfiliadosSaques() {
     {
       id: 'decision',
       header: 'Decisão',
+      // no CSV a coluna diz quem decidiu; na aba de pendentes ninguém decidiu ainda, então ela fica fora do arquivo
+      // (antes saía vazia em todas as linhas). Os botões ficam só na tela
+      label: 'Decidido por',
       pinned: true,
-      csv: (w) => (w.decidedBy ? `${w.decidedBy} em ${dateTime(w.decidedAt)}` : ''),
+      csv: tab === 'pendentes' ? false : (w) => (w.decidedBy ? `${w.decidedBy} em ${dateTime(w.decidedAt)}` : ''),
       cell: (w) =>
         w.status === 'pendente' ? (
           <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>

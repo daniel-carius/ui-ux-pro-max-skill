@@ -3,6 +3,7 @@
 import http from 'node:http'
 import https from 'node:https'
 import type { FastifyInstance } from 'fastify'
+import { WEBHOOK_MAX_ATTEMPTS } from '@shared/api'
 import type { Db } from '../../db'
 import { hmacSha256, newId } from '../../lib/crypto'
 import { maskUrlTokens } from '../../lib/mask'
@@ -21,7 +22,7 @@ import {
 
 export const USER_AGENT = 'X2Win-Webhooks/1.0'
 export const DELIVERY_TIMEOUT_MS = 5000
-export const MAX_ATTEMPTS = 6
+export const MAX_ATTEMPTS = WEBHOOK_MAX_ATTEMPTS
 export const BATCH_SIZE = 20
 export const LOOP_INTERVAL_MS = 2000
 /** Reserva do item enquanto o envio acontece (outra instância não pega o mesmo). */
@@ -42,6 +43,8 @@ export interface DeliveryResult {
   httpStatus: number | null
   durationMs: number
   error: string | null
+  /** X-X2W-Timestamp assinado (segundos Unix); ausente quando o envio parou antes de assinar */
+  timestamp?: number | null
 }
 
 /** Mensagens devolvidas ao painel, à auditoria e à fila (sem detalhes de rede de baixo nível). */
@@ -122,6 +125,7 @@ export async function sendWebhook(
     return fail(DELIVERY_ERRORS.timeout)
   }
   const timestamp = Math.floor(Date.now() / 1000)
+  const failSigned = (error: string): DeliveryResult => ({ ...fail(error), timestamp })
   try {
     const status = await postOnce(
       new URL(opts.url.trim()),
@@ -138,18 +142,18 @@ export async function sendWebhook(
       signal,
     )
     const ok = status >= 200 && status < 300
-    return { ok, httpStatus: status, durationMs: elapsed(), error: ok ? null : `O destino respondeu HTTP ${status}.` }
+    return { ok, httpStatus: status, durationMs: elapsed(), error: ok ? null : `O destino respondeu HTTP ${status}.`, timestamp }
   } catch (e) {
     const err = e as { name?: string; code?: string; cause?: { code?: string } }
     const code = err.code ?? err.cause?.code
     if (code === BLOCKED_PRIVATE_CODE) {
       app.log.warn({ host: hostOf(opts.url) }, 'webhooks: destino resolveu para rede interna na conexão; envio bloqueado')
-      return fail(DELIVERY_ERRORS.internal)
+      return failSigned(DELIVERY_ERRORS.internal)
     }
-    if (signal.aborted || err.name === 'TimeoutError' || err.name === 'AbortError') return fail(DELIVERY_ERRORS.timeout)
+    if (signal.aborted || err.name === 'TimeoutError' || err.name === 'AbortError') return failSigned(DELIVERY_ERRORS.timeout)
     // o código de baixo nível (recusada, TLS, etc.) fica só no log do servidor: no painel viraria um mapa da rede
     app.log.warn({ host: hostOf(opts.url), code }, 'webhooks: falha de conexão com o destino')
-    return fail(DELIVERY_ERRORS.connection)
+    return failSigned(DELIVERY_ERRORS.connection)
   }
 }
 
@@ -158,18 +162,58 @@ export function buildBody(p: { id: string; event: string; createdAt: string; dat
   return JSON.stringify(p.test ? { id: p.id, event: p.event, createdAt: p.createdAt, test: true, data: p.data } : { id: p.id, event: p.event, createdAt: p.createdAt, data: p.data })
 }
 
-/** Grava uma tentativa em webhook_executions (endereço já com os tokens mascarados: o histórico não guarda o token). */
+/**
+ * Grava uma tentativa em webhook_executions (endereço já com os tokens mascarados: o histórico não guarda o token),
+ * com o que o destino recebeu: X-X2W-Delivery (`deliveryId`), o número da tentativa e o X-X2W-Timestamp assinado.
+ */
 export async function recordExecution(
   db: Db,
-  e: { id?: string; event: string; destinationId: string | null; url: string; result: DeliveryResult; payload: string; test: boolean },
+  e: {
+    id?: string
+    event: string
+    destinationId: string | null
+    url: string
+    result: DeliveryResult
+    payload: string
+    test: boolean
+    deliveryId?: string | null
+    attempt?: number | null
+  },
 ): Promise<string> {
   const id = e.id ?? newId('ex')
   await db.query(
-    `insert into webhook_executions (id, event, destination_id, url, status, http_status, duration_ms, payload, test)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [id, e.event, e.destinationId, maskUrlTokens(e.url), e.result.ok ? 'sucesso' : 'falha', e.result.httpStatus, e.result.durationMs, e.payload, e.test],
+    `insert into webhook_executions (id, event, destination_id, url, status, http_status, duration_ms, payload, test, delivery_id, attempt, signed_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    [
+      id,
+      e.event,
+      e.destinationId,
+      maskUrlTokens(e.url),
+      e.result.ok ? 'sucesso' : 'falha',
+      e.result.httpStatus,
+      e.result.durationMs,
+      e.payload,
+      e.test,
+      e.deliveryId ?? null,
+      e.attempt ?? null,
+      e.result.timestamp ?? null,
+    ],
   )
   return id
+}
+
+/** Templates de Campanhas › Templates (campanhas.templates): um por evento, com `active`. */
+export const TEMPLATES_KEY = 'campanhas.templates'
+
+/**
+ * O template do evento está desligado em Campanhas › Templates? Desligado, o evento acontece e nada sai para os
+ * destinos HTTP (antes o painel dizia isso e o servidor continuava enviando). Sem template gravado para o evento,
+ * vale ligado (o catálogo da plataforma começa com todos ativos). A chave não é cifrada (sem dado pessoal).
+ */
+export async function isEventTemplateOff(db: Db, event: string): Promise<boolean> {
+  const row = await db.one<{ value: unknown }>('select value from kv_store where key = $1', [TEMPLATES_KEY])
+  const list: unknown[] = Array.isArray(row?.value) ? row.value : []
+  return list.some((t) => !!t && typeof t === 'object' && (t as { event?: unknown }).event === event && (t as { active?: unknown }).active === false)
 }
 
 /**
@@ -182,7 +226,16 @@ export async function recordExecution(
  * do fim desta transação. A gravação da lista trava os destinos excluídos na mesma ordem (id), sem impasse.
  */
 export async function enqueueWebhook(db: Db, event: string, payload: Record<string, unknown>): Promise<number> {
+  return (await enqueueWebhookEvent(db, event, payload)).queued
+}
+
+/**
+ * enqueueWebhook com o motivo de nada ter sido enfileirado: `templateOff` = o template do evento está desligado em
+ * Campanhas › Templates (a mensagem da decisão diz isso, e não "nenhum destino ativo").
+ */
+export async function enqueueWebhookEvent(db: Db, event: string, payload: Record<string, unknown>): Promise<{ queued: number; templateOff: boolean }> {
   if (!isWebhookEvent(event)) throw new Error(`Evento de webhook desconhecido: ${event}`)
+  if (await isEventTemplateOff(db, event)) return { queued: 0, templateOff: true }
   // o mesmo id de evento vai para todos os destinos (o destino deduplica por ele)
   const envelope = { id: newId('evt'), data: payload }
   const dests = await db.query<{ id: string; url: string | null; host: string | null }>(
@@ -193,7 +246,7 @@ export async function enqueueWebhook(db: Db, event: string, payload: Record<stri
   // estiver gravado e ativo (ex.: gravado antes de a chave recusar o seed do painel). O endereço fica cifrado:
   // basta o host em claro (linha antiga, ainda não cifrada na subida: o endereço)
   const ids = dests.filter((d) => !(d.host ? isDemoHost(d.host) : isDemoWebhookHost(d.url ?? ''))).map((d) => d.id)
-  if (!ids.length) return 0
+  if (!ids.length) return { queued: 0, templateOff: false }
   // só os ids travados acima (nada de reler webhook_destinations aqui: a releitura veria outro estado)
   const rows = await db.query<{ id: number }>(
     `insert into webhook_outbox (event, payload, destination_id)
@@ -201,7 +254,7 @@ export async function enqueueWebhook(db: Db, event: string, payload: Record<stri
      returning id`,
     [event, JSON.stringify(envelope), ids],
   )
-  return rows.length
+  return { queued: rows.length, templateOff: false }
 }
 
 interface OutboxItem {
@@ -259,7 +312,8 @@ async function deliverItem(app: FastifyInstance, item: OutboxItem, dest: Destina
   }
   const attempts = item.attempts + 1
   await db.tx(async (t) => {
-    await recordExecution(t, { event: item.event, destinationId: dest.id, url, result, payload: body, test: false })
+    // X-X2W-Delivery = id do item da fila: o mesmo em todas as tentativas desta entrega
+    await recordExecution(t, { event: item.event, destinationId: dest.id, url, result, payload: body, test: false, deliveryId: String(item.id), attempt: attempts })
     if (result.ok) {
       await t.query(`update webhook_outbox set status = 'entregue', attempts = $2, last_error = null where id = $1`, [item.id, attempts])
     } else if (attempts >= MAX_ATTEMPTS) {

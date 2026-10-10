@@ -40,7 +40,7 @@ import {
   type Tone,
 } from '@/components/ui'
 import { isApiMode } from '@/lib/api'
-import { dateTime, num, relative } from '@/lib/format'
+import { dateTime, hasMaskChars, isValidDate, num, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { useDb } from '@/lib/store'
 import { DATA_KEYS, useAggregators, useProviders } from '@/data/hooks'
@@ -65,6 +65,16 @@ import { AGGREGATOR_HUE, BrandMark } from './_shared'
 
 const NO_EDIT = 'Seu cargo pode ver, mas não editar os agregadores'
 const API = isApiMode()
+/**
+ * Modo API: o servidor guarda as credenciais cifradas, mas ainda não fala com os agregadores. "Testar conexão"
+ * inventava "respondeu em 126 ms" no navegador e gravava como teste real; agora fica desligado com o motivo.
+ */
+const NO_CONNECTION_TEST = 'O teste de conexão ainda não é feito pelo servidor nesta versão (as credenciais ficam guardadas, cifradas).'
+/**
+ * Modo API: a sincronização do catálogo não é feita pelo servidor nesta versão. Antes a tela inventava um resultado
+ * ("1.850 jogos · 11 novos"), gravava no servidor e na auditoria, e o catálogo de jogos não mudava.
+ */
+const NO_SYNC = 'A sincronização do catálogo ainda não é feita pelo servidor nesta versão: os jogos entram pela importação da plataforma.'
 const NOT_SAVED = 'Erro inesperado ao falar com o servidor. Tente de novo.'
 /** outra pessoa gravou antes: a tela já recarregou o valor do servidor */
 const conflictToast = () =>
@@ -80,13 +90,30 @@ const STATUS: Record<Aggregator['status'], { label: string; tone: Tone }> = {
   erro: { label: 'Com erro', tone: 'danger' },
   nao_configurado: { label: 'Não configurado', tone: 'neutral' },
 }
+/**
+ * Modo API: o servidor guarda as credenciais, mas não testa nem sincroniza. O status gravado ("conectado" dos dados
+ * de demonstração) e a data da última sincronização não vêm de um teste: a tela diz só o que o servidor sabe.
+ */
+const API_SAVED_STATUS: { label: string; tone: Tone } = { label: 'Credenciais salvas', tone: 'neutral' }
+/** Aviso depois de salvar: no modo API não manda testar (o botão está desligado). */
+const SAVED_HINT = API ? 'Cifradas no servidor. O teste de conexão ainda não é feito pelo servidor nesta versão.' : 'Teste a conexão para conferir.'
 
 const SYNC_STEPS = ['Conectando ao agregador', 'Baixando o catálogo', 'Comparando com o catálogo atual', 'Aplicando precedência e regras', 'Concluído']
+
+/**
+ * Nome da entrada em "quem trocou o segredo" (cassino.agregadores.segredos). Não pode lembrar um segredo
+ * ("apiSecret", "privateKey"): o servidor mascara campos com esses nomes nas chaves de credenciais, e a data e o
+ * nome de quem trocou voltavam como "••••" ("Trocado há NaN ano(s) por ••••••••••").
+ */
+const META_FIELD: Record<'apiSecret' | 'webhookSecret' | 'privateKey', string> = { apiSecret: 'api', webhookSecret: 'webhook', privateKey: 'chave-privada' }
+const metaKey = (id: string, field: keyof typeof META_FIELD) => `${id}.${META_FIELD[field]}`
 
 function secretHint(meta: SecretsMeta, key: string, pending: boolean) {
   if (pending) return 'Novo valor definido. Clique em "Salvar credenciais" para gravar.'
   const m = meta[key]
-  return m ? `Trocado ${relative(m.at)} por ${m.by}. Só os 4 últimos caracteres aparecem.` : 'Cifrado no servidor. Só os 4 últimos caracteres aparecem.'
+  // registro antigo, gravado com o nome que o servidor mascarava: sem data nem autor legíveis
+  const usable = m && isValidDate(m.at) && !hasMaskChars(String(m.by ?? ''))
+  return usable ? `Trocado ${relative(m.at)} por ${m.by}. Só os 4 últimos caracteres aparecem.` : 'Cifrado no servidor. Só os 4 últimos caracteres aparecem.'
 }
 
 export default function Agregadores() {
@@ -162,7 +189,13 @@ export default function Agregadores() {
           </Field>
           <Switch
             label="Sincronizar automaticamente todo dia"
-            description={rules.values.autoSync ? `Roda às ${String(rules.values.autoSyncHour).padStart(2, '0')}:00, horário de Brasília, nos dois agregadores.` : 'Desligada: o catálogo só muda com “Sincronizar catálogo”.'}
+            description={
+              API
+                ? `${NO_SYNC} A preferência fica guardada para quando a sincronização for ligada.`
+                : rules.values.autoSync
+                  ? `Roda às ${String(rules.values.autoSyncHour).padStart(2, '0')}:00, horário de Brasília, nos dois agregadores.`
+                  : 'Desligada: o catálogo só muda com “Sincronizar catálogo”.'
+            }
             checked={rules.values.autoSync}
             onChange={(v) => rules.set('autoSync', v)}
           />
@@ -217,7 +250,7 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
   const env = a.environments.find((e) => e.id === draft.currentEnv) ?? a.environments[0]
   const test = tests[a.id]
   const lastSync = syncs[a.id]
-  const st = STATUS[a.status]
+  const st = API && a.status !== 'nao_configurado' ? API_SAVED_STATUS : STATUS[a.status]
   const providerCount = providers.filter((p) => p.aggregatorId === a.id).length
   const busy = testing || !!sync || saving
   // ambiente ou Platform ID mudou: o segredo salvo (a máscara) não vale para o destino novo
@@ -226,7 +259,9 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
   const secretError = (f: 'apiSecret' | 'webhookSecret') => secretFieldError(draft[f], { requireNew: needsNew(f), saved: a[f] })
   const fieldServerError = (f: 'apiSecret' | 'webhookSecret') => (serverError && draft[f] === a[f] ? serverError : null)
 
-  const syncBlocker = !canEdit
+  const syncBlocker = API
+    ? NO_SYNC
+    : !canEdit
     ? NO_EDIT
     : !a.contracted
       ? 'Agregador não contratado.'
@@ -287,12 +322,12 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
     const now = new Date().toISOString()
     setMeta((m) => ({
       ...m,
-      ...(draft.apiSecret !== a.apiSecret ? { [`${a.id}.apiSecret`]: { at: now, by: user.name } } : {}),
-      ...(draft.webhookSecret !== a.webhookSecret ? { [`${a.id}.webhookSecret`]: { at: now, by: user.name } } : {}),
+      ...(draft.apiSecret !== a.apiSecret ? { [metaKey(a.id, 'apiSecret')]: { at: now, by: user.name } } : {}),
+      ...(draft.webhookSecret !== a.webhookSecret ? { [metaKey(a.id, 'webhookSecret')]: { at: now, by: user.name } } : {}),
     }))
     setTests((t) => ({ ...t, [a.id]: undefined }))
     audit('editar', `Agregador ${a.name}`, `Credenciais atualizadas: ${changed.join('; ')}`)
-    toast.success('Credenciais salvas', { description: 'Cifradas no servidor. Teste a conexão para conferir.' })
+    toast.success('Credenciais salvas', { description: SAVED_HINT })
   }
 
   const runTest = () => {
@@ -385,16 +420,30 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
               </Badge>
             </div>
             <p className="mt-0.5 text-[13px] text-fg-3">
-              {providerCount} provedoras · {num(a.lastSyncGames)} jogos no último catálogo · {a.environments.length > 1 ? `${a.environments.length} ambientes` : 'só produção'}
+              {providerCount} provedoras · {API ? '' : `${num(a.lastSyncGames)} jogos no último catálogo · `}
+              {a.environments.length > 1 ? `${a.environments.length} ambientes` : 'só produção'}
             </p>
           </div>
         </div>
         <div className="text-[13px] sm:text-right">
-          <p className="flex items-center gap-1.5 text-fg-2 sm:justify-end">
-            <Clock3 size={14} className="text-fg-3" aria-hidden />
-            Sincronizado <strong className="font-semibold text-fg">{relative(a.lastSyncAt)}</strong>
-          </p>
-          <p className="text-xs text-fg-3">{a.lastSyncAt ? dateTime(a.lastSyncAt) : 'Nunca sincronizado'}</p>
+          {API ? (
+            <>
+              {/* modo API: o servidor não sincroniza; a data gravada viria dos dados de demonstração */}
+              <p className="flex items-center gap-1.5 text-fg-2 sm:justify-end">
+                <Clock3 size={14} className="text-fg-3" aria-hidden />
+                Sincronização ainda não ligada
+              </p>
+              <p className="text-xs text-fg-3">Os jogos entram pela importação da plataforma.</p>
+            </>
+          ) : (
+            <>
+              <p className="flex items-center gap-1.5 text-fg-2 sm:justify-end">
+                <Clock3 size={14} className="text-fg-3" aria-hidden />
+                Sincronizado <strong className="font-semibold text-fg">{relative(a.lastSyncAt)}</strong>
+              </p>
+              <p className="text-xs text-fg-3">{a.lastSyncAt ? dateTime(a.lastSyncAt) : 'Nunca sincronizado'}</p>
+            </>
+          )}
         </div>
       </div>
 
@@ -445,7 +494,7 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
               error={fieldServerError('apiSecret')}
               disabled={!canEdit}
               onChange={(v) => setDraft((d) => ({ ...d, apiSecret: v }))}
-              hint={secretHint(meta, `${a.id}.apiSecret`, draft.apiSecret !== a.apiSecret)}
+              hint={secretHint(meta, metaKey(a.id, 'apiSecret'), draft.apiSecret !== a.apiSecret)}
             />
             <SecretField
               label="Webhook secret"
@@ -455,7 +504,7 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
               error={fieldServerError('webhookSecret')}
               disabled={!canEdit}
               onChange={(v) => setDraft((d) => ({ ...d, webhookSecret: v }))}
-              hint={secretHint(meta, `${a.id}.webhookSecret`, draft.webhookSecret !== a.webhookSecret)}
+              hint={secretHint(meta, metaKey(a.id, 'webhookSecret'), draft.webhookSecret !== a.webhookSecret)}
             />
           </FormGrid>
         </FormFieldset>
@@ -503,7 +552,7 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
         <div className="min-h-[28px] text-[13px]" aria-live="polite">
           {testing ? (
             <span className="text-fg-3">Testando conexão em {env.label}…</span>
-          ) : test ? (
+          ) : test && !API ? (
             <span className="flex flex-wrap items-center gap-2">
               <Badge tone={test.ok ? 'success' : 'danger'} icon={test.ok ? Plug : CircleAlert} size="md">
                 {test.ok ? `Conectado · ${test.latencyMs} ms` : `Falhou · ${test.code}`}
@@ -513,11 +562,17 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
               </span>
             </span>
           ) : (
-            <span className="text-xs text-fg-3">Sem teste de conexão recente.</span>
+            <span className="text-xs text-fg-3">{API ? NO_CONNECTION_TEST : 'Sem teste de conexão recente.'}</span>
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button icon={Plug} onClick={runTest} loading={testing} disabled={!canEdit || busy} title={!canEdit ? NO_EDIT : dirty ? 'Testa os valores da tela, mesmo sem salvar' : undefined}>
+          <Button
+            icon={Plug}
+            onClick={runTest}
+            loading={testing}
+            disabled={!canEdit || busy || API}
+            title={!canEdit ? NO_EDIT : API ? NO_CONNECTION_TEST : dirty ? 'Testa os valores da tela, mesmo sem salvar' : undefined}
+          >
             Testar conexão
           </Button>
           <Button icon={RefreshCw} onClick={runSync} disabled={busy || !!syncBlocker} title={syncBlocker ?? undefined}>
@@ -588,12 +643,12 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
     const now = new Date().toISOString()
     setMeta((m) => ({
       ...m,
-      ...(draft.privateKey !== saved.privateKey ? { 'betby.privateKey': { at: now, by: user.name } } : {}),
-      ...(draft.webhookSecret !== saved.webhookSecret ? { 'betby.webhookSecret': { at: now, by: user.name } } : {}),
+      ...(draft.privateKey !== saved.privateKey ? { [metaKey('betby', 'privateKey')]: { at: now, by: user.name } } : {}),
+      ...(draft.webhookSecret !== saved.webhookSecret ? { [metaKey('betby', 'webhookSecret')]: { at: now, by: user.name } } : {}),
     }))
     setTest(null)
     audit('editar', 'Sportsbook Betby', `Credenciais atualizadas: ${changed.join('; ')}`)
-    toast.success('Credenciais do sportsbook salvas', { description: 'Teste a conexão para conferir.' })
+    toast.success('Credenciais do sportsbook salvas', { description: SAVED_HINT })
   }
 
   const runTest = () => {
@@ -623,7 +678,12 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
                 Sportsbook
               </Badge>
               {/* modo API sem nada gravado: credenciais em branco, ainda não é erro */}
-              {saved.platformId ? (
+              {saved.platformId && API ? (
+                // modo API: o servidor não testa a conexão; o status gravado não vem de um teste
+                <Badge tone={API_SAVED_STATUS.tone} dot>
+                  {API_SAVED_STATUS.label}
+                </Badge>
+              ) : saved.platformId ? (
                 <Badge tone={saved.status === 'conectado' ? 'success' : 'danger'} dot>
                   {saved.status === 'conectado' ? 'Conectado' : 'Com erro'}
                 </Badge>
@@ -652,7 +712,7 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
               error={fieldServerError('privateKey')}
               disabled={!canEdit}
               onChange={(v) => setDraft((d) => ({ ...d, privateKey: v }))}
-              hint={secretHint(meta, 'betby.privateKey', draft.privateKey !== saved.privateKey)}
+              hint={secretHint(meta, metaKey('betby', 'privateKey'), draft.privateKey !== saved.privateKey)}
             />
             <SecretField
               label="Webhook secret"
@@ -662,7 +722,7 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
               error={fieldServerError('webhookSecret')}
               disabled={!canEdit}
               onChange={(v) => setDraft((d) => ({ ...d, webhookSecret: v }))}
-              hint={secretHint(meta, 'betby.webhookSecret', draft.webhookSecret !== saved.webhookSecret)}
+              hint={secretHint(meta, metaKey('betby', 'webhookSecret'), draft.webhookSecret !== saved.webhookSecret)}
             />
           </FormGrid>
         </FormFieldset>
@@ -680,7 +740,7 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
         <div className="min-h-[28px] text-[13px]" aria-live="polite">
           {testing ? (
             <span className="text-fg-3">Testando conexão…</span>
-          ) : test ? (
+          ) : test && !API ? (
             <span className="flex flex-wrap items-center gap-2">
               <Badge tone={test.ok ? 'success' : 'danger'} icon={test.ok ? Plug : CircleAlert} size="md">
                 {test.ok ? `Conectado · ${test.latencyMs} ms` : `Falhou · ${test.code}`}
@@ -688,11 +748,11 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
               <span className="text-xs text-fg-3">{relative(test.at)}</span>
             </span>
           ) : (
-            <span className="text-xs text-fg-3">Sem teste de conexão recente.</span>
+            <span className="text-xs text-fg-3">{API ? NO_CONNECTION_TEST : 'Sem teste de conexão recente.'}</span>
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button icon={Plug} onClick={runTest} loading={testing} disabled={!canEdit} title={!canEdit ? NO_EDIT : undefined}>
+          <Button icon={Plug} onClick={runTest} loading={testing} disabled={!canEdit || API} title={!canEdit ? NO_EDIT : API ? NO_CONNECTION_TEST : undefined}>
             Testar conexão
           </Button>
           <Button variant="primary" icon={Save} onClick={save} loading={saving} disabled={!canEdit || !dirty || testing} title={!canEdit ? NO_EDIT : undefined}>

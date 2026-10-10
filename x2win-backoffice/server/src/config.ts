@@ -28,6 +28,12 @@ const fields = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+  /**
+   * Requisições por minuto por IP em toda a API (as rotas de login, 2FA e exportação têm limites próprios, menores).
+   * A lista de IPs leva a equipe a um IP só (escritório ou VPN) e cada tela faz de 9 a 17 leituras: 600 era pouco
+   * para duas pessoas trabalhando juntas (429 e "Não foi possível abrir o painel").
+   */
+  API_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(60).max(100_000).default(3000),
   /** desliga o disparador de webhooks em segundo plano (testes) */
   WEBHOOK_DISPATCHER: z
     .enum(['on', 'off'])

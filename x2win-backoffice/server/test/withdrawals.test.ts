@@ -303,6 +303,9 @@ describe('POST /api/withdrawals/:id/reject', () => {
     expect(r.statusCode).toBe(200)
     expect(r.json()).toMatchObject({ ok: true, withdrawal: { id, status: 'recusado', decisionNote: 'Rollover não cumprido', decidedBy: 'Ana Admin' } })
     expect(r.json().message).toContain('R$')
+    // r1: dizia "voltou para o saldo do jogador" e prometia e-mail; o servidor só registra a decisão e o aviso
+    expect(r.json().message).not.toMatch(/voltou para o saldo|e-mail/)
+    expect(r.json().message).toMatch(/Aviso "saque\.rejeitado" na fila .*devolução ao saldo do jogador é feita pela plataforma de jogo/)
     const audit = await auditOf(app, `Saque #${id}`)
     expect(audit).toHaveLength(1)
     expect(audit[0].action).toBe('recusar')

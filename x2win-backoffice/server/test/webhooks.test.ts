@@ -9,8 +9,10 @@ import { newId } from '../src/lib/crypto'
 import { getRole } from '../src/services/roles-repo'
 import type { KvContext } from '../src/kv/types'
 import type { AuthContext } from '../src/types'
+import { approvalMessage, rejectionMessage } from '@shared/withdrawals'
 import {
   enqueueWebhook,
+  enqueueWebhookEvent,
   MAX_ATTEMPTS,
   processOutboxOnce,
   retryDelaySeconds,
@@ -792,6 +794,104 @@ describe('regressão r2-api-mode-seed-fallback-3: destinos de demonstração nã
       expect(wh5?.active).toBe(false)
     } finally {
       await demo.close()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// e2e r2: o que a tela mostra de cada entrega, template desligado e teste para destino de demonstração
+// ---------------------------------------------------------------------------
+
+describe('entregas: X-X2W-Delivery, tentativa e X-X2W-Timestamp registrados como o destino recebeu', () => {
+  it('as tentativas da fila têm o mesmo deliveryId (o id do item), attempt 1, 2… e o timestamp assinado; o teste usa o id da execução', async () => {
+    const app = await createTestApp()
+    try {
+      const id = await insertDestination(app, { event: 'saque.rejeitado', url: `${base}/tentativas`, secret: 'segredo-tentativas' })
+      await enqueueWebhook(app.db, 'saque.rejeitado', { id: 'SQ-T' })
+      const [item] = await outbox(app)
+      plan.push(500)
+      await processOutboxOnce(app)
+      await app.db.query(`update webhook_outbox set next_attempt_at = now() - interval '1 second'`)
+      await processOutboxOnce(app)
+      expect(received).toHaveLength(2)
+      const admin = await authFor(app, 'superadmin')
+      const list = (await kvHandlers['webhook-executions']!.read(kvCtx(app, admin, EXEC_KEY)))!.value as Record<string, unknown>[]
+      const mine = list.filter((e) => e.destinationId === id).sort((a, b) => Number(a.attempt) - Number(b.attempt))
+      expect(mine.map((e) => [e.status, e.attempt, e.deliveryId])).toEqual([
+        ['falha', 1, String(item.id)],
+        ['sucesso', 2, String(item.id)],
+      ])
+      expect(mine.map((e) => e.timestamp)).toEqual(received.map((r) => Number(r.headers['x-x2w-timestamp'])))
+      expect(received.map((r) => r.headers['x-x2w-delivery'])).toEqual([String(item.id), String(item.id)])
+
+      received.length = 0
+      const { cookie } = await loginAs(app, 'superadmin')
+      const r = await api(app, 'POST', `/api/webhooks/destinations/${id}/test`, { cookie })
+      expect(r.statusCode, r.body).toBe(200)
+      const ex = r.json().execution
+      expect(ex).toMatchObject({ deliveryId: ex.id, attempt: 1, timestamp: Number(received[0].headers['x-x2w-timestamp']) })
+      expect(received[0].headers['x-x2w-delivery']).toBe(ex.id)
+    } finally {
+      await app.close()
+    }
+  })
+})
+
+describe('template desligado em Campanhas › Templates: o evento acontece e nada sai', () => {
+  it('enqueue não cria item (templateOff); ligado de novo, volta a enfileirar; a aprovação diz que o template está desligado', async () => {
+    const app = await createTestApp()
+    try {
+      await insertDestination(app, { event: 'saque.pago', url: `${base}/tpl`, secret: 'segredo-template' })
+      const setTemplates = (active: boolean) =>
+        app.db.query(
+          `insert into kv_store (key, value, version) values ('campanhas.templates', $1::jsonb, 1)
+           on conflict (key) do update set value = excluded.value, version = kv_store.version + 1`,
+          [JSON.stringify([{ id: 'tp06', event: 'saque.pago', active, body: '{"marcador":"CORPO-EDITADO"}' }, { id: 'tp07', event: 'saque.rejeitado', active: true, body: '{}' }])],
+        )
+      await setTemplates(false)
+      expect(await enqueueWebhookEvent(app.db, 'saque.pago', { id: 'SQ-OFF' })).toEqual({ queued: 0, templateOff: true })
+      expect(await enqueueWebhook(app.db, 'saque.pago', { id: 'SQ-OFF' })).toBe(0)
+      expect(await outbox(app)).toHaveLength(0)
+      // outro evento, com o template ligado e sem destino: nada a enviar, mas não por causa do template
+      expect(await enqueueWebhookEvent(app.db, 'saque.rejeitado', { id: 'SQ-R' })).toEqual({ queued: 0, templateOff: false })
+
+      // aprovação real: a mensagem diz que o template está desligado (não "nenhum destino ativo")
+      const w = newId('SQ')
+      await app.db.query(
+        `insert into withdrawals (id, player_id, player_name, player_email, amount_cents, fee_cents, status, risk_level, risk_score,
+                                  risk_reasons, pix_key_type, pix_key_enc, reference, created_at, updated_at)
+         values ($1, 'p-tpl', 'Jogador', 'j@x.com', 5000, 0, 'pendente', 'baixo', 5, '[]'::jsonb, 'CPF', $2, 'E1', now(), now())`,
+        [w, app.cipher.encrypt('12345678909')],
+      )
+      const { cookie } = await loginAs(app, 'administrador')
+      const r = await api(app, 'POST', `/api/withdrawals/${w}/approve`, { cookie })
+      expect(r.statusCode, r.body).toBe(200)
+      expect(r.json()).toMatchObject({ queuedDeliveries: 0, message: approvalMessage(50, 0, true) })
+      expect(r.json().message).toContain('template "Saque pago" está desativado')
+      expect(await outbox(app)).toHaveLength(0)
+
+      await setTemplates(true)
+      expect(await enqueueWebhookEvent(app.db, 'saque.pago', { id: 'SQ-ON' })).toEqual({ queued: 1, templateOff: false })
+      expect(rejectionMessage(10, 0, true)).toContain('template "Saque rejeitado" está desativado')
+    } finally {
+      await app.close()
+    }
+  })
+})
+
+describe('teste para destino de demonstração', () => {
+  it('POST .../test em host de demonstração → 409 destino_demonstracao, nada enviado nem gravado', async () => {
+    const app = await createTestApp()
+    try {
+      const id = await insertDestination(app, { event: 'saque.solicitado', url: 'https://hooks.x2win-crm.com/in/saques', secret: 'segredo-demo-x' })
+      const { cookie } = await loginAs(app, 'superadmin')
+      const r = await api(app, 'POST', `/api/webhooks/destinations/${id}/test`, { cookie })
+      expect(r.statusCode).toBe(409)
+      expect(r.json().error.code).toBe('destino_demonstracao')
+      expect(await executions(app)).toHaveLength(0)
+      expect(await app.db.query(`select id from audit_log where action = 'testar'`)).toHaveLength(0)
+    } finally {
+      await app.close()
     }
   })
 })

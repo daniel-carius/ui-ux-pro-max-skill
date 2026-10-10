@@ -282,7 +282,7 @@ export default function Torneios() {
       },
     },
     {
-      id: 'pool',
+      id: 'pool', money: true,
       header: 'Prêmios',
       align: 'right',
       sortValue: (t) => prizePool(t, coin),

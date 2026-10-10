@@ -9,11 +9,16 @@ import type { FastifyInstance } from 'fastify'
 import type { MeResponse, TwoFactorEnableResponse, TwoFactorSetupResponse } from '@shared/api'
 import {
   FOCUS_RECHECK_MS,
+  IDLE_MARGIN_MS,
+  LOGIN_NOTICES,
   PENDING_LOGOUT_MESSAGE,
+  endReasonOf,
   focusRecheckDue,
+  idleExpired,
   isLogoutPending,
   logoutFailureText,
   mustResetStore,
+  readAccessFor,
   requestLogout,
   resolveSession,
   transition,
@@ -44,6 +49,7 @@ interface StoreModule {
   dbSetAndWait<T>(key: string, next: T | ((prev: T) => T), seed?: T): Promise<boolean>
   isLoadFailed(key: string): boolean
   resetDb(opts?: { notify?: boolean; serverDataOnly?: boolean }): void
+  setReadPermissions(perms: ReadonlySet<string> | 'sem-sessao' | null): void
 }
 interface ApiModule {
   api<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T>
@@ -315,6 +321,105 @@ describe('sessão do painel: códigos de recuperação do 2FA', () => {
     expect(focusRecheckDue({ ...base, visible: false })).toBe(false)
     expect(focusRecheckDue({ ...base, status: { kind: 'step', me: me('A', '2fa') } })).toBe(false)
     expect(focusRecheckDue({ ...base, status: { kind: 'login' } })).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Rodada de testes ponta a ponta (r1): chaves sem leitura, motivo do fim da sessão e inatividade
+// ---------------------------------------------------------------------------
+
+describe('sessão do painel: chave que o cargo não lê nem sai do navegador (sem 403 no console)', () => {
+  it('com as permissões da sessão, a leitura de uma chave proibida não vai ao servidor e fica vazia e só leitura', async () => {
+    const u = await createUser(app, { roleId: 'marketing', name: 'Pessoa Marketing' })
+    jar = await sessionCookie(app, u.id, 'active')
+    const perms = (await client.api<MeResponse>('GET', '/api/auth/me')).permissions ?? []
+    expect(perms).not.toContain('seguranca-painel.ver')
+    store.setReadPermissions(new Set(perms))
+    try {
+      const v = await loadFresh('config.seguranca-painel', { allowlist: [] as unknown[], enforce2faForAll: false })
+      expect(v).toEqual({ allowlist: [], enforce2faForAll: false })
+      expect(sent.filter((r) => r.includes('config.seguranca-painel'))).toEqual([])
+      // gravar continua recusado antes de enviar (sem PUT)
+      expect(await store.dbSetAndWait('config.seguranca-painel', { allowlist: [], enforce2faForAll: true })).toBe(false)
+      expect(puts).toEqual([])
+      // chave que o cargo lê vai ao servidor normalmente
+      await loadFresh('cargos.lista', [])
+      expect(sent).toContain('GET /api/kv/cargos.lista')
+    } finally {
+      store.setReadPermissions(null)
+    }
+  })
+
+  it('sessão ainda não conhecida (null) não há filtro: a leitura vai ao servidor (que decide)', async () => {
+    store.setReadPermissions(null)
+    const u = await createUser(app, { roleId: 'superadmin', name: 'Pessoa Sa Filtro' })
+    jar = await sessionCookie(app, u.id, 'active')
+    await loadFresh('config.seguranca-painel', {})
+    expect(sent).toContain('GET /api/kv/config.seguranca-painel')
+  })
+})
+
+// r2: cada "Sair" disparava GET /api/kv/operacao.saques e cargos.lista com o cookie morto (2 × 401 no console)
+describe('sessão do painel: sem sessão ativa nenhuma leitura sai do navegador', () => {
+  it('depois da saída (e numa etapa do login) as telas que ainda renderizam leem o vazio, sem pedido ao servidor', async () => {
+    const u = await createUser(app, { roleId: 'superadmin', name: 'Pessoa Saida Store' })
+    jar = await sessionCookie(app, u.id, 'active')
+    const tab = openTab([])
+    const opened = await tab.reload()
+    expect(opened.status.kind).toBe('active')
+    store.setReadPermissions(readAccessFor(opened.status))
+    try {
+      expect(await requestLogout(tab.io)).toEqual({ ended: true })
+      // a mesma regra do ApiSessionProvider.logout → apply({ kind: 'login', reason: 'logout' })
+      store.setReadPermissions(readAccessFor({ kind: 'login', reason: 'logout' }))
+      sent.length = 0
+      // o roteador renderiza o menu e o topo mais uma vez antes de eles saírem
+      expect(store.dbGet<unknown[]>('operacao.saques', [])).toEqual([])
+      expect(store.dbGet<unknown[]>('cargos.lista', [])).toEqual([])
+      await store.refreshKey('operacao.saques')
+      await store.refreshKey('cargos.lista')
+      expect(sent.filter((r) => r.includes('/api/kv/'))).toEqual([])
+    } finally {
+      store.setReadPermissions(null)
+    }
+    expect(readAccessFor({ kind: 'step', me: me('A', '2fa') })).toBe('sem-sessao')
+    expect(readAccessFor({ kind: 'offline', message: 'x' })).toBe('sem-sessao')
+    expect(readAccessFor({ kind: 'active', me: me('A', 'active', ['saques.ver']) })).toEqual(new Set(['saques.ver']))
+  })
+})
+
+describe('sessão do painel: a entrada diz por que a sessão terminou', () => {
+  it('motivo do servidor (details.reason no 401) vira o aviso da entrada; sem motivo, "expirou"', async () => {
+    const u = await createUser(app, { roleId: 'suporte', name: 'Pessoa Motivo Painel' })
+    jar = await sessionCookie(app, u.id, 'active')
+    const tab = openTab([])
+    expect((await tab.reload()).status.kind).toBe('active')
+    const admin = await createUser(app, { roleId: 'superadmin', name: 'Admin Motivo Painel' })
+    const adminCookie = await sessionCookie(app, admin.id, 'active')
+    const r = await call(app, 'POST', `/api/team/${u.id}/deactivate`, { cookie: adminCookie })
+    expect(r.statusCode, r.body).toBe(200)
+    const after = await tab.reload()
+    expect(after.expired).toBe(true)
+    expect(after.status).toEqual({ kind: 'login', reason: 'desativado' })
+    expect(LOGIN_NOTICES.desativado.title).toBe('Seu acesso foi desativado')
+
+    expect(endReasonOf({ status: 401, details: { reason: 'senha_trocada' } })).toBe('senha_trocada')
+    expect(endReasonOf({ status: 401, details: { reason: 'inventado' } })).toBeNull()
+    expect(endReasonOf({ status: 401 })).toBeNull()
+    // sem motivo do servidor, com a sessão aberta: o aviso genérico
+    const io: SessionIo = { getMe: () => Promise.reject(Object.assign(new Error('x'), { status: 401 })), postLogout: async () => {}, storage: null }
+    const open = await resolveSession(() => ({ kind: 'active', me: me('Z', 'active', []) }), io)
+    expect(open.next).toEqual({ kind: 'login', reason: 'expired' })
+  })
+
+  it('inatividade: passou do tempo de Segurança do painel desde a última resposta (com folga) e só com a sessão ativa', () => {
+    const m = { ...me('A', 'active', []), sessionTimeoutMinutes: 15 }
+    const active: AuthStatus = { kind: 'active', me: m }
+    const limit = 15 * 60_000 + IDLE_MARGIN_MS
+    expect(idleExpired({ status: active, lastActivity: 0, now: limit })).toBe(false)
+    expect(idleExpired({ status: active, lastActivity: 0, now: limit + 1 })).toBe(true)
+    expect(idleExpired({ status: { kind: 'step', me: m }, lastActivity: 0, now: limit * 10 })).toBe(false)
+    expect(idleExpired({ status: { kind: 'active', me: me('B', 'active', []) }, lastActivity: 0, now: limit * 10 })).toBe(false)
   })
 })
 
@@ -638,7 +743,7 @@ describe('exportação CSV do painel (src/lib/csv)', () => {
     // o texto continua inteiro (só ganha o apóstrofo na frente)
     expect(unquote(playerRow[1])).toBe(`'${FORMULA_NICK}`)
     // números de verdade não mudam (valor negativo continua número)
-    expect(saqueRow[1]).toBe('-150,5')
+    expect(saqueRow[1]).toBe('-150,50')
     // mesmo comportamento do CSV da auditoria no servidor
     expect(serverCsvCell(FORMULA_NICK)).not.toMatch(dangerous)
   })
@@ -650,8 +755,11 @@ describe('exportação CSV do painel (src/lib/csv)', () => {
       expect(unquote(cell).startsWith("'"), JSON.stringify(payload)).toBe(true)
     }
     // números e texto numérico: nada muda
-    expect(panelCsvCell(-10.5)).toBe('-10,5')
-    expect(panelCsvCell(1234.5)).toBe('1.234,5')
+    expect(panelCsvCell(-10.5)).toBe('-10,50')
+    // r1: valores em reais com duas casas ("827,10", "189.496,67"); inteiro como está
+    expect(panelCsvCell(1234.5)).toBe('1.234,50')
+    expect(panelCsvCell(189496.666)).toBe('189.496,67')
+    expect(panelCsvCell(42)).toBe('42')
     expect(panelCsvCell('-10,50')).toBe('-10,50')
     expect(panelCsvCell('+5')).toBe('+5')
     expect(panelCsvCell('-3.5%')).toBe('-3.5%')

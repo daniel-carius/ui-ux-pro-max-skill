@@ -84,6 +84,12 @@ function parseJson(text: string): unknown {
   }
 }
 
+/** Hora da última resposta do servidor (qualquer status): base da conferência de inatividade (auth-state.ts). */
+let lastResponseAt = Date.now()
+export function lastApiResponseAt() {
+  return lastResponseAt
+}
+
 export async function api<T>(method: Method, path: string, body?: unknown): Promise<T> {
   let res: Response
   try {
@@ -101,6 +107,7 @@ export async function api<T>(method: Method, path: string, body?: unknown): Prom
   } catch {
     throw new ApiError(0, 'sem_conexao', 'Sem conexão com o servidor. Verifique a internet e tente de novo.')
   }
+  lastResponseAt = Date.now()
   if (res.status === 204) return undefined as T
   const text = await res.text()
   const data = parseJson(text)

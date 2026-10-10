@@ -64,6 +64,16 @@ export default function JogoResponsavel() {
   const form = useSettingsForm<RgConfig>(RG_KEY, DEFAULT_RG, {
     entity: 'Jogo responsável',
     successMessage: 'Regras de jogo responsável salvas',
+    // nomes que a auditoria mostra no lugar das chaves técnicas
+    fieldLabels: {
+      deposit: 'Limites de depósito',
+      loss: 'Limites de perda',
+      session: 'Alerta de sessão',
+      pause: 'Opções de pausa',
+      exclusion: 'Opções de autoexclusão',
+      coolingOffHours: 'Espera para aumentar limite',
+      messages: 'Mensagens',
+    },
     validate: validateRg,
   })
   const v = form.values

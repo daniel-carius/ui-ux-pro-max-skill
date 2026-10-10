@@ -8,8 +8,9 @@ export interface WebhookStats {
   failures: number
   /** fração 0..1 (null sem execuções) */
   successRate: number | null
-  avgMs: number
-  p95Ms: number
+  /** null sem execuções (nada medido: a tela mostra "—", não "0 ms") */
+  avgMs: number | null
+  p95Ms: number | null
   byDay: { date: string; sucesso: number; falha: number }[]
   byEvent: { event: WebhookEvent; total: number; success: number; failures: number; avgMs: number; lastAt: string | null }[]
 }
@@ -18,8 +19,8 @@ export function webhookStats(execs: WebhookExecution[], days: string[]): Webhook
   const total = execs.length
   const success = execs.filter((e) => e.status === 'sucesso').length
   const durations = execs.map((e) => e.durationMs).sort((a, b) => a - b)
-  const avgMs = total ? Math.round(durations.reduce((s, d) => s + d, 0) / total) : 0
-  const p95Ms = total ? durations[Math.min(total - 1, Math.floor(total * 0.95))] : 0
+  const avgMs = total ? Math.round(durations.reduce((s, d) => s + d, 0) / total) : null
+  const p95Ms = total ? durations[Math.min(total - 1, Math.floor(total * 0.95))] : null
   const dayMap = new Map(days.map((d) => [d, { date: d, sucesso: 0, falha: 0 }]))
   const evMap = new Map<WebhookEvent, { event: WebhookEvent; total: number; success: number; failures: number; sumMs: number; lastAt: string | null }>()
   for (const e of execs) {

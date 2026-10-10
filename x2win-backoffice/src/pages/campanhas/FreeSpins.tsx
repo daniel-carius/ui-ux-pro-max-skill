@@ -588,9 +588,9 @@ function GrantsTab({
         </div>
       ),
     },
-    { id: 'value', header: 'Valor', align: 'right', sortValue: (g) => g.spins * g.spinValue, csv: (g) => g.spins * g.spinValue, cell: (g) => brl(g.spins * g.spinValue) },
+    { id: 'value', money: true, header: 'Valor', align: 'right', sortValue: (g) => g.spins * g.spinValue, csv: (g) => g.spins * g.spinValue, cell: (g) => brl(g.spins * g.spinValue) },
     {
-      id: 'winnings',
+      id: 'winnings', money: true,
       header: 'Ganho',
       align: 'right',
       sortValue: (g) => g.winnings,

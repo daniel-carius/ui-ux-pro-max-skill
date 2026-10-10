@@ -2,7 +2,7 @@
 import { createRng } from '@/lib/random'
 import { defaultTemplateBody, type TemplateEventDef, type TemplateField, type WebhookTemplate } from '@/domain/campanhas-templates'
 import { DAY, HOUR, NOW, iso } from './now'
-import { demoRecords } from './demo'
+import { apiValue } from './demo'
 
 export const TEMPLATE_KEY = 'campanhas.templates'
 
@@ -72,5 +72,22 @@ export function seedTemplates(): WebhookTemplate[] {
   }).map((t) => (t.lastTest && !t.lastTest.ok ? { ...t, lastTest: { ...t.lastTest, httpStatus: 502 } } : t))
 }
 
-// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
-demoRecords(seedTemplates)
+/**
+ * Catálogo da plataforma: um template por tipo de evento, com o corpo padrão. Os templates não são dados de
+ * demonstração (não há como criar um novo: cada evento tem o seu), então no modo API, sem nada gravado no servidor,
+ * a tela mostra este catálogo para a pessoa editar, ativar e testar. A primeira gravação leva a lista ao servidor.
+ */
+export function platformTemplates(): WebhookTemplate[] {
+  return TEMPLATE_EVENTS.map((e, i) => ({
+    id: `tp${String(i + 1).padStart(2, '0')}`,
+    event: e.key,
+    active: true,
+    body: defaultTemplateBody(e),
+    updatedAt: '',
+    updatedBy: 'Padrão da plataforma',
+    lastTest: null,
+  }))
+}
+
+// modo API: sem nada gravado, o catálogo da plataforma (nunca o histórico de demonstração do gerador)
+apiValue(seedTemplates, platformTemplates)

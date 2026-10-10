@@ -1,11 +1,14 @@
-// Equipe: criar acesso direto, convidar, aceitar convite, desativar, reativar, trocar cargo, redefinir 2FA. Prefixo /api/team.
+// Equipe: criar acesso direto, convidar, aceitar convite, desativar, reativar, trocar cargo, gerar senha temporária,
+// redefinir 2FA. Prefixo /api/team.
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import type { CreateMemberResponse, InviteMemberResponse } from '@shared/api'
+import type { CreateMemberResponse, InviteMemberResponse, ResetPasswordResponse } from '@shared/api'
 import { requirePerm } from '../../http'
+import { hashPassword } from '../../lib/crypto'
 import { withPasswordSlot } from '../auth/password-gate'
 import {
   acceptInvite,
+  assertMayResetPassword,
   canSeeLastIp,
   changeMemberRole,
   createDirectMember,
@@ -17,7 +20,9 @@ import {
   reactivateMember,
   resendInvite,
   resetMember2fa,
+  resetMemberPassword,
   roleIdSchema,
+  strongTemporaryPassword,
   toPanelMember,
   withTeamLock,
 } from './service'
@@ -127,6 +132,25 @@ export default async function routes(app: FastifyInstance) {
     const { roleId } = roleBody.parse(req.body ?? {})
     const m = await withTeamLock(app.db, auth.user.id, (t) => changeMemberRole(t, auth, id, roleId))
     return { ok: true as const, member: toPanelMember(m, canSeeLastIp(auth)) }
+  })
+
+  // ---------- POST /:id/reset-password ----------
+  // Senha esquecida: senha temporária nova (mostrada uma vez para quem gerou), troca obrigatória no próximo
+  // acesso e todas as sessões da pessoa encerradas.
+  app.post('/:id/reset-password', async (req, reply) => {
+    const auth = requirePerm(req, 'equipe.editar')
+    const { id } = idParams.parse(req.params)
+    // confere antes de gastar o hash; a transação confere de novo, com a trava da equipe
+    await assertMayResetPassword(app.db, auth, id)
+    const password = strongTemporaryPassword()
+    const hash = await withPasswordSlot(reply, () => hashPassword(password))
+    const out = await withTeamLock(app.db, auth.user.id, (t) => resetMemberPassword(t, auth, id, hash))
+    const res: ResetPasswordResponse = {
+      member: { ...toPanelMember(out.member, canSeeLastIp(auth)) },
+      temporaryPassword: password,
+      sessionsEnded: out.sessionsEnded,
+    }
+    return res
   })
 
   // ---------- POST /:id/reset-2fa ----------

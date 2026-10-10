@@ -66,7 +66,6 @@ export const DEFAULT_ROUTING: RoutingConfig = apiValue<RoutingConfig>(
   (): RoutingConfig => ({ deposits: {}, fallback: [], withdrawalAccountId: 'ga-pf-main', withdrawalFallback: true }),
 )
 
-const HOLDER = 'X2Win Entretenimento Digital Ltda.'
 const MAIN_ACCOUNT: Record<GatewayId, string> = { pagflex: 'ga-pf-main', pixnow: 'ga-pn-main', brpay: 'ga-br-main' }
 
 apiValue(seedGateways, (): Gateway[] =>
@@ -83,5 +82,6 @@ apiValue(seedGateways, (): Gateway[] =>
     updatedBy: '',
   })),
 )
-apiValue(seedGatewayAccounts, (): GatewayAccount[] => IDS.map((id) => account(MAIN_ACCOUNT[id], id, 'Conta principal', true, false, 0, HOLDER)))
+// modo API: o titular vem do cadastro da operação (nunca a razão social da demonstração)
+apiValue(seedGatewayAccounts, (): GatewayAccount[] => IDS.map((id) => account(MAIN_ACCOUNT[id], id, 'Conta principal', true, false, 0, '')))
 

@@ -42,7 +42,7 @@ import {
   type MenuEntry,
   type Tone,
 } from '@/components/ui'
-import type { CreateMemberResponse, InviteMemberResponse, KvGetResponse } from '@shared/api'
+import type { CreateMemberResponse, InviteMemberResponse, KvGetResponse, ResetPasswordResponse } from '@shared/api'
 import { AUDIT_SOURCE_LABEL, isPanelReported } from '@shared/audit'
 import { dateTime, num, pct, plural, relative } from '@/lib/format'
 import { ApiError, api, isApiMode, isServerBusy, isVersionConflict } from '@/lib/api'
@@ -116,6 +116,24 @@ function fieldError(e: unknown): FieldError {
   return { field: null, message: apiMessage(e) }
 }
 
+/** O 2FA vai ser exigido no primeiro acesso de quem entrar neste cargo? (cargo, Superadmin ou "2FA de todos") */
+function twoFactorRequiredFor(role: Role | undefined, enforceAll: boolean) {
+  return needs2faSetup({ twoFactor: false } as TeamMember, role, enforceAll)
+}
+
+/** Linha "2FA" do acesso criado: o que o cargo realmente exige (não promete 2FA a quem não terá). */
+function twoFactorPlanText(role: Role | undefined, enforceAll: boolean) {
+  return twoFactorRequiredFor(role, enforceAll) ? 'Exigido: cadastro no primeiro acesso' : 'Opcional (o cargo não exige); a pessoa pode ativar pelo menu da conta'
+}
+
+/** Texto do convite sobre a senha e o 2FA, conforme o cargo escolhido. */
+function inviteTwoFactorText(role: Role | undefined, enforceAll: boolean) {
+  if (!role) return 'A pessoa cria a própria senha; se o cargo exigir, cadastra o 2FA no primeiro acesso.'
+  return twoFactorRequiredFor(role, enforceAll)
+    ? 'A pessoa cria a própria senha e cadastra o 2FA no primeiro acesso (exigido pelo cargo).'
+    : 'A pessoa cria a própria senha. O 2FA é opcional neste cargo: ela pode ativar pelo menu da conta.'
+}
+
 /** Espera padrão quando o servidor está ocupado e não diz quanto aguardar (ele manda Retry-After: 2). */
 const BUSY_RETRY_SECONDS = 2
 
@@ -167,6 +185,8 @@ export default function Equipe() {
   const [openId, setOpenId] = useState<string | null>(null)
   /** modo API: link de convite reenviado, mostrado uma vez */
   const [inviteLink, setInviteLink] = useState<{ email: string; url: string } | null>(null)
+  /** senha temporária gerada para quem esqueceu a senha, mostrada uma vez */
+  const [tempPassword, setTempPassword] = useState<{ name: string; email: string; password: string; sessions: number } | null>(null)
   /** modo API: pessoas com ação em andamento (evita clique duplo nos itens de menu) */
   const inFlight = useRef(new Set<string>())
   const canGrant = can(GRANT_PERM)
@@ -218,8 +238,8 @@ export default function Equipe() {
     }
     audit('enviar', `Equipe · ${m.name}`, 'Pedido de ativação do 2FA registrado')
     toast.success('Pedido registrado', {
-      description: `Avise ${m.name} para ativar o 2FA. Para tornar obrigatório, exija o 2FA no cargo ou em Segurança do painel.`,
-      duration: 6000,
+      description: `Avise ${m.name} para ativar o 2FA em "Ativar 2FA", no menu da conta (canto superior direito). Para tornar obrigatório, exija o 2FA no cargo ou em Segurança do painel.`,
+      duration: 8000,
     })
   }
 
@@ -237,6 +257,45 @@ export default function Equipe() {
       await teamAction(m.id, 'reset-2fa')
       toast.success('2FA redefinido', { description: `${m.name} saiu de todas as sessões.` })
     })
+  }
+
+  /** Senha esquecida: senha temporária nova (troca obrigatória), sessões encerradas; o 2FA continua. */
+  const resetPassword = async (m: TeamMember) => {
+    const locked = canGrant ? null : grantNeededFor(roleOf(m))
+    if (locked) {
+      toast.error('Senha não gerada', { description: locked })
+      return
+    }
+    // a frase do 2FA segue a conta: "Redefinir 2FA" só existe no modo API e para quem tem 2FA ligado;
+    // com o 2FA já exigido (2FA pendente), "Pedir ativação do 2FA" não faz nada: diz o que acontece de fato
+    // (o servidor pede a senha nova primeiro e o cadastro do 2FA logo depois).
+    const twoFactorNote = m.twoFactor
+      ? API
+        ? 'O 2FA continua ligado; se ela também perdeu o celular, use "Redefinir 2FA".'
+        : 'O 2FA continua ligado.'
+      : needs2faSetup(m, roleOf(m), panel.enforce2faForAll)
+        ? `O 2FA é exigido ${panel.enforce2faForAll ? 'para toda a equipe' : 'pelo cargo'}: ela cadastra o 2FA no próximo acesso, depois de criar a senha nova.`
+        : 'O 2FA continua desligado nesta conta; para protegê-la, use "Pedir ativação do 2FA".'
+    const ok = await confirm({
+      title: `Gerar senha temporária para ${m.name}?`,
+      description: `A senha atual deixa de valer, as sessões abertas são encerradas e a pessoa cria uma senha nova no próximo acesso. ${twoFactorNote}`,
+      confirmLabel: 'Gerar senha temporária',
+      tone: 'warning',
+      icon: KeyRound,
+    })
+    if (!ok) return
+    if (API) {
+      await runOnce(m, 'Não foi possível gerar a senha', async () => {
+        const res = await api<ResetPasswordResponse>('POST', `/api/team/${encodeURIComponent(m.id)}/reset-password`)
+        applyMember(res.member as unknown as TeamMember)
+        setTempPassword({ name: m.name, email: m.email, password: res.temporaryPassword, sessions: res.sessionsEnded })
+      })
+      return
+    }
+    const password = generateTempPassword()
+    updateMember(m.id, { activeSessions: 0 })
+    audit('editar', `Senha · ${m.name}`, `Senha temporária gerada; ${plural(m.activeSessions, 'sessão encerrada', 'sessões encerradas')}. Troca obrigatória no próximo acesso.`)
+    setTempPassword({ name: m.name, email: m.email, password, sessions: m.activeSessions })
   }
 
   const require2faOnRoles = async () => {
@@ -437,6 +496,14 @@ export default function Equipe() {
       list.push({ divider: true }, { label: 'Cancelar convite', icon: Trash2, danger: true, disabled: !canEdit || adminLock, hint: canEdit && adminLock ? 'só Superadmin' : undefined, onSelect: () => cancelInvite(m) })
     }
     if (m.status === 'ativo') {
+      if (!isMe)
+        list.push({
+          label: 'Gerar senha temporária',
+          icon: KeyRound,
+          disabled: !canEdit || !!grantLock,
+          hint: canEdit && grantLock ? 'só quem concede cargos' : undefined,
+          onSelect: () => resetPassword(m),
+        })
       if (!m.twoFactor) list.push({ label: 'Pedir ativação do 2FA', icon: ShieldCheck, disabled: !canEdit, onSelect: () => ask2fa(m) })
       // modo API: redefinir o 2FA de outra pessoa; encerrar sessões só existe na demonstração
       if (API && m.twoFactor && !isMe) list.push({ label: 'Redefinir 2FA', icon: ShieldOff, disabled: !canEdit || adminLock, hint: canEdit && adminLock ? 'só Superadmin' : undefined, onSelect: () => reset2fa(m) })
@@ -651,7 +718,7 @@ export default function Equipe() {
           }
           empty={{
             title: filter === 'convidado' ? 'Nenhum convite pendente' : 'Ninguém neste filtro',
-            description: filter === 'convidado' ? 'Convide alguém pelo e-mail. A pessoa cria a senha e ativa o 2FA no primeiro acesso.' : 'Troque o filtro de status.',
+            description: filter === 'convidado' ? 'Convide alguém pelo e-mail. A pessoa cria a senha e, se o cargo exigir, cadastra o 2FA no primeiro acesso.' : 'Troque o filtro de status.',
             action:
               filter === 'convidado' ? (
                 <Button size="sm" icon={MailPlus} onClick={() => setModal('convite')} disabled={!canEdit}>
@@ -680,6 +747,34 @@ export default function Equipe() {
         }
       >
         {inviteLink && <InviteLinkView url={inviteLink.url} />}
+      </Modal>
+      <Modal
+        open={!!tempPassword}
+        onClose={() => setTempPassword(null)}
+        title="Senha temporária gerada"
+        description={
+          tempPassword
+            ? `Entregue a senha a ${tempPassword.name} por um canal seguro. ${tempPassword.sessions ? `${plural(tempPassword.sessions, 'sessão foi encerrada', 'sessões foram encerradas')}. ` : ''}No próximo acesso a pessoa cria uma senha nova.`
+            : undefined
+        }
+        icon={KeyRound}
+        iconTone="success"
+        footer={
+          <Button variant="primary" onClick={() => setTempPassword(null)}>
+            Já copiei a senha
+          </Button>
+        }
+      >
+        {tempPassword && (
+          <div className="space-y-4">
+            <DescriptionList items={[{ label: 'E-mail de acesso', value: tempPassword.email }]} />
+            <OneTimeSecret
+              label="Senha temporária"
+              value={tempPassword.password}
+              warning="Esta senha aparece só agora e precisa ser trocada no primeiro acesso. Não envie por e-mail junto com o login."
+            />
+          </div>
+        )}
       </Modal>
       <MemberDrawer
         member={open}
@@ -712,6 +807,7 @@ function InviteModal({
   onCreated: (m: TeamMember) => void
 }) {
   const [, setTeam] = useTeam()
+  const [panel] = usePanelSecurity()
   const [email, setEmail] = useState('')
   const [name, setName] = useState('')
   const [roleId, setRoleId] = useState('')
@@ -721,8 +817,15 @@ function InviteModal({
   const [serverError, setServerError] = useState<FieldError | null>(null)
   const [created, setCreated] = useState<{ email: string; url: string } | null>(null)
   const emailErr = validateTeamEmail(email, team) ?? (serverError?.field === 'email' ? serverError.message : null)
-  // nome opcional: sem ele, vem do e-mail (o servidor recusa nome que se confunde com o de outra pessoa)
-  const nameErr = (name.trim() && name.trim().length < 3 ? 'Use pelo menos 3 letras.' : localNameConflict(name, team)) ?? (serverError?.field === 'name' ? serverError.message : null)
+  // nome opcional: sem ele, vem do e-mail (o servidor recusa nome que se confunde com o de outra pessoa);
+  // com o campo vazio, a conferência e a mensagem dizem qual nome foi montado
+  const derivedName = !name.trim() && email.includes('@') ? nameFromEmail(email.trim()) : ''
+  const nameErr =
+    (name.trim()
+      ? name.trim().length < 3
+        ? 'Use pelo menos 3 letras.'
+        : localNameConflict(name, team)
+      : derivedNameConflict(derivedName, team)) ?? (serverError?.field === 'name' ? serverError.message : null)
   const role = roles.find((r) => r.id === roleId)
   const roleErr = roleError(role, canGrant)
   const close = () => {
@@ -784,10 +887,10 @@ function InviteModal({
       title={created ? 'Convite criado' : 'Convidar para a equipe'}
       description={
         created
-          ? `Envie o link para ${created.email}. A pessoa cria a própria senha e ativa o 2FA no primeiro acesso.`
+          ? `Envie o link para ${created.email}. ${inviteTwoFactorText(role, panel.enforce2faForAll)}`
           : API
-            ? 'Geramos um link de convite para você enviar. A pessoa cria a própria senha e ativa o 2FA no primeiro acesso.'
-            : 'A pessoa recebe um link por e-mail, cria a própria senha e ativa o 2FA no primeiro acesso.'
+            ? `Geramos um link de convite para você enviar. ${inviteTwoFactorText(role, panel.enforce2faForAll)}`
+            : `A pessoa recebe um link por e-mail. ${inviteTwoFactorText(role, panel.enforce2faForAll)}`
       }
       icon={created ? Link2 : MailPlus}
       iconTone={created ? 'success' : 'primary'}
@@ -870,6 +973,7 @@ function InviteLinkView({ url }: { url: string }) {
 
 function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boolean; onClose: () => void; roles: Role[]; team: TeamMember[]; canGrant: boolean }) {
   const [, setTeam] = useTeam()
+  const [panel] = usePanelSecurity()
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [roleId, setRoleId] = useState('')
@@ -969,7 +1073,7 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
               { label: 'Pessoa', value: created.member.name },
               { label: 'E-mail de acesso', value: created.member.email },
               { label: 'Cargo', value: <RoleBadge role={role} /> },
-              { label: '2FA', value: 'Ativação no primeiro acesso' },
+              { label: '2FA', value: twoFactorPlanText(role, panel.enforce2faForAll) },
             ]}
           />
           <OneTimeSecret
@@ -1203,6 +1307,14 @@ function roleError(role: Role | undefined, canGrant: boolean): string | null {
 }
 
 /** Nome igual ao de outra pessoa da equipe (qualquer status). O servidor também recusa nomes parecidos (409). */
+/** Convite sem nome: o nome montado a partir do e-mail já é de outra pessoa? (a mensagem cita o nome, o campo está vazio) */
+function derivedNameConflict(derived: string, team: TeamMember[]): string | null {
+  const n = normalizeName(derived)
+  if (!n) return null
+  const dup = team.find((m) => normalizeName(m.name) === n)
+  return dup ? `O nome "${derived}", montado a partir do e-mail, já é usado por ${dup.name} (${dup.status}). Digite no campo Nome um nome que identifique a pessoa sem dúvida.` : null
+}
+
 function localNameConflict(name: string, team: TeamMember[], ignoreId?: string): string | null {
   const n = normalizeName(name)
   if (!n) return null

@@ -12,6 +12,8 @@ import {
   DescriptionList,
   KpiCard,
   Mono,
+  NO_SOURCE_HINT,
+  NoDataSource,
   PageHeader,
   Progress,
   toast,
@@ -38,6 +40,13 @@ type Row = AccessHost & { result?: HostResult }
  * trocar ou apagar as anteriores.
  */
 const CHECKS_SEED: () => DomainCheck[] = isApiMode() ? () => [] : seedDomainChecks
+
+const API = isApiMode()
+/**
+ * Modo API: o servidor ainda não consulta DNS, HTTP nem o certificado. "Verificar agora" gerava um resultado no
+ * navegador ("Tudo no ar") e o gravava como verificação real; agora fica desligado com o motivo.
+ */
+const NO_CHECK = 'A verificação de DNS, acesso e certificado ainda não é feita pelo servidor nesta versão.'
 
 export default function Dominios() {
   const [checks] = useDb<DomainCheck[]>(DOMAIN_CHECKS_KEY, CHECKS_SEED)
@@ -133,7 +142,7 @@ export default function Dominios() {
     <>
       <PageHeader
         actions={
-          <Button icon={RefreshCw} onClick={runCheck} loading={running}>
+          <Button icon={RefreshCw} onClick={runCheck} loading={running} disabled={API} title={API ? NO_CHECK : undefined}>
             Verificar agora
           </Button>
         }
@@ -145,14 +154,20 @@ export default function Dominios() {
       </Alert>
 
       <section aria-label="Situação do domínio" className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Domínio principal" icon={Globe} value={<span className="text-[22px]">{MAIN_DOMAIN.name}</span>} hint={`registro renova em ${regDays} dias`} />
-        <KpiCard label="Certificado SSL" icon={LockKeyhole} tone={ssl.tone === 'success' ? 'success' : ssl.tone} value={ssl.label} hint={`válido até ${date(MAIN_DOMAIN.ssl.validUntil)} · ${sslLeft} dias`} />
+        <KpiCard label="Domínio principal" icon={Globe} value={<span className="text-[22px]">{MAIN_DOMAIN.name}</span>} hint={API ? 'registro: sem fonte de dados nesta versão' : `registro renova em ${regDays} dias`} />
+        <KpiCard
+          label="Certificado SSL"
+          icon={LockKeyhole}
+          tone={API ? 'neutral' : ssl.tone === 'success' ? 'success' : ssl.tone}
+          value={API ? '—' : ssl.label}
+          hint={API ? NO_SOURCE_HINT : `válido até ${date(MAIN_DOMAIN.ssl.validUntil)} · ${sslLeft} dias`}
+        />
         <KpiCard
           label="DNS e acesso"
           icon={Network}
-          tone={okCount === ACCESS_HOSTS.length ? 'success' : 'danger'}
-          value={`${okCount} de ${ACCESS_HOSTS.length}`}
-          hint={okCount === ACCESS_HOSTS.length ? 'endereços respondendo' : 'há endereço fora do ar'}
+          tone={!last ? 'neutral' : okCount === ACCESS_HOSTS.length ? 'success' : 'danger'}
+          value={last ? `${okCount} de ${ACCESS_HOSTS.length}` : '—'}
+          hint={!last ? 'nenhuma verificação ainda' : okCount === ACCESS_HOSTS.length ? 'endereços respondendo' : 'há endereço fora do ar'}
         />
         <KpiCard label="Última verificação" icon={Activity} tone="neutral" value={last ? relative(last.at) : '—'} hint={last ? `${last.by} · ${dateTime(last.at)}` : 'nunca verificado'} />
       </section>
@@ -177,9 +192,9 @@ export default function Dominios() {
             <DescriptionList
               columns={3}
               items={[
-                { label: 'Registro', value: MAIN_DOMAIN.registrar },
-                { label: 'Registrado em', value: date(MAIN_DOMAIN.registeredAt) },
-                { label: 'Renovação do registro', value: `${date(MAIN_DOMAIN.expiresAt)} (automática)` },
+                { label: 'Registro', value: API ? '—' : MAIN_DOMAIN.registrar },
+                { label: 'Registrado em', value: API ? '—' : date(MAIN_DOMAIN.registeredAt) },
+                { label: 'Renovação do registro', value: API ? '—' : `${date(MAIN_DOMAIN.expiresAt)} (automática)` },
                 {
                   label: 'Servidores DNS',
                   full: true,
@@ -199,8 +214,14 @@ export default function Dominios() {
           </CardBody>
         </Card>
         <Card>
-          <CardHeader icon={ShieldCheck} title="Certificado SSL" description={MAIN_DOMAIN.ssl.kind} />
+          <CardHeader icon={ShieldCheck} title="Certificado SSL" description={API ? undefined : MAIN_DOMAIN.ssl.kind} />
           <CardBody className="space-y-3">
+            {API ? (
+              <NoDataSource compact title="Sem fonte de dados nesta versão">
+                Emissor e validade do certificado vêm da verificação da plataforma, que ainda não roda neste servidor.
+              </NoDataSource>
+            ) : (
+            <>
             <div className="flex items-baseline justify-between gap-2">
               <Badge tone={ssl.tone} dot size="md">
                 {ssl.label}
@@ -217,6 +238,8 @@ export default function Dominios() {
                 { label: 'Renovação', value: `automática a ${MAIN_DOMAIN.ssl.autoRenewDaysBefore} dias do fim` },
               ]}
             />
+            </>
+            )}
           </CardBody>
         </Card>
       </div>
@@ -240,7 +263,11 @@ export default function Dominios() {
       />
 
       <Card className="mt-5">
-        <CardHeader icon={History} title="Histórico de verificações" description="A plataforma verifica sozinha a cada 6 horas. “Verificar agora” roda na hora." />
+        <CardHeader
+          icon={History}
+          title="Histórico de verificações"
+          description={API ? NO_CHECK : 'A plataforma verifica sozinha a cada 6 horas. “Verificar agora” roda na hora.'}
+        />
         <CardBody>
           <ol className="divide-y divide-line">
             {checks.slice(0, 8).map((c) => {

@@ -38,12 +38,14 @@ import {
 } from '@/components/ui'
 import { num, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { isApiMode } from '@/lib/api'
 import { useCollection } from '@/lib/store'
 import { EMAIL_KEYS, defaultTemplate, seedEmailTemplates } from '@/data/config2-email'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { useCompany, useIntegrations } from '@/domain/system'
 import {
   CATEGORY_LABEL,
+  NO_MESSAGE_SENDING,
   PROVIDER_LABEL,
   VARIABLE_SAMPLES,
   fillVariables,
@@ -57,6 +59,15 @@ import {
 const CATEGORY_ICON: Record<TemplateCategory, LucideIcon> = { conta: ShieldCheck, financeiro: Wallet, kyc: IdCard, equipe: Users }
 const CATEGORY_ORDER: TemplateCategory[] = ['conta', 'financeiro', 'kyc', 'equipe']
 type Filter = 'todos' | TemplateCategory | 'desligados'
+
+/**
+ * Modo API: o servidor ainda não envia e-mails. Ligado/desligado e os textos ficam guardados para quando o envio
+ * for ligado; a tela não diz "Enviado" nem "Sendo enviados" e o teste fica desligado (antes inventava um envio).
+ */
+const API = isApiMode()
+const SENT_LABEL = API ? 'Ligado' : 'Enviado'
+const NOT_SENT_LABEL = API ? 'Desligado' : 'Não enviado'
+const ALWAYS_LABEL = API ? 'Sempre ligado' : 'Sempre enviado'
 
 function isCustom(t: EmailTemplate) {
   const d = defaultTemplate(t.id)
@@ -107,18 +118,36 @@ export default function TemplatesEmail() {
       <PageHeader />
       <div className="space-y-5">
         <section aria-label="Resumo" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <KpiCard label="E-mails transacionais" icon={Mail} value={num(all.length)} hint={`${all.filter((t) => t.locked).length} de segurança, sempre enviados`} />
-          <KpiCard label="Sendo enviados" icon={MailCheck} tone="success" value={`${enabled.length} de ${all.length}`} hint={`pelo ${PROVIDER_LABEL[integrations.emailProvider]}`} />
+          <KpiCard label="E-mails transacionais" icon={Mail} value={num(all.length)} hint={`${all.filter((t) => t.locked).length} de segurança, ${API ? 'sempre ligados' : 'sempre enviados'}`} />
+          {API ? (
+            <KpiCard label="Ligados" icon={MailCheck} tone="info" value={`${enabled.length} de ${all.length}`} hint="envio de e-mail ainda não ligado no servidor" />
+          ) : (
+            <KpiCard label="Sendo enviados" icon={MailCheck} tone="success" value={`${enabled.length} de ${all.length}`} hint={`pelo ${PROVIDER_LABEL[integrations.emailProvider]}`} />
+          )}
           <KpiCard label="Personalizados" icon={Pencil} tone="info" value={num(custom.length)} hint="texto diferente do padrão" />
           <KpiCard label="Desligados" icon={MailX} tone={off.length ? 'warning' : 'neutral'} value={num(off.length)} hint={off.map((t) => t.name).join(', ') || 'todos ligados'} onClick={() => setFilter(filter === 'desligados' ? 'todos' : 'desligados')} active={filter === 'desligados'} />
         </section>
 
+        {API && (
+          <Alert tone="warning" icon={MailX} title="Nenhum destes e-mails sai do servidor nesta versão">
+            {NO_MESSAGE_SENDING} Os textos e o liga/desliga ficam guardados aqui.
+          </Alert>
+        )}
         <Alert tone="info" icon={Lock}>
-          E-mails de segurança (redefinição de senha, verificação de e-mail, código 2FA e convite) são sempre enviados: desligar deixaria pessoas sem acesso. O remetente é{' '}
-          <strong>
-            {integrations.smtp.fromName} &lt;{integrations.smtp.fromEmail}&gt;
-          </strong>
-          , definido em <a className="link" href="#/settings/integracoes">Integrações</a>.
+          E-mails de segurança (redefinição de senha, verificação de e-mail, código 2FA e convite) {API ? 'ficam sempre ligados' : 'são sempre enviados'}: desligar deixaria pessoas sem acesso.{' '}
+          {integrations.smtp.fromEmail.trim() ? (
+            <>
+              O remetente é{' '}
+              <strong>
+                {integrations.smtp.fromName.trim() ? `${integrations.smtp.fromName} ` : ''}&lt;{integrations.smtp.fromEmail}&gt;
+              </strong>
+              , definido em <a className="link" href="#/settings/integracoes">Integrações</a>.
+            </>
+          ) : (
+            <>
+              O remetente ainda não foi definido: informe-o em <a className="link" href="#/settings/integracoes">Integrações</a>.
+            </>
+          )}
         </Alert>
         {off.some((t) => t.id === 'kyc-reprovado') && (
           <Alert tone="warning" icon={TriangleAlert} title="KYC reprovado está desligado">
@@ -154,8 +183,8 @@ export default function TemplatesEmail() {
                       <p className="truncate text-xs text-fg-3">{t.trigger}</p>
                     </div>
                     {t.locked ? (
-                      <span title="E-mail de segurança: sempre enviado">
-                        <Badge tone="success" icon={Lock}>Sempre enviado</Badge>
+                      <span title={API ? 'E-mail de segurança: não pode ser desligado' : 'E-mail de segurança: sempre enviado'}>
+                        <Badge tone={API ? 'info' : 'success'} icon={Lock}>{ALWAYS_LABEL}</Badge>
                       </span>
                     ) : (
                       <Switch size="sm" checked={t.enabled} disabled={!canEdit} onChange={(on) => toggle(t, on)} ariaLabel={`Enviar o e-mail ${t.name}`} />
@@ -166,8 +195,8 @@ export default function TemplatesEmail() {
                     <p className="mt-0.5 truncate text-[13px] text-fg">{fillVariables(t.subject)}</p>
                   </div>
                   <div className="flex flex-1 flex-wrap items-center gap-1.5 px-4 py-3">
-                    <Badge tone={t.enabled ? 'success' : 'neutral'} dot>
-                      {t.enabled ? 'Enviado' : 'Não enviado'}
+                    <Badge tone={t.enabled ? (API ? 'info' : 'success') : 'neutral'} dot>
+                      {t.enabled ? SENT_LABEL : NOT_SENT_LABEL}
                     </Badge>
                     {isCustom(t) ? <Badge tone="info">Personalizado</Badge> : <Badge>Texto padrão</Badge>}
                     <Badge icon={Braces}>{usedVariables(`${t.subject} ${t.body}`).length} variáveis</Badge>
@@ -256,7 +285,7 @@ function TemplateDrawer({ t, canEdit, onClose, onSave }: { t: EmailTemplate; can
     if (body !== t.body) parts.push('corpo')
     if (enabled !== t.enabled) parts.push(enabled ? 'envio ligado' : 'envio desligado')
     audit('editar', `E-mail "${t.name}"`, `Alterado: ${parts.join(', ')}`)
-    toast.success('Template salvo', { description: 'Os próximos e-mails já saem com o texto novo.' })
+    toast.success('Template salvo', { description: API ? 'O texto fica guardado para quando o envio de e-mails for ligado.' : 'Os próximos e-mails já saem com o texto novo.' })
     onClose()
   }
 
@@ -278,6 +307,11 @@ function TemplateDrawer({ t, canEdit, onClose, onSave }: { t: EmailTemplate; can
   }
 
   const sendTest = () => {
+    // modo API: o servidor não envia e-mails; um "teste enviado" seria inventado (e iria para a auditoria)
+    if (API) {
+      toast.info('Envio de teste indisponível nesta versão', { description: NO_MESSAGE_SENDING })
+      return
+    }
     if (check.errors.length) {
       toast.error('Corrija o template antes de testar', { description: check.errors[0] })
       return
@@ -297,14 +331,24 @@ function TemplateDrawer({ t, canEdit, onClose, onSave }: { t: EmailTemplate; can
       width="xl"
       title={t.name}
       description={t.trigger}
-      headerExtra={t.locked ? <Badge tone="success" icon={Lock} size="md">Sempre enviado</Badge> : <Badge tone={enabled ? 'success' : 'neutral'} dot size="md">{enabled ? 'Enviado' : 'Não enviado'}</Badge>}
+      headerExtra={
+        t.locked ? (
+          <Badge tone={API ? 'info' : 'success'} icon={Lock} size="md">
+            {ALWAYS_LABEL}
+          </Badge>
+        ) : (
+          <Badge tone={enabled ? (API ? 'info' : 'success') : 'neutral'} dot size="md">
+            {enabled ? SENT_LABEL : NOT_SENT_LABEL}
+          </Badge>
+        )
+      }
       footer={
         <div className="flex w-full flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="ghost" icon={RotateCcw} onClick={restore} disabled={readOnly || isDefault}>
               Restaurar padrão
             </Button>
-            <Button size="sm" icon={MailCheck} onClick={sendTest} loading={sending} disabled={readOnly}>
+            <Button size="sm" icon={MailCheck} onClick={sendTest} loading={sending} disabled={readOnly || API} title={API ? NO_MESSAGE_SENDING : undefined}>
               Enviar teste
             </Button>
           </div>
@@ -373,10 +417,23 @@ function TemplateDrawer({ t, canEdit, onClose, onSave }: { t: EmailTemplate; can
           )}
           {t.locked ? (
             <Alert tone="info" icon={Lock}>
-              E-mail de segurança: sempre enviado. Dá para mudar o texto, mas não desligar.
+              E-mail de segurança: {API ? 'fica sempre ligado' : 'sempre enviado'}. Dá para mudar o texto, mas não desligar.
             </Alert>
           ) : (
-            <Switch label="Enviar este e-mail" description={enabled ? 'O jogador recebe quando o evento acontece.' : 'Desligado: o evento acontece, mas nenhum e-mail sai.'} checked={enabled} onChange={setEnabled} />
+            <Switch
+              label="Enviar este e-mail"
+              description={
+                API
+                  ? enabled
+                    ? 'Ligado: quando o envio de e-mails for ligado no servidor, o jogador recebe quando o evento acontece.'
+                    : 'Desligado: mesmo com o envio ligado no servidor, nenhum e-mail sai.'
+                  : enabled
+                    ? 'O jogador recebe quando o evento acontece.'
+                    : 'Desligado: o evento acontece, mas nenhum e-mail sai.'
+              }
+              checked={enabled}
+              onChange={setEnabled}
+            />
           )}
         </fieldset>
 
@@ -398,7 +455,14 @@ function TemplateDrawer({ t, canEdit, onClose, onSave }: { t: EmailTemplate; can
             <div className={cn('mx-auto overflow-hidden rounded-lg border border-line bg-surface shadow-card transition-[max-width] duration-200', device === 'mobile' ? 'max-w-[300px]' : 'max-w-full')}>
               <div className="space-y-0.5 border-b border-line px-3.5 py-2.5 text-xs">
                 <p className="truncate text-fg-3">
-                  De: <span className="text-fg-2">{integrations.smtp.fromName} &lt;{integrations.smtp.fromEmail}&gt;</span>
+                  De:{' '}
+                  {integrations.smtp.fromEmail.trim() ? (
+                    <span className="text-fg-2">
+                      {integrations.smtp.fromName.trim() ? `${integrations.smtp.fromName.trim()} ` : ''}&lt;{integrations.smtp.fromEmail.trim()}&gt;
+                    </span>
+                  ) : (
+                    <span className="text-warning">remetente não definido (Integrações)</span>
+                  )}
                 </p>
                 <p className="truncate text-fg-3">
                   Para: <span className="text-fg-2">{VARIABLE_SAMPLES.email.sample}</span>
@@ -443,7 +507,7 @@ function TemplateDrawer({ t, canEdit, onClose, onSave }: { t: EmailTemplate; can
                 )}
               </div>
               <div className="border-t border-line bg-surface-2 px-5 py-3 text-[11px] leading-4 text-fg-3">
-                {company.legalName} · {company.license}
+                {[company.legalName, company.license].map((x) => x.trim()).filter(Boolean).join(' · ') || 'Razão social e licença: preencha em Empresa'}
                 <br />
                 Jogue com responsabilidade. Proibido para menores de 18 anos.
               </div>

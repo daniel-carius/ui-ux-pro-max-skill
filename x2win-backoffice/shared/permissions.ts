@@ -179,6 +179,13 @@ export function ceilingLabel(role: Role) {
   return role.approvalCeiling.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 }
 
+/** Teto no meio de uma frase: "sem teto", "não aprova saques", "até R$ 5.000,00" (o "R$" fica em maiúsculas). */
+export function ceilingInline(role: Pick<Role, 'approvalCeiling'>) {
+  if (role.approvalCeiling === null) return 'sem teto'
+  if (role.approvalCeiling === 0) return 'não aprova saques'
+  return `até ${role.approvalCeiling.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`
+}
+
 /**
  * Permissões que dão poder administrativo sobre pessoas e acessos, ou sobre para onde vão as ordens de pagamento
  * assinadas (webhooks.editar troca o endereço/evento dos destinos de saque.pago): só quem tem cargos.conceder
@@ -234,6 +241,17 @@ export function isGovernedChange(before: GovernedState | null, after: GovernedSt
   const b = after ?? NO_ROLE
   if (ceilingCents(a.approvalCeiling) !== ceilingCents(b.approvalCeiling)) return true
   return GOVERNED_PERMISSIONS.some((p) => a.permissions.includes(p) !== b.permissions.includes(p))
+}
+
+/**
+ * Deixar o 2FA opcional num cargo com permissão de governança (antes ou depois da mudança) também exige
+ * cargos.conceder: enfraquece o acesso de quem aprova saques ou mexe em regras reguladas, como mudar o teto.
+ */
+export function isGoverned2faWeakening(
+  before: Pick<Role, 'permissions' | 'require2fa'>,
+  after: Pick<Role, 'permissions' | 'require2fa'>,
+): boolean {
+  return before.require2fa && !after.require2fa && (isGovernedRole(before) || isGovernedRole(after))
 }
 
 /** Permissões que o cargo tem e que existem no catálogo (ignora chaves desconhecidas). */

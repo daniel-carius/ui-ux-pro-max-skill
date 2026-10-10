@@ -502,10 +502,10 @@ function Simulator({ cfg, games }: { cfg: RolloverConfig; games: Game[] }) {
                       />
                     </td>
                     <td className="w-36 px-3 py-2">
-                      <MoneyInput value={r.amount} onValueChange={(n) => patch(r.id, { amount: n })} />
+                      <MoneyInput value={r.amount} ariaLabel="Valor apostado na simulação" onValueChange={(n) => patch(r.id, { amount: n })} />
                     </td>
                     <td className="w-32 px-3 py-2">
-                      <NumberInput value={r.multiplier} min={0} step={0.1} suffix="x" onValueChange={(n) => patch(r.id, { multiplier: Math.max(0, n) })} />
+                      <NumberInput value={r.multiplier} min={0} step={0.1} suffix="x" ariaLabel="Multiplicador do resultado na simulação" onValueChange={(n) => patch(r.id, { multiplier: Math.max(0, n) })} />
                       <p className="mt-1 text-[11px] text-fg-3">{r.multiplier === 0 ? 'perdeu tudo' : r.category === 'esportes' ? 'odd do bilhete' : `voltou ${brl(r.amount * r.multiplier)}`}</p>
                     </td>
                     <td className="px-3 py-2 pt-4 text-right tnum">

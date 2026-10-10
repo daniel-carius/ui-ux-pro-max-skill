@@ -390,6 +390,31 @@ describe('cargos.lista', () => {
     expect(bySa.statusCode, bySa.body).toBe(200)
   })
 
+  // r1 (rodada de testes ponta a ponta): o Administrador deixava o 2FA opcional no Financeiro (aprova saques)
+  it('deixar o 2FA opcional num cargo com governança exige cargos.conceder; exigir, ou mexer em cargo comum, não', async () => {
+    const cur = list(await roles.read(ctx(app, sa)))
+    const fin = cur.find((r) => r.id === 'financeiro')!
+    expect(fin.permissions).toContain('saques.aprovar')
+    if (!fin.require2fa) await save(sa, (rs) => patch(rs, 'financeiro', { require2fa: true }))
+    const before = (await roles.read(ctx(app, sa)))!.version
+    await expect(save(adm, (rs) => patch(rs, 'financeiro', { require2fa: false }))).rejects.toMatchObject({
+      status: 403,
+      code: 'sem_permissao',
+      message: expect.stringMatching(/2FA opcional no cargo Financeiro/),
+    })
+    const after = await roles.read(ctx(app, sa))
+    expect(after!.version).toBe(before)
+    expect(list(after).find((r) => r.id === 'financeiro')!.require2fa).toBe(true)
+    // tirar saques.aprovar e o 2FA juntos também conta (o cargo tinha governança antes)
+    await expect(save(adm, (rs) => patch(rs, 'financeiro', { require2fa: false, permissions: fin.permissions.filter((p) => p !== 'saques.aprovar') }))).rejects.toMatchObject({ status: 403 })
+    // cargo sem governança: o Administrador liga e desliga o 2FA
+    await save(adm, (rs) => patch(rs, 'suporte', { require2fa: true }))
+    await expect(save(adm, (rs) => patch(rs, 'suporte', { require2fa: false }))).resolves.toBeTruthy()
+    // quem concede cargos deixa opcional (e volta a exigir para os próximos testes)
+    await expect(save(sa, (rs) => patch(rs, 'financeiro', { require2fa: false }))).resolves.toBeTruthy()
+    await save(sa, (rs) => patch(rs, 'financeiro', { require2fa: true }))
+  })
+
   it('tudo ou nada: um erro na lista desfaz as outras mudanças', async () => {
     const before = await getRole(app.db, 'marketing')
     await expect(

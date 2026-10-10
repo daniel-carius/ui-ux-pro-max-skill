@@ -115,7 +115,9 @@ export default async function routes(app: FastifyInstance) {
       [...params, EXPORT_MAX_ROWS],
     )
     const csv = auditCsv(rows.map(toAuditExportEntry))
-    const filters = describeFilter(f)
+    // pessoa filtrada pelo nome e e-mail (não o id interno)
+    const who = f.actorId ? await app.db.one<{ name: string; email: string }>('select name, email from users where id = $1', [f.actorId]) : null
+    const filters = describeFilter(f, who ? `${who.name} (${who.email})` : null)
     await writeAudit(app.db, auth, {
       action: 'exportar',
       entity: 'Auditoria',

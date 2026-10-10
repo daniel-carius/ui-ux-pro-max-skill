@@ -16,7 +16,7 @@ import {
   Tooltip,
   type Column,
 } from '@/components/ui'
-import { brl, brlCompact, date, maskEmail, maskPhone, num, pct, relative } from '@/lib/format'
+import { brl, brlCompact, date, maskEmail, maskPhone, num, pct, plural, relative } from '@/lib/format'
 import { useAffiliates, usePlayers } from '@/data/hooks'
 import { KYC_LABEL, PLAYER_STATUS_LABEL, type Affiliate, type Player } from '@/data/players'
 import { audit, usePageAccess } from '@/domain/session'
@@ -171,7 +171,7 @@ export default function Indicados() {
       ),
     },
     {
-      id: 'deposited',
+      id: 'deposited', money: true,
       header: 'Valor depositado',
       align: 'right',
       sortValue: (l) => l.player.totalDeposited,
@@ -179,12 +179,12 @@ export default function Indicados() {
       cell: (l) => (
         <div>
           <p className="font-semibold">{brl(l.player.totalDeposited)}</p>
-          <p className="text-xs text-fg-3">{l.player.depositsCount ? `${num(l.player.depositsCount)} depósitos` : 'nenhum depósito'}</p>
+          <p className="text-xs text-fg-3">{l.player.depositsCount ? plural(l.player.depositsCount, 'depósito', 'depósitos') : 'nenhum depósito'}</p>
         </div>
       ),
     },
     {
-      id: 'balance',
+      id: 'balance', money: true,
       header: 'Saldo',
       align: 'right',
       sortValue: (l) => l.balance,
@@ -404,7 +404,7 @@ function LeadDrawer({ lead, onClose }: { lead: Lead | undefined; onClose: () => 
         <section>
           <h3 className="mb-3 text-sm font-semibold text-fg">Resultado do jogador</h3>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <StatTile label="Depositado" value={brl(p.totalDeposited)} sub={`${num(p.depositsCount)} depósitos`} />
+            <StatTile label="Depositado" value={brl(p.totalDeposited)} sub={plural(p.depositsCount, 'depósito', 'depósitos')} />
             <StatTile label="Sacado" value={brl(p.totalWithdrawn)} />
             <StatTile label="GGR gerado" value={brl(ggr)} sub="apostado − ganho" />
             <StatTile label="Saldo real" value={brl(p.balanceReal)} />

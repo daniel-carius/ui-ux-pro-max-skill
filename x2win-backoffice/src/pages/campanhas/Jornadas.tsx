@@ -63,6 +63,7 @@ import {
 import { cn } from '@/lib/cn'
 import { dateTime, num, pct, relative } from '@/lib/format'
 import { useCollection } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
 import { uid } from '@/lib/random'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { availableChannels, useIntegrations } from '@/domain/system'
@@ -113,6 +114,15 @@ function StepIcon({ kind, size = 30 }: { kind: StepKind; size?: number }) {
   )
 }
 
+/**
+ * Modo API: o servidor ainda não executa jornadas nem envia mensagens. As métricas de jornada eram simuladas no
+ * navegador ("crescem com o tempo ativo"); aqui ficam sem fonte e a tela diz que nada é enviado.
+ */
+const API = isApiMode()
+const NO_RUN = 'O servidor ainda não executa jornadas nem envia e-mail, SMS ou RCS nesta versão: ativar só registra a jornada.'
+const NO_METRICS: ReturnType<typeof journeyMetrics> = { entered: 0, inProgress: 0, completed: 0, converted: 0, conversion: null, hoursActive: 0 }
+const metricsOf = (j: Journey, now?: number) => (API ? NO_METRICS : journeyMetrics(j, now))
+
 export default function Jornadas() {
   const { canEdit } = usePageAccess()
   const { user } = useSession()
@@ -124,7 +134,7 @@ export default function Jornadas() {
   const [editing, setEditing] = useState<{ journey: Journey; isNew: boolean } | null>(null)
   const now = Date.now()
 
-  const rows = useMemo(() => journeys.items.map((j) => ({ ...j, m: journeyMetrics(j, now) })), [journeys.items, now])
+  const rows = useMemo(() => journeys.items.map((j) => ({ ...j, m: metricsOf(j, now) })), [journeys.items, now])
   const active = rows.filter((r) => r.status === 'ativa')
   const entered = rows.reduce((s, r) => s + r.m.entered, 0)
   const completed = rows.reduce((s, r) => s + r.m.completed, 0)
@@ -143,7 +153,7 @@ export default function Jornadas() {
     }
     const ok = await confirm({
       title: `Ativar "${j.name}"?`,
-      description: `${describeTrigger(j.trigger, levelName)}, o jogador entra na jornada. Quem cumpriu o gatilho antes de agora não entra.`,
+      description: `${describeTrigger(j.trigger, levelName)}, o jogador entra na jornada. Quem cumpriu o gatilho antes de agora não entra.${API ? ` ${NO_RUN}` : ''}`,
       confirmLabel: 'Ativar jornada',
       tone: 'success',
       icon: Play,
@@ -152,7 +162,7 @@ export default function Jornadas() {
     const nowIso = new Date().toISOString()
     journeys.update(j.id, { status: 'ativa', activatedAt: nowIso, updatedAt: nowIso })
     audit('ligar', `Jornada "${j.name}"`, `Jornada ativada · ${TRIGGER_LABEL[j.trigger.kind]} · ${j.steps.length} etapas`)
-    toast.success('Jornada ativada', { description: 'Novos jogadores entram assim que cumprirem o gatilho.' })
+    toast.success('Jornada ativada', { description: API ? NO_RUN : 'Novos jogadores entram assim que cumprirem o gatilho.' })
   }
 
   const pause = async (j: Journey) => {
@@ -263,8 +273,8 @@ export default function Jornadas() {
         </Badge>
       ),
     },
-    { id: 'entered', header: 'Entradas', align: 'right', sortValue: (r) => r.m.entered, cell: (r) => <span className="font-medium">{num(r.m.entered)}</span> },
-    { id: 'completed', header: 'Concluíram', align: 'right', sortValue: (r) => r.m.completed, cell: (r) => <span>{num(r.m.completed)}</span> },
+    { id: 'entered', header: 'Entradas', align: 'right', sortValue: (r) => r.m.entered, cell: (r) => <span className="font-medium">{API ? '—' : num(r.m.entered)}</span> },
+    { id: 'completed', header: 'Concluíram', align: 'right', sortValue: (r) => r.m.completed, cell: (r) => <span>{API ? '—' : num(r.m.completed)}</span> },
     {
       id: 'conversion',
       header: 'Conversão',
@@ -328,6 +338,12 @@ export default function Jornadas() {
         </Alert>
       )}
 
+      {API && (
+        <Alert tone="warning" className="mb-5" title="Jornadas ainda não rodam no servidor">
+          {NO_RUN} Entradas, conclusões e conversão aparecem quando a execução for ligada.
+        </Alert>
+      )}
+
       {rows.length === 0 ? (
         <div className="space-y-5">
           <Card>
@@ -349,10 +365,11 @@ export default function Jornadas() {
         <div className="space-y-5">
           <section aria-label="Resumo das jornadas" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <KpiCard label="Jornadas ativas" icon={Route} value={`${num(active.length)} de ${num(rows.length)}`} hint={`${num(rows.filter((r) => r.status === 'rascunho').length)} rascunhos · ${num(rows.filter((r) => r.status === 'pausada').length)} pausadas`} />
-            <KpiCard label="Entradas" icon={Users} tone="info" value={num(entered)} hint={`${num(rows.reduce((s, r) => s + r.m.inProgress, 0))} no meio da jornada`} />
-            <KpiCard label="Concluíram" icon={Flag} tone="success" value={num(completed)} hint={`${pct(entered ? completed / entered : 0, 0)} das entradas`} />
-            <KpiCard label="Conversão" icon={Target} tone="warning" value={withGoal ? pct(converted / withGoal) : '—'} hint={`${num(converted)} cumpriram o objetivo`} formula="Jogadores que cumpriram o objetivo (depósito ou aposta) ÷ entradas, só nas jornadas com objetivo." />
+            <KpiCard label="Entradas" icon={Users} tone="info" value={API ? '—' : num(entered)} hint={API ? 'sem execução no servidor nesta versão' : `${num(rows.reduce((s, r) => s + r.m.inProgress, 0))} no meio da jornada`} />
+            <KpiCard label="Concluíram" icon={Flag} tone="success" value={API ? '—' : num(completed)} hint={API ? 'sem execução no servidor nesta versão' : `${pct(entered ? completed / entered : 0, 0)} das entradas`} />
+            <KpiCard label="Conversão" icon={Target} tone="warning" value={!API && withGoal ? pct(converted / withGoal) : '—'} hint={API ? 'sem execução no servidor nesta versão' : `${num(converted)} cumpriram o objetivo`} formula="Jogadores que cumpriram o objetivo (depósito ou aposta) ÷ entradas, só nas jornadas com objetivo." />
           </section>
+
 
           <TableFrame>
             <DataTable
@@ -688,10 +705,10 @@ function JourneyEditor({
           </p>
         )}
 
-        {!isNew && (
+        {!isNew && !API && (
           <div className="grid grid-cols-3 gap-3">
             {(() => {
-              const m = journeyMetrics(initial)
+              const m = metricsOf(initial)
               return (
                 <>
                   <MiniStat label="Entradas" value={num(m.entered)} sub={`${num(m.inProgress)} em andamento`} />

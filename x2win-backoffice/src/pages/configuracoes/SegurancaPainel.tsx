@@ -69,7 +69,7 @@ interface ListSaveError {
 }
 
 /** Ligar o 2FA de todos sem ter 2FA encerraria a própria sessão logo depois de salvar (o servidor recusa com 400). */
-const OWN_2FA_FIRST = 'Cadastre o 2FA na sua conta antes de exigir o 2FA de todos: sem ele, a sua sessão seria encerrada logo depois de salvar.'
+const OWN_2FA_FIRST = 'Cadastre o 2FA na sua conta antes de exigir o 2FA de todos (menu da conta › Ativar 2FA): sem ele, a sua sessão seria encerrada logo depois de salvar.'
 
 /** Incluir, retirar ou mudar IPs da lista exige cargos.conceder (o servidor responde 403). */
 const LIST_GRANT_ONLY = 'Só quem concede cargos altera a lista de IPs.'
@@ -107,7 +107,7 @@ export default function SegurancaPainel() {
   const form = useSettingsForm<PanelSecurityState>(PANEL_SECURITY_KEY, DEFAULT_PANEL_SECURITY, {
     entity: 'Segurança do painel',
     successMessage: 'Segurança do painel salva',
-    validate: (v) => validateSettings(v, panelSaved, user.twoFactor),
+    validate: (v) => validateSettings(v, panelSaved, user.twoFactor, can(GRANT_PERM)),
   })
   // modo API: erro do servidor preso ao "Exigir 2FA de todos" (400 com details.field 'enforce2faForAll')
   const [twoFaError, setTwoFaError] = useState<string | null>(null)
@@ -141,6 +141,8 @@ export default function SegurancaPainel() {
 
   const activeTeam = team.filter((m) => m.status === 'ativo')
   const blockedTeam = list.length ? activeTeam.filter((m) => m.lastIp && !allowlistAllows(list, m.lastIp)) : []
+  /** modo API: quem não tem equipe.ver recebe a equipe sem lastIp */
+  const teamIpsHidden = API && !can('equipe.ver')
 
   /** Modo API: grava a mudança da lista no servidor; em caso de recusa, mostra o motivo e não muda nada na tela. */
   const saveListOnServer = async (change: (list: Entry[]) => Entry[]) => {
@@ -201,7 +203,13 @@ export default function SegurancaPainel() {
       const ok = await confirm({
         title: 'Ligar a restrição por IP?',
         description: `A partir de agora, só entra no painel quem estiver em ${p.normalized}. ${
-          outside.length ? `${outside.map((m) => m.name).join(', ')} acessou de outro IP e ficará bloqueado(a) até ser liberado(a).` : 'Toda a equipe ativa acessou deste endereço.'
+          outside.length
+            ? outside.length === 1
+              ? `${outside[0].name} acessou de outro IP e não vai conseguir entrar até esse IP ser liberado.`
+              : `${joinNames(outside.map((m) => m.name))} acessaram de outros IPs e não vão conseguir entrar até esses IPs serem liberados.`
+            : teamIpsHidden
+              ? 'Seu cargo não vê os IPs da equipe: confira antes se ninguém fica de fora.'
+              : 'Toda a equipe ativa acessou deste endereço.'
         }`,
         confirmLabel: 'Ligar restrição',
         tone: 'warning',
@@ -269,6 +277,8 @@ export default function SegurancaPainel() {
   const pending = activeTeam.filter((m) => needs2faSetup(m, roles.find((r) => r.id === m.roleId), v.enforce2faForAll))
   // ligar o 2FA de todos sem ter 2FA: bloqueado (a própria sessão cairia logo depois de salvar)
   const blockEnforce = !user.twoFactor && !form.saved.enforce2faForAll
+  // desligar o 2FA de todos: só quem concede cargos
+  const lockEnforceOff = form.saved.enforce2faForAll && !can(GRANT_PERM)
   // só vale enquanto o rascunho liga o 2FA de todos (descartar ou desligar limpa o aviso)
   const turningOn = v.enforce2faForAll && !form.saved.enforce2faForAll
   const enforceError = turningOn ? twoFaError ?? (blockEnforce ? OWN_2FA_FIRST : null) : null
@@ -283,7 +293,7 @@ export default function SegurancaPainel() {
       toast.error('Seu cargo não pode editar esta tela.')
       return
     }
-    const err = validateSettings(v, form.saved, user.twoFactor)
+    const err = validateSettings(v, form.saved, user.twoFactor, can(GRANT_PERM))
     if (err) {
       if (err === OWN_2FA_FIRST) setTwoFaError(err)
       toast.error('Revise os campos', { description: err })
@@ -335,7 +345,14 @@ export default function SegurancaPainel() {
       <div className="space-y-5">
         <section aria-label="Resumo" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard label="IPs e faixas permitidos" icon={Network} tone={list.length ? 'success' : 'danger'} value={list.length ? num(list.length) : 'Nenhum'} hint={list.length ? 'só eles entram no painel' : 'qualquer IP entra'} />
-          <KpiCard label="Equipe fora da lista" icon={UserRoundX} tone={blockedTeam.length ? 'warning' : 'neutral'} value={num(blockedTeam.length)} hint={list.length ? 'pelo último IP de acesso' : 'lista vazia'} />
+          <KpiCard
+            label="Equipe fora da lista"
+            icon={UserRoundX}
+            tone={blockedTeam.length ? 'warning' : 'neutral'}
+            // sem "Ver equipe" o servidor não manda o último IP de cada pessoa: a conta seria sempre 0
+            value={teamIpsHidden ? '—' : num(blockedTeam.length)}
+            hint={teamIpsHidden ? 'seu cargo não vê os IPs da equipe (Equipe › ver)' : list.length ? 'pelo último IP de acesso' : 'lista vazia'}
+          />
           <KpiCard label="2FA para todos" icon={ShieldCheck} tone={form.saved.enforce2faForAll ? 'success' : 'warning'} value={form.saved.enforce2faForAll ? 'Exigido' : 'Por cargo'} hint={`${plural(without2fa.length, 'pessoa ativa', 'pessoas ativas')} sem 2FA`} />
           <KpiCard label="Sessão parada encerra em" icon={Timer} tone="info" value={TIMEOUTS.find((t) => Number(t.value) === form.saved.sessionTimeoutMinutes)?.label ?? `${form.saved.sessionTimeoutMinutes} min`} hint="sem uso do painel" />
         </section>
@@ -490,13 +507,16 @@ export default function SegurancaPainel() {
               label="Exigir 2FA de todos"
               description={v.enforce2faForAll ? 'Ninguém entra só com a senha.' : 'Cada cargo decide se o 2FA é exigido.'}
               checked={v.enforce2faForAll}
-              disabled={blockEnforce && !v.enforce2faForAll}
-              title={blockEnforce && !v.enforce2faForAll ? OWN_2FA_FIRST : undefined}
+              disabled={(blockEnforce && !v.enforce2faForAll) || (lockEnforceOff && v.enforce2faForAll)}
+              title={blockEnforce && !v.enforce2faForAll ? OWN_2FA_FIRST : lockEnforceOff && v.enforce2faForAll ? GRANT_2FA_OFF : undefined}
               onChange={(on) => {
                 setTwoFaError(null)
                 form.set('enforce2faForAll', on)
               }}
             />
+            {lockEnforceOff && v.enforce2faForAll && !form.readOnly && (
+              <p className="text-xs text-fg-3">{GRANT_2FA_OFF}</p>
+            )}
             {enforceError ? (
               <p role="alert" className="flex items-start gap-1.5 text-[13px] font-medium text-danger">
                 <ShieldAlert size={14} className="mt-0.5 shrink-0" aria-hidden />
@@ -506,7 +526,7 @@ export default function SegurancaPainel() {
               blockEnforce &&
               !form.readOnly && (
                 <p className="text-xs text-fg-3">
-                  Para ligar, cadastre antes o 2FA na sua conta: sem ele, a sua sessão seria encerrada logo depois de salvar.
+                  Para ligar, cadastre antes o 2FA na sua conta (menu da conta › Ativar 2FA): sem ele, a sua sessão seria encerrada logo depois de salvar.
                 </p>
               )
             )}
@@ -533,8 +553,17 @@ export default function SegurancaPainel() {
   )
 }
 
-function validateSettings(v: PanelSecurityState, saved: PanelSecurityState, has2fa: boolean): string | null {
+/** Desligar o 2FA de todos enfraquece o acesso de toda a equipe: só quem concede cargos (regra do servidor). */
+const GRANT_2FA_OFF = 'Só quem pode conceder cargos administrativos (por padrão, o Superadmin) desliga o 2FA exigido de todos.'
+
+/** "Ana, Bia e Caio" */
+function joinNames(names: string[]) {
+  return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} e ${names[names.length - 1]}`
+}
+
+function validateSettings(v: PanelSecurityState, saved: PanelSecurityState, has2fa: boolean, canGrant: boolean): string | null {
   if (v.sessionTimeoutMinutes < 5) return 'O tempo de sessão precisa ser de pelo menos 5 minutos.'
+  if (!v.enforce2faForAll && saved.enforce2faForAll && !canGrant) return GRANT_2FA_OFF
   if (v.enforce2faForAll && !saved.enforce2faForAll && !has2fa) return OWN_2FA_FIRST
   return null
 }
@@ -547,7 +576,8 @@ function RecentLogins({ list }: { list: Entry[] }) {
   const known = (e: AuditEntry) => {
     if (!e.ip) return true
     const m = team.find((x) => x.id === e.actorId)
-    return !m || m.lastIp === e.ip
+    // sem o último IP (cargo sem "Ver equipe": o servidor não manda lastIp), não há com o que comparar
+    return !m || !m.lastIp || m.lastIp === e.ip
   }
   const columns: Column<AuditEntry>[] = [
     { id: 'at', header: 'Quando', sortValue: (e) => e.at, cell: (e) => <Tooltip content={dateTime(e.at)}><span className="text-[13px] text-fg-2">{relative(e.at)}</span></Tooltip> },

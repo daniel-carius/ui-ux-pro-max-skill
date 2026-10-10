@@ -169,8 +169,28 @@ export function payBlocker(s: Settlement): string | null {
   return null
 }
 
+/** Brasília: UTC−3 o ano todo (sem horário de verão desde 2019). */
+const BRT_OFFSET_MS = 3 * 3600_000
+
+/**
+ * Fim do dia do vencimento em Brasília (00:00 do dia seguinte). "Vence no dia 10" vale o dia 10 inteiro: antes a
+ * apuração virava "Vencida" às 09:00 do próprio dia 10 (o vencimento é gravado ao meio-dia UTC).
+ */
+export function dueDayEnd(dueDate: string): number {
+  const t = new Date(dueDate).getTime()
+  if (Number.isNaN(t)) return Number.NaN
+  const brt = new Date(t - BRT_OFFSET_MS)
+  return Date.UTC(brt.getUTCFullYear(), brt.getUTCMonth(), brt.getUTCDate() + 1) + BRT_OFFSET_MS
+}
+
 export function isOverdue(s: Settlement, now: Date) {
-  return s.status === 'fechada' && s.feeDue > 0 && new Date(s.dueDate).getTime() < now.getTime()
+  return s.status === 'fechada' && s.feeDue > 0 && now.getTime() >= dueDayEnd(s.dueDate)
+}
+
+/** Fechada, a pagar, e hoje (Brasília) é o dia do vencimento. */
+export function isDueToday(s: Settlement, now: Date) {
+  const end = dueDayEnd(s.dueDate)
+  return s.status === 'fechada' && s.feeDue > 0 && now.getTime() < end && now.getTime() >= end - 86_400_000
 }
 
 /** Referência de pagamento: 6 a 40 caracteres (TED, PIX E2E ou número do comprovante). */

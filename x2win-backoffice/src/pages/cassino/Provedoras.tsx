@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Building2, CirclePause, CirclePlay, Eye, Gamepad2, Network, Pencil, Percent, RefreshCw, Settings2 } from 'lucide-react'
 import {
+  NO_SOURCE_HINT,
+  NoDataSource,
   Alert,
   Badge,
   Button,
@@ -29,11 +31,15 @@ import { useDb } from '@/lib/store'
 import { useAggregators, useGames, useProviders } from '@/data/hooks'
 import type { Aggregator, Game, Provider } from '@/data/catalog'
 import { gameStatsForPeriod, getDailySeries, sumSeries } from '@/data/metrics'
+import { isApiMode } from '@/lib/api'
 import { CASSINO_KEYS, seedGameBadges } from '@/data/cassino'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { aggregateByProvider, reconcileStats, type ProviderGgr } from '@/domain/ggr'
 import { gameHiddenReason, validateProviderFee, type GameBadge } from '@/domain/cassino'
 import { AGGREGATOR_HUE, BrandMark, CoverStrip } from './_shared'
+
+/** Modo API: GGR e taxas por provedora vêm do serviço de métricas da plataforma, ainda não conectado. */
+const HAS_METRICS = !isApiMode()
 
 type Filter = 'todas' | 'ativa' | 'pausada'
 const NO_EDIT = 'Seu cargo pode ver, mas não editar provedoras'
@@ -62,8 +68,9 @@ export default function Provedoras() {
   const [openId, setOpenId] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
 
-  // GGR dos últimos 30 dias por provedora (mesma base da tela GGR)
+  // GGR dos últimos 30 dias por provedora (mesma base da tela GGR). Modo API: sem serviço de métricas, sem número
   const ggr30 = useMemo(() => {
+    if (!HAS_METRICS) return new Map<string, ReturnType<typeof aggregateByProvider>[number]>()
     const t = sumSeries(getDailySeries().slice(-30))
     return new Map(aggregateByProvider(reconcileStats(gameStatsForPeriod(t.casinoBets, t.casinoWins, 30), t.casinoBets, t.casinoWins), providers.items).map((r) => [r.providerId, r]))
   }, [providers.items])
@@ -107,7 +114,7 @@ export default function Provedoras() {
                 columns={2}
                 items={[
                   { label: 'Jogos que saem do site', value: num(activeGames) },
-                  { label: 'GGR nos últimos 30 dias', value: brl(ggr30.get(p.id)?.ggr ?? 0) },
+                  ...(HAS_METRICS ? [{ label: 'GGR nos últimos 30 dias', value: brl(ggr30.get(p.id)?.ggr ?? 0) }] : []),
                 ]}
               />
             ),
@@ -215,8 +222,10 @@ export default function Provedoras() {
       csv: (p) => `${p.feePct}%`,
       cell: (p) => <span className="font-medium tnum">{pct(p.feePct, 0, true)}</span>,
     },
+...(HAS_METRICS
+      ? [
     {
-      id: 'ggr',
+      id: 'ggr', money: true,
       header: 'GGR 30 dias',
       align: 'right',
       sortValue: (p) => ggr30.get(p.id)?.ggr ?? 0,
@@ -229,7 +238,9 @@ export default function Provedoras() {
           </div>
         )
       },
-    },
+    } satisfies Column<Provider>,
+        ]
+      : []),
     {
       id: 'status',
       header: 'Status',
@@ -256,7 +267,7 @@ export default function Provedoras() {
       id: 'action',
       header: 'Ação',
       pinned: true,
-      csv: () => '',
+      csv: false,
       cell: (p) => (
         <div onClick={(e) => e.stopPropagation()}>
           {p.status === 'ativa' ? (
@@ -305,8 +316,8 @@ export default function Provedoras() {
           label="Taxas · 30 dias"
           icon={Percent}
           tone="primary"
-          value={brlCompact(totalFee)}
-          hint={`${pct(totalGgr ? totalFee / totalGgr : 0)} do GGR · média ${pct(avgFee, 1, true)}`}
+          value={HAS_METRICS ? brlCompact(totalFee) : '—'}
+          hint={HAS_METRICS ? `${pct(totalGgr ? totalFee / totalGgr : 0)} do GGR · média ${pct(avgFee, 1, true)}` : `${NO_SOURCE_HINT} · taxa média ${pct(avgFee, 1, true)}`}
           formula={<>Soma da taxa de cada provedora sobre o GGR dela nos últimos 30 dias. GGR negativo não gera taxa. Detalhe por mês em Crescimento › GGR › Apurações.</>}
         />
       </section>
@@ -381,6 +392,11 @@ export default function Provedoras() {
           <Card className="p-4 lg:col-span-3">
             <p className="text-[13px] font-semibold text-fg">GGR por provedora · 30 dias</p>
             <p className="mb-3 text-xs text-fg-3">As 8 maiores. A parte laranja é a taxa paga à provedora.</p>
+            {!HAS_METRICS ? (
+              <NoDataSource compact title="Sem fonte de dados nesta versão">
+                O GGR por provedora vem do serviço de métricas da plataforma de jogo, ainda não conectado.
+              </NoDataSource>
+            ) : (
             <BarsChart
               ariaLabel="GGR e taxa das 8 maiores provedoras nos últimos 30 dias"
               data={chartRows}
@@ -395,6 +411,7 @@ export default function Provedoras() {
                 { key: 'ggr', label: 'GGR', slot: 1 },
               ]}
             />
+            )}
           </Card>
         </div>
       </section>
@@ -537,11 +554,11 @@ function ProviderDrawer({
             </div>
             <div>
               <p className="text-xs text-fg-3">GGR 30 dias</p>
-              <p className="truncate text-lg font-bold text-fg tnum">{brlCompact(ggr?.ggr ?? 0)}</p>
+              <p className="truncate text-lg font-bold text-fg tnum" title={HAS_METRICS ? undefined : NO_SOURCE_HINT}>{HAS_METRICS ? brlCompact(ggr?.ggr ?? 0) : '—'}</p>
             </div>
             <div>
               <p className="text-xs text-fg-3">RTP real</p>
-              <p className="text-lg font-bold text-fg tnum">{pct(ggr?.rtp ?? 0)}</p>
+              <p className="text-lg font-bold text-fg tnum" title={HAS_METRICS ? undefined : NO_SOURCE_HINT}>{HAS_METRICS ? pct(ggr?.rtp ?? 0) : '—'}</p>
             </div>
           </div>
         </div>

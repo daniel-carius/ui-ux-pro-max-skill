@@ -21,7 +21,7 @@
 
 import { useCallback, useSyncExternalStore } from 'react'
 import type { KvGetResponse, KvPutResponse } from '@shared/api'
-import { isLocalOnlyKey } from '@shared/kv-registry'
+import { canReadKey, findKvRule, isLocalOnlyKey } from '@shared/kv-registry'
 // import direto (e não de '@/components/ui') para não criar ciclo: ui/Page usa este arquivo
 import { toast } from '@/components/ui/Feedback'
 import { apiValueOf } from '@/data/demo'
@@ -310,7 +310,35 @@ function notifyLoadError(e: unknown) {
   })
 }
 
+/** A sessão terminou (saída, sessão caída) ou ainda está numa etapa do login: nenhuma chave do servidor é lida. */
+export const NO_SESSION = 'sem-sessao' as const
+
+/**
+ * Permissões da sessão aberta (modo API). Com elas, uma chave que o cargo não lê (mesma regra do servidor,
+ * canReadKey) nem sai do navegador: o servidor responderia 403, que aparece como erro no console a cada tela.
+ * A tela recebe o mesmo valor de "sem leitura" (lista vazia ou padrão, nunca gravado).
+ *  - NO_SESSION: sem sessão ativa (saiu, caiu, etapa do login): nenhuma leitura vai ao servidor. Uma tela que
+ *    ainda renderiza antes de sair (ex.: o roteador muda o endereço junto com a saída) não busca nada com o
+ *    cookie morto (antes: GET /api/kv/... → 401 no console a cada saída).
+ *  - null: sem filtro (antes de a sessão ser conhecida; o servidor decide).
+ */
+let readPerms: ReadonlySet<string> | typeof NO_SESSION | null = null
+
+/** A sessão (session.tsx) informa as permissões do servidor ao abrir e a cada mudança de cargo; NO_SESSION ao sair. */
+export function setReadPermissions(perms: ReadonlySet<string> | typeof NO_SESSION | null) {
+  readPerms = perms
+}
+
+/** O cargo pode ler a chave? Chave sem regra conhecida vai ao servidor (que responde 404). */
+export function mayReadKey(key: string): boolean {
+  if (readPerms === NO_SESSION) return false
+  if (!readPerms) return true
+  const rule = findKvRule(key)
+  return !rule || canReadKey(rule, readPerms)
+}
+
 async function fetchKey(key: string): Promise<Outcome> {
+  if (!mayReadKey(key)) return { kind: 'forbidden' }
   try {
     const res = await api<KvGetResponse>('GET', kvPath(key))
     // nunca gravada: a versão (0) vai na primeira gravação
@@ -406,7 +434,7 @@ function suspendUntilReady<T>(key: string, seed: T | (() => T)) {
 export interface WriteOptions {
   /**
    * Erros que a tela mostra no próprio campo (ex.: 400 com details.field): sem o aviso
-   * "Alteração desfeita". O valor volta ao confirmado do mesmo jeito.
+   * "Alteração não salva". O valor volta ao confirmado do mesmo jeito.
    */
   quiet?: (e: ApiError) => boolean
 }
@@ -483,7 +511,8 @@ function enqueueWrite(key: string, value: unknown, opts?: WriteOptions): Promise
       emit(key)
       // 401: a sessão caiu e o portão de login já avisa; erro que a tela mostra no campo também não
       if (err?.status !== 401 && !(err && opts?.quiet?.(err))) {
-        toast.error('Alteração desfeita', {
+        // "não salva": o servidor recusou ou a gravação falhou; a tela volta ao valor gravado (não é um "desfazer")
+        toast.error('Alteração não salva', {
           description: err?.message ?? 'Não foi possível salvar. Tente de novo.',
           duration: 6000,
         })
@@ -548,7 +577,7 @@ export function dbSetAndWait<T>(key: string, next: T | ((prev: T) => T), seed?: 
 
 /**
  * dbSetAndWait com o erro do servidor, para a tela mostrar um 400/403 junto do campo
- * (details.field). Com `quiet`, esses erros não viram o aviso "Alteração desfeita".
+ * (details.field). Com `quiet`, esses erros não viram o aviso "Alteração não salva".
  *   const r = await dbSetAndWaitResult(key, next, seed, { quiet: (e) => e.status === 400 })
  *   if (!r.ok && r.error) setFieldError(r.error.message)
  * Modo demonstração: sempre { ok: true }.

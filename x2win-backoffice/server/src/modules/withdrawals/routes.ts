@@ -2,7 +2,15 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { brl } from '@shared/money'
-import { approvalMessage, canDecideWithdrawals, checkApprovalCeiling } from '@shared/withdrawals'
+import {
+  approvalMessage,
+  rejectionMessage,
+  canDecideWithdrawals,
+  checkApprovalCeiling,
+  outOfRulesProblem,
+  SEGREGATION_MESSAGE,
+  SEGREGATION_WINDOW_MS as SHARED_SEGREGATION_WINDOW_MS,
+} from '@shared/withdrawals'
 import type { Db } from '../../db'
 import { AppError, Errors } from '../../errors'
 import { requireActive, requirePerm } from '../../http'
@@ -10,14 +18,14 @@ import type { Cipher } from '../../lib/crypto'
 import { writeAudit } from '../../services/audit'
 import type { AuthContext } from '../../types'
 import { manualCreditors, payoutHold } from '../kv/payout-guards'
-import { enqueueWebhook } from '../webhooks/dispatcher'
+import { enqueueWebhookEvent } from '../webhooks/dispatcher'
 import { decryptPix, OPEN_STATUSES, toPanelWithdrawal, type WithdrawalRow } from './format'
 import { getWithdrawalRules } from './kv'
 
 const OPEN_SQL = `('criado', 'pendente', 'em_analise')`
 
 /** Segregação de funções: quem lançou crédito manual ou estorno para o jogador nesta janela não aprova o saque dele. */
-export const SEGREGATION_WINDOW_MS = 30 * 86_400_000
+export const SEGREGATION_WINDOW_MS = SHARED_SEGREGATION_WINDOW_MS
 
 /** Classe das travas consultivas (pg_advisory_xact_lock) das decisões de pagamento por jogador. */
 const PAYOUT_LOCK_CLASS = 7101
@@ -67,34 +75,22 @@ async function assertPayable(t: Db, cipher: Cipher, auth: AuthContext, row: With
   const amount = row.amount_cents / 100
   const creditors = await manualCreditors(t, cipher, row.player_id, Date.now() - SEGREGATION_WINDOW_MS)
   const hold = await payoutHold(t, cipher, row.player_id)
-  if (hold) throw new AppError(409, 'jogador_bloqueado', `Pagamento bloqueado: ${hold}`, { reason: hold })
+  // "aprovação", não "pagamento": aprovar registra a decisão e avisa por webhook, não paga o PIX
+  if (hold) throw new AppError(409, 'jogador_bloqueado', `Aprovação bloqueada: ${hold}`, { reason: hold })
 
+  // mesmas mensagens da demonstração (shared/withdrawals.ts)
   const { rules } = await getWithdrawalRules(t)
-  if (amount > rules.maxPerRequest) {
-    throw new AppError(409, 'fora_das_regras', `Valor acima do máximo por saque das regras em vigor (${brl(rules.maxPerRequest)}).`, {
-      rule: 'maxPerRequest',
-      limit: rules.maxPerRequest,
-      amount,
-    })
-  }
+  const overMax = outOfRulesProblem(amount, rules, 0)
+  if (overMax) throw new AppError(409, 'fora_das_regras', overMax.message, overMax.details)
   const today = await t.one<{ n: number }>(
     `select count(*)::int as n from withdrawals
       where player_id = $1 and status = 'aprovado' and updated_at > now() - interval '24 hours'`,
     [row.player_id],
   )
-  const approved = Number(today?.n ?? 0)
-  if (approved >= rules.dailyLimit) {
-    throw new AppError(
-      409,
-      'fora_das_regras',
-      `O jogador já tem ${approved} ${approved === 1 ? 'saque aprovado' : 'saques aprovados'} nas últimas 24 horas (limite diário: ${rules.dailyLimit}).`,
-      { rule: 'dailyLimit', limit: rules.dailyLimit, count: approved },
-    )
-  }
+  const daily = outOfRulesProblem(amount, rules, Number(today?.n ?? 0))
+  if (daily) throw new AppError(409, 'fora_das_regras', daily.message, daily.details)
 
-  if (creditors.has(auth.user.id)) {
-    throw new AppError(403, 'segregacao_funcoes', 'Você lançou crédito manual para este jogador nos últimos 30 dias; outra pessoa precisa aprovar.')
-  }
+  if (creditors.has(auth.user.id)) throw new AppError(403, 'segregacao_funcoes', SEGREGATION_MESSAGE)
 }
 
 export default async function routes(app: FastifyInstance) {
@@ -109,7 +105,7 @@ export default async function routes(app: FastifyInstance) {
     if (!canDecideWithdrawals(auth.role)) throw Errors.forbidden(`O cargo ${auth.role.name} não aprova saques.`)
     const { id } = idParams.parse(req.params)
 
-    const { updated, queued } = await app.db.tx(async (t) => {
+    const { updated, queued, templateOff } = await app.db.tx(async (t) => {
       await lockPlayerPayouts(t, id)
       const row = await lockWithdrawal(t, id)
       const amount = row.amount_cents / 100
@@ -129,14 +125,14 @@ export default async function routes(app: FastifyInstance) {
         entity: `Saque #${w.id}`,
         summary: `Saque de ${brl(amount)} de ${w.player_name} aprovado`,
       })
-      const queued = await enqueueWebhook(t, 'saque.pago', { id: w.id, amount, playerId: w.player_id })
-      return { updated: w, queued }
+      const { queued, templateOff } = await enqueueWebhookEvent(t, 'saque.pago', { id: w.id, amount, playerId: w.player_id })
+      return { updated: w, queued, templateOff }
     })
 
     const amount = updated.amount_cents / 100
     return {
       ok: true as const,
-      message: approvalMessage(amount, queued),
+      message: approvalMessage(amount, queued, templateOff),
       /** avisos saque.pago enfileirados nesta aprovação (um por destino ativo) */
       queuedDeliveries: queued,
       withdrawal: toPanelWithdrawal({ ...updated, decided_by_email: auth.user.email }, app.cipher, auth.perms),
@@ -165,15 +161,16 @@ export default async function routes(app: FastifyInstance) {
         entity: `Saque #${w.id}`,
         summary: `Saque de ${brl(amount)} recusado: ${reason}`,
       })
-      await enqueueWebhook(t, 'saque.rejeitado', { id: w.id, amount, playerId: w.player_id, reason })
-      return w
+      const { queued, templateOff } = await enqueueWebhookEvent(t, 'saque.rejeitado', { id: w.id, amount, playerId: w.player_id, reason })
+      return { w, queued, templateOff }
     })
 
-    const amount = updated.amount_cents / 100
+    const amount = updated.w.amount_cents / 100
     return {
       ok: true as const,
-      message: `Saque recusado. ${brl(amount)} voltou para o saldo do jogador.`,
-      withdrawal: toPanelWithdrawal({ ...updated, decided_by_email: auth.user.email }, app.cipher, auth.perms),
+      // a recusa só registra a decisão e o aviso: devolver o valor é da plataforma de jogo (sem e-mail)
+      message: rejectionMessage(amount, updated.queued, updated.templateOff),
+      withdrawal: toPanelWithdrawal({ ...updated.w, decided_by_email: auth.user.email }, app.cipher, auth.perms),
     }
   })
 

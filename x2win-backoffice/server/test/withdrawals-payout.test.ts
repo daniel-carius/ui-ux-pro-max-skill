@@ -199,7 +199,14 @@ describe('aprovação reconfere anti-fraude e regras de saque (r2 payout chain, 
   beforeAll(async () => {
     app = await createTestApp()
     await addPaidDestination(app)
-    await seedKv(app, 'geral.jogadores', [player('p-ban', 'bloqueado'), player('p-rede'), player('p-auto', 'autoexcluido'), player('p-ok'), player('p-big')])
+    await seedKv(app, 'geral.jogadores', [player('p-ban', 'bloqueado'), player('p-rede'), player('p-auto', 'autoexcluido'), player('p-ok'), player('p-big'), player('p-pedido', 'bloqueado')])
+    // histórico de status: o motivo do bloqueio mais recente vai na recusa (r3)
+    const at = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString()
+    await seedKv(app, 'geral.usuarios.status', [
+      { id: 'st-3', playerId: 'p-pedido', at: at(5), action: 'bloquear', from: 'ativo', to: 'bloqueado', reason: 'Pedido do jogador', by: 'Ana', byId: 'u-x', until: null, byPlayer: false },
+      { id: 'st-2', playerId: 'p-pedido', at: at(60), action: 'desbloquear', from: 'bloqueado', to: 'ativo', reason: 'Análise concluída', by: 'Ana', byId: 'u-x', until: null, byPlayer: false },
+      { id: 'st-1', playerId: 'p-pedido', at: at(120), action: 'bloquear', from: 'ativo', to: 'bloqueado', reason: 'Suspeita de fraude', by: 'Ana', byId: 'u-x', until: null, byPlayer: false },
+    ])
     await seedKv(app, 'seguranca.bloqueios', [
       {
         id: 'b1',
@@ -221,13 +228,27 @@ describe('aprovação reconfere anti-fraude e regras de saque (r2 payout chain, 
     const r = await api(app, 'POST', `/api/withdrawals/${w}/approve`, { cookie: fin.cookie })
     expect(r.statusCode).toBe(409)
     expect(r.json().error.code).toBe('jogador_bloqueado')
-    expect(r.json().error.message).toContain('Conta bloqueada pelo anti-fraude')
+    // r3: bloqueio individual (feito na ficha, por qualquer motivo) não é atribuído ao anti-fraude
+    expect(r.json().error.message).toContain('Conta bloqueada. Para liberar, desbloqueie a conta na ficha do jogador')
+    expect(r.json().error.message).not.toContain('anti-fraude')
     expect(await statusOf(app, w)).toBe('em_analise')
     expect(await paidOf(app, w)).toHaveLength(0)
     expect(await approvalsOf(app, w)).toHaveLength(0)
     // recusar continua possível (devolve o saldo; não paga)
     const rej = await api(app, 'POST', `/api/withdrawals/${w}/reject`, { cookie: fin.cookie, body: { reason: 'Conta banida pelo anti-fraude' } })
     expect(rej.statusCode).toBe(200)
+  })
+
+  it('bloqueio individual com motivo no histórico: a recusa traz o motivo do bloqueio mais recente, sem atribuir ao anti-fraude (r3)', async () => {
+    const adm = await loginAs(app, 'administrador')
+    const w = await insertWithdrawal(app, { playerId: 'p-pedido', amount: 100 })
+    const r = await api(app, 'POST', `/api/withdrawals/${w}/approve`, { cookie: adm.cookie })
+    expect(r.statusCode).toBe(409)
+    expect(r.json().error.code).toBe('jogador_bloqueado')
+    expect(r.json().error.message).toBe(
+      'Aprovação bloqueada: Conta bloqueada (motivo: Pedido do jogador). Para liberar, desbloqueie a conta na ficha do jogador, em Usuários › Status e saldo.',
+    )
+    expect(await statusOf(app, w)).toBe('pendente')
   })
 
   it('conta de uma rede banida em seguranca.bloqueios (status ainda ativo): 409 jogador_bloqueado com a rede no motivo', async () => {
@@ -401,6 +422,63 @@ describe('saque decidido traz id e e-mail de quem decidiu', () => {
     expect(list.find((w) => w.id === w1)).toMatchObject({ decidedById: a.user.id, decidedByEmail: a.user.email })
     expect(list.find((w) => w.id === w2)).toMatchObject({ decidedById: b.user.id, decidedByEmail: b.user.email })
     expect(list.find((w) => w.id === open)).toMatchObject({ decidedBy: null, decidedById: null, decidedByEmail: null })
+    await app.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// e2e r2: desbloquear pela ficha uma conta de rede banida prometia "sacar normalmente", e a aprovação seguia recusada
+// ---------------------------------------------------------------------------
+
+describe('conta de rede banida: só sai do bloqueio desfazendo o banimento da rede', () => {
+  it('desbloquear pela ficha → 409 rede_banida (nada gravado); conta bloqueada sozinha desbloqueia; sem o banimento, desbloqueia', async () => {
+    const app = await createTestApp()
+    await seedKv(app, 'geral.jogadores', [player('n1', 'bloqueado'), player('n2', 'bloqueado'), player('solo', 'bloqueado')])
+    const ban = {
+      id: 'b-rd',
+      kind: 'rede',
+      value: 'RD-100644',
+      reason: 'Multicontas',
+      accounts: ['n1', 'n2'],
+      previousStatuses: { n1: 'ativo', n2: 'ativo' },
+      createdAt: new Date().toISOString(),
+      createdBy: 'Antifraude',
+    }
+    await seedKv(app, 'seguranca.bloqueios', [ban])
+    const sa = await loginAs(app, 'superadmin')
+    const read = async () => (await api(app, 'GET', '/api/kv/geral.jogadores', { cookie: sa.cookie })).json() as { value: Record<string, unknown>[]; version: number }
+    const setStatus = async (statuses: Record<string, string>) => {
+      const cur = await read()
+      return api(app, 'PUT', '/api/kv/geral.jogadores', {
+        cookie: sa.cookie,
+        body: { value: cur.value.map((p) => (statuses[p.id as string] ? { ...p, status: statuses[p.id as string] } : p)), version: cur.version },
+      })
+    }
+
+    const refused = await setStatus({ n1: 'ativo' })
+    expect(refused.statusCode, refused.body).toBe(409)
+    expect(refused.json().error).toMatchObject({ code: 'rede_banida', details: { id: 'n1', network: 'RD-100644' } })
+    expect(refused.json().error.message).toContain('Anti-fraude › Bloqueios')
+    expect((await read()).value.find((p) => p.id === 'n1')?.status).toBe('bloqueado')
+    // a aprovação diz "aprovação" (não "pagamento") e aponta onde desfazer o banimento
+    const w = await insertWithdrawal(app, { playerId: 'n2', amount: 80 })
+    await app.db.query(`update kv_store set value_enc = $2 where key = $1`, [
+      'geral.jogadores',
+      app.cipher.encrypt(JSON.stringify([player('n1', 'bloqueado'), player('n2', 'ativo'), player('solo', 'bloqueado')])),
+    ])
+    const approve = await api(app, 'POST', `/api/withdrawals/${w}/approve`, { cookie: sa.cookie })
+    expect(approve.statusCode).toBe(409)
+    expect(approve.json().error.code).toBe('jogador_bloqueado')
+    expect(approve.json().error.message).toMatch(/^Aprovação bloqueada: Conta de uma rede banida pelo anti-fraude \(RD-100644\)\. Para liberar/)
+
+    // bloqueio individual (fora de rede banida) continua saindo pela ficha
+    expect((await setStatus({ solo: 'ativo' })).statusCode).toBe(200)
+
+    // desfazer o banimento (Anti-fraude › Bloqueios): remove o bloqueio e depois devolve os status
+    const blocks = (await api(app, 'GET', '/api/kv/seguranca.bloqueios', { cookie: sa.cookie })).json() as { version: number }
+    expect((await api(app, 'PUT', '/api/kv/seguranca.bloqueios', { cookie: sa.cookie, body: { value: [], version: blocks.version } })).statusCode).toBe(200)
+    const ok = await setStatus({ n1: 'ativo' })
+    expect(ok.statusCode, ok.body).toBe(200)
     await app.close()
   })
 })

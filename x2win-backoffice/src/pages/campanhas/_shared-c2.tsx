@@ -226,7 +226,7 @@ export interface SavedCollection<T extends { id: string }> extends Collection<T>
   /**
    * Como add/update/remove, mas espera a gravação. Modo API: true quando o servidor aceitou;
    * false quando recusou (regra da campanha, versão): a tela volta ao valor salvo e o aviso
-   * "Alteração desfeita" já mostra a mensagem do servidor. Campos que o servidor controla
+   * "Alteração não salva" já mostra a mensagem do servidor. Campos que o servidor controla
    * (contadores da plataforma, data de criação, quem encerrou) voltam na resposta e
    * substituem os enviados. Demonstração: grava na hora e devolve true.
    */

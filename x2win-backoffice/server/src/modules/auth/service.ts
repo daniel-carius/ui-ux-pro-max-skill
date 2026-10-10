@@ -61,6 +61,13 @@ export const AuthErrors = {
   /** mesma resposta para e-mail desconhecido, senha errada e pessoa inativa */
   badCredentials: () => new AppError(401, 'credenciais_invalidas', 'E-mail ou senha incorretos.'),
   badCode: () => new AppError(401, 'credenciais_invalidas', 'Código inválido. Confira o aplicativo autenticador e tente de novo.'),
+  badRecoveryCode: () =>
+    new AppError(
+      401,
+      'credenciais_invalidas',
+      'Código de recuperação inválido ou já usado. Cada código funciona uma vez; confira a digitação ou use outro da lista.',
+      { kind: 'recuperacao' },
+    ),
   badCurrentPassword: () => new AppError(401, 'credenciais_invalidas', 'A senha atual está incorreta.'),
   locked: (until: string) => {
     const minutes = Math.max(1, Math.ceil((new Date(until).getTime() - Date.now()) / 60_000))

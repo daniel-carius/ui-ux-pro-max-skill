@@ -26,6 +26,7 @@ import {
   EmptyState,
   Formula,
   KpiCard,
+  NoDataSource,
   PageHeader,
   Segmented,
   Skeleton,
@@ -39,6 +40,7 @@ import { brl, brlCompact, dateShort, num, numCompact, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { isApiMode } from '@/lib/api'
 import { useDb } from '@/lib/store'
+import { useSession } from '@/domain/session'
 import { dayKey } from '@/data/now'
 import { gameStatsForPeriod, getDailySeries, sumSeries, walletBalanceAt, type DailyMetrics, type PeriodTotals } from '@/data/metrics'
 import { useAffiliates, usePlayers } from '@/data/hooks'
@@ -77,7 +79,61 @@ function delta(cur: number, prev: number | undefined | null) {
 
 type ChartView = 'ggr' | 'caixa' | 'aquisicao'
 
+/** Escolhido uma vez: o modo não muda com a página aberta. */
 export default function Dashboard() {
+  return isApiMode() ? <ApiDashboard /> : <DemoDashboard />
+}
+
+/**
+ * Modo API: os indicadores do período (GGR, depósitos, saques, usuários ativos, carteiras, funil, jogos) vêm do
+ * serviço de métricas da plataforma de jogo, que ainda não está conectado. Antes o painel mostrava uma série gerada
+ * no navegador como se fosse real (e ela nunca mudava depois de aprovar saques ou lançar créditos). Agora a tela diz
+ * que não há fonte e leva às telas com os dados do servidor; os links de afiliado vêm do servidor.
+ */
+const API_SHORTCUTS = [
+  { page: 'depositos', to: '/system/deposits', label: 'Depósitos', icon: ArrowDownToLine, text: 'PIX pagos, pendentes e expirados' },
+  { page: 'saques', to: '/system/saques', label: 'Saques', icon: ArrowUpFromLine, text: 'Fila de decisão e saques aprovados' },
+  { page: 'usuarios', to: '/dashboard/usuarios', label: 'Usuários', icon: Users, text: 'Jogadores e saldo das carteiras' },
+  { page: 'transacoes', to: '/dashboard/transacoes', label: 'Transações', icon: Wallet, text: 'Extrato das carteiras e apostas' },
+]
+
+function ApiDashboard() {
+  const { canView } = useSession()
+  // atalhos só para as telas que o cargo abre (como o menu): nunca um link que termina em "Sem acesso"
+  const shortcuts = API_SHORTCUTS.filter((x) => canView(x.page))
+  return (
+    <>
+      <PageHeader />
+      <div className="space-y-6">
+        <NoDataSource title="Indicadores do período ainda sem fonte de dados">
+          GGR, depósitos e saques do período, usuários ativos, saldo das carteiras, funil de depósitos e jogos vêm do serviço de métricas da
+          plataforma de jogo, que ainda não está conectado a este painel.
+          {shortcuts.length > 0 ? ' Enquanto isso, os números de cada operação estão nas telas abaixo.' : ''}
+        </NoDataSource>
+        {shortcuts.length > 0 && (
+        <section aria-label="Telas com os dados do servidor" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {shortcuts.map((x) => (
+            <Link key={x.to} to={x.to} className="card flex items-start gap-3 p-4 transition-colors hover:border-line-strong">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary-text">
+                <x.icon size={18} aria-hidden />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-fg">{x.label}</span>
+                <span className="block text-[13px] text-fg-3">{x.text}</span>
+              </span>
+            </Link>
+          ))}
+        </section>
+        )}
+        <div className="grid gap-6 lg:grid-cols-2">
+          <ConvertingLinksCard loading={false} />
+        </div>
+      </div>
+    </>
+  )
+}
+
+function DemoDashboard() {
   const [range, setRange] = useState<DateRange>(() => presetRange('30d'))
   const [attempt, setAttempt] = useState(0)
   const [view, setView] = useState<ChartView>('ggr')
@@ -329,7 +385,7 @@ export default function Dashboard() {
 
           <div className="grid gap-6 lg:grid-cols-2 2xl:grid-cols-3">
             <TopGamesCard t={t} loading={loading} rangeKey={dayKey(range.from) + dayKey(range.to)} />
-            <ConvertingLinksCard t={t} loading={loading} />
+            <ConvertingLinksCard loading={loading} />
             <InsightsCard rows={rows} t={t} p={p} loading={loading} className="lg:col-span-2 2xl:col-span-1" />
           </div>
         </div>
@@ -391,6 +447,7 @@ function MiniStat({ label, value, sub }: { label: string; value: string; sub: st
 }
 
 function TopGamesCard({ t, loading, rangeKey }: { t: PeriodTotals; loading: boolean; rangeKey: string }) {
+  const { canView } = useSession()
   const games = useMemo(
     () => gameStatsForPeriod(t.casinoBets, t.casinoWins, rangeKey.length).slice(0, 5),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -402,9 +459,11 @@ function TopGamesCard({ t, loading, rangeKey }: { t: PeriodTotals; loading: bool
       <CardHeader
         title="Top 5 jogos por GGR"
         actions={
-          <Link to="/dashboard/ggr?aba=jogos" className="link text-[13px]">
-            Ver GGR
-          </Link>
+          canView('ggr') ? (
+            <Link to="/dashboard/ggr?aba=jogos" className="link text-[13px]">
+              Ver GGR
+            </Link>
+          ) : undefined
         }
       />
       <CardBody>
@@ -501,24 +560,25 @@ function useServerReferralRanking(): ReferralRanking {
 /** Escolhido uma vez: o modo não muda com a página aberta. */
 const useReferralRanking: () => ReferralRanking = isApiMode() ? useServerReferralRanking : useDemoReferralRanking
 
-function ConvertingLinksCard({ t, loading }: { t: PeriodTotals; loading: boolean }) {
+/**
+ * Links com mais depósitos dos indicados: o total depositado desde o cadastro, como o servidor calcula
+ * (geral.jogadores.metricas). Antes o valor era escalado pelos depósitos simulados do período e passava do total real.
+ */
+function ConvertingLinksCard({ loading }: { loading: boolean }) {
+  const { canView } = useSession()
   const { links, totalDeposited } = useReferralRanking()
-  const ranked = useMemo(() => {
-    const total = totalDeposited || 1
-    // distribui os depósitos do período na proporção histórica de cada link
-    return links
-      .map((l) => ({ ...l, periodDeposits: (l.deposited / total) * t.deposits * 0.31 }))
-      .sort((x, y) => y.periodDeposits - x.periodDeposits)
-      .slice(0, 5)
-  }, [links, totalDeposited, t.deposits])
+  const ranked = useMemo(() => [...links].sort((x, y) => y.deposited - x.deposited).slice(0, 5), [links])
   return (
     <Card>
       <CardHeader
         title="Links que converteram"
+        description="Depositado pelos indicados de cada link, desde o cadastro"
         actions={
-          <Link to="/analysis/links" className="link text-[13px]">
-            Ver links
-          </Link>
+          canView('links') ? (
+            <Link to="/analysis/links" className="link text-[13px]">
+              Ver links
+            </Link>
+          ) : undefined
         }
       />
       <CardBody>
@@ -535,10 +595,12 @@ function ConvertingLinksCard({ t, loading }: { t: PeriodTotals; loading: boolean
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[13px] font-medium text-fg">{r.name ?? `Link ${r.code}`}</p>
-                  <p className="truncate font-mono text-[11.5px] text-fg-3">x2win.bet.br/?ref={r.code}</p>
+                  <p className="truncate font-mono text-[11.5px] text-fg-3">
+                    ?ref={r.code} · {pct(totalDeposited ? r.deposited / totalDeposited : 0, 0)} do total
+                  </p>
                 </div>
                 <div className="shrink-0 text-right">
-                  <p className="text-[13px] font-semibold text-fg tnum">{brlCompact(r.periodDeposits)}</p>
+                  <p className="text-[13px] font-semibold text-fg tnum">{brlCompact(r.deposited)}</p>
                   <p className="text-[11px] text-fg-3 tnum">
                     {r.depositors}/{r.signups} depositaram
                   </p>

@@ -15,6 +15,11 @@
 
 /** Autor genérico das decisões nos registros de demonstração. */
 export const DEMO_STAFF_LABEL = 'Equipe (demonstração)'
+/**
+ * Id do autor genérico na auditoria de demonstração: um id próprio (e não vazio, que é "Sistema"), para a linha, a
+ * ficha e o filtro de pessoa dizerem o mesmo "Equipe (demonstração)".
+ */
+export const DEMO_STAFF_ID = 'equipe-demonstracao'
 
 /** E-mail no domínio reservado .invalid: nunca entrega para ninguém. */
 export function demoEmail(value: string): string {

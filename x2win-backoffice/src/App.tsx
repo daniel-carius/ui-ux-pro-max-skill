@@ -1,12 +1,13 @@
 import { Suspense, lazy } from 'react'
-import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { HashRouter, Route, Routes } from 'react-router-dom'
 import { PAGES } from '@/nav'
 import { ThemeProvider } from '@/lib/theme'
 import { isApiMode } from '@/lib/api'
 import { SessionProvider } from '@/domain/session'
 import { AppShell } from '@/components/layout/AppShell'
-import { NotFound, PageFrame } from '@/components/layout/PageFrame'
+import { HomeRedirect, LandingGuard, NotFound, PageFrame } from '@/components/layout/PageFrame'
 import { SplashScreen } from '@/components/layout/Splash'
+import { ErrorBoundary } from '@/components/layout/ErrorBoundary'
 
 // rota pública do modo API (aceite de convite), carregada sob demanda
 const AcceptInvitePage = lazy(() => import('@/pages/auth/AcceptInvitePage'))
@@ -14,8 +15,9 @@ const AcceptInvitePage = lazy(() => import('@/pages/auth/AcceptInvitePage'))
 function Panel() {
   return (
     <AppShell>
+      <LandingGuard />
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<HomeRedirect />} />
         {PAGES.map((p) => (
           <Route key={p.id} path={p.path} element={<PageFrame pageId={p.id} />} />
         ))}
@@ -27,6 +29,15 @@ function Panel() {
 
 // HashRouter: funciona em qualquer hospedagem estática, sem regra de servidor.
 export default function App() {
+  // último recurso: um erro fora das telas (menu, topo, sessão) mostra um aviso em vez da página em branco
+  return (
+    <ErrorBoundary fullPage>
+      <AppRoot />
+    </ErrorBoundary>
+  )
+}
+
+function AppRoot() {
   if (!isApiMode()) {
     // modo demonstração: sem login, dados no navegador
     return (

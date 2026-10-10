@@ -4,22 +4,9 @@ import { LogIn, Mail } from 'lucide-react'
 import type { LoginResponse } from '@shared/api'
 import { api, isServerBusy } from '@/lib/api'
 import { useAuthApi, type LoginReason } from '@/domain/session'
+import { LOGIN_NOTICES } from '@/domain/auth-state'
 import { Alert, Button, Field, Input } from '@/components/ui'
 import { AuthCard, AuthErrorAlert, PasswordInput, describeAuthError, useNow, withBusyRetry, type AuthErrorView } from './_shared'
-
-const NOTICE: Record<LoginReason, { tone: 'info' | 'success' | 'danger'; title: string; text: string }> = {
-  expired: {
-    tone: 'info',
-    title: 'Sua sessão expirou',
-    text: 'Por segurança, a sessão cai depois de um tempo sem uso. Entre de novo para continuar.',
-  },
-  logout: { tone: 'success', title: 'Você saiu do painel', text: 'Para voltar, entre com o seu e-mail e a sua senha.' },
-  ip: {
-    tone: 'danger',
-    title: 'Seu IP não tem acesso ao painel',
-    text: 'O painel só aceita entradas dos endereços cadastrados em Segurança do painel. Conecte-se pela rede do escritório ou pela VPN, ou peça a um administrador para liberar o seu IP.',
-  },
-}
 
 export function LoginPage({ reason }: { reason?: LoginReason }) {
   const { signedIn } = useAuthApi()
@@ -65,14 +52,14 @@ export function LoginPage({ reason }: { reason?: LoginReason }) {
     }
   }
 
-  const notice = reason && showNotice ? NOTICE[reason] : null
+  const notice = reason && showNotice ? LOGIN_NOTICES[reason] : null
 
   return (
     <AuthCard
       icon={LogIn}
       title="Entrar no painel"
       description="Use o e-mail e a senha da sua conta na equipe X2Win."
-      footer={<p>Esqueceu a senha? Peça a um administrador do painel para gerar uma senha temporária.</p>}
+      footer={<p>Esqueceu a senha? Peça a quem administra a equipe para gerar uma senha temporária em Configurações › Equipe.</p>}
     >
       <form onSubmit={submit} noValidate className="space-y-4">
         {notice && (

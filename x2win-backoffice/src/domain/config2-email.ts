@@ -4,6 +4,14 @@ import type { IntegrationsState } from './system'
 
 // ---------- Integrações ----------
 
+/**
+ * Modo API: o servidor guarda as credenciais de e-mail (SMTP, Mailgun, SendWork), mas ainda não envia e-mail, SMS
+ * nem RCS nesta versão (convites e senhas temporárias aparecem na tela para quem os cria). As telas dizem isso em
+ * vez de "Disponível", "Conectado" ou "Enviado".
+ */
+export const NO_MESSAGE_SENDING =
+  'O servidor ainda não envia e-mails nesta versão (convites e senhas temporárias aparecem na tela para quem os cria). As credenciais ficam guardadas para quando o envio for ligado.'
+
 const DOMAIN_RE = /^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
 
@@ -119,7 +127,7 @@ export const VARIABLE_SAMPLES: Record<string, { label: string; sample: string }>
   id_transacao: { label: 'ID da transação', sample: 'SQ73418' },
   motivo: { label: 'Motivo', sample: 'Dados do PIX divergentes do titular' },
   cargo: { label: 'Cargo', sample: 'Financeiro' },
-  convidado_por: { label: 'Quem convidou', sample: 'Daniel Carius' },
+  convidado_por: { label: 'Quem convidou', sample: 'Mariana Costa' },
   data: { label: 'Data e hora', sample: '09/10/2026 14:32' },
   bonus: { label: 'Bônus de boas-vindas', sample: '100% até R$ 500,00' },
 }

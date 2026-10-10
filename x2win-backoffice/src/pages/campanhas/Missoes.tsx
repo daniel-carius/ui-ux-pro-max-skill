@@ -38,6 +38,7 @@ import {
   FormGrid,
   Input,
   KpiCard,
+  NoDataSource,
   MoneyInput,
   NumberInput,
   PageHeader,
@@ -52,6 +53,7 @@ import {
   type Tone,
 } from '@/components/ui'
 import { brl, date, dateShort, mult, num, pct } from '@/lib/format'
+import { isApiMode } from '@/lib/api'
 import { uid } from '@/lib/random'
 import { DAY } from '@/data/now'
 import { GAME_CATEGORY_LABEL, type GameCategory } from '@/data/catalog'
@@ -115,7 +117,8 @@ export default function Missoes() {
   const gameName = useGameName()
   const [filter, setFilter] = useState<Filter>('todas')
   const [editing, setEditing] = useState<{ mission: Mission; isNew: boolean } | null>(null)
-  const daily = useMemo(() => seedMissionDaily(), [])
+  // série diária da demonstração; no modo API não há fonte (o gráfico mostra o aviso, nada gerado no navegador)
+  const daily = useMemo(() => (isApiMode() ? [] : seedMissionDaily()), [])
 
   const all = missions.items
   const active = all.filter((m) => m.status === 'ativa')
@@ -237,7 +240,7 @@ export default function Missoes() {
         </Badge>
       ),
     },
-    { id: 'cost', header: 'Custo (30 dias)', align: 'right', defaultHidden: true, sortValue: (m) => m.completions * missionRewardCost(m, coin), csv: (m) => (m.completions * missionRewardCost(m, coin)).toFixed(2), cell: (m) => <span className="tnum">{brl(m.completions * missionRewardCost(m, coin))}</span> },
+    { id: 'cost', money: true, header: 'Custo (30 dias)', align: 'right', defaultHidden: true, sortValue: (m) => m.completions * missionRewardCost(m, coin), csv: (m) => (m.completions * missionRewardCost(m, coin)).toFixed(2), cell: (m) => <span className="tnum">{brl(m.completions * missionRewardCost(m, coin))}</span> },
   ]
 
   const rows = filter === 'todas' ? all : all.filter((m) => m.status === filter)
@@ -279,6 +282,11 @@ export default function Missoes() {
           <Card className="xl:col-span-3">
             <CardHeader title="Missões por dia" description="Jogadores que começaram e que concluíram, últimos 14 dias" />
             <CardBody>
+              {!daily.length ? (
+                <NoDataSource compact title="Sem fonte de dados nesta versão">
+                  Quem começou e concluiu cada missão por dia vem da plataforma de jogo, ainda não conectada a este painel.
+                </NoDataSource>
+              ) : (
               <TrendChart
                 ariaLabel="Missões iniciadas e concluídas por dia"
                 data={daily}
@@ -290,6 +298,7 @@ export default function Missoes() {
                   { key: 'completions', label: 'Concluíram', slot: 3 },
                 ]}
               />
+              )}
             </CardBody>
           </Card>
           <Card className="xl:col-span-2">

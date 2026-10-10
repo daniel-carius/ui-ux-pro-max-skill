@@ -301,7 +301,7 @@ export default function Links() {
     { id: 'signups', header: 'Cadastros', align: 'right', sortValue: (r) => r.signups, cell: (r) => num(r.signups) },
     { id: 'depositors', header: 'Depositaram', align: 'right', sortValue: (r) => r.depositors, cell: (r) => num(r.depositors) },
     {
-      id: 'deposited',
+      id: 'deposited', money: true,
       header: 'Valor depositado',
       align: 'right',
       sortValue: (r) => r.deposited,
@@ -340,7 +340,7 @@ export default function Links() {
       id: 'action',
       header: 'Ação',
       pinned: true,
-      csv: () => '',
+      csv: false,
       cell: (r) => <div onClick={(e) => e.stopPropagation()}>{toggleButton(r)}</div>,
     },
   ]

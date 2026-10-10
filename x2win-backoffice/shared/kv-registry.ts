@@ -152,6 +152,8 @@ export const KV_RULES: KvRule[] = [
   // e contagens sem jogador identificado, para as telas que não leem a lista inteira
   { prefix: 'geral.jogadores.audiencia', page: 'usuarios', read: 'tela', readPages: AUDIENCE_READ_PAGES, write: 'servidor', domain: 'player-projections' },
   { prefix: 'geral.jogadores.metricas', page: 'usuarios', read: 'tela', readPages: METRICS_READ_PAGES, write: 'servidor', domain: 'player-projections' },
+  // contas de redes banidas pelo anti-fraude (só jogador, rede e data): a ficha explica o bloqueio a quem não lê o Anti-fraude
+  { prefix: 'geral.jogadores.redes-banidas', page: 'usuarios', read: 'tela', write: 'servidor', domain: 'player-projections' },
   {
     prefix: 'geral.transacoes',
     page: 'transacoes',

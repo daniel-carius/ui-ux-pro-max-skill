@@ -178,6 +178,10 @@ export const kvHandlers: KvHandlers = {
         if (allowlistValuesChanged(before.allowlist, input.allowlist) && !ctx.auth.perms.has(GRANT_PERM)) {
           throw Errors.forbidden('Só quem pode conceder cargos administrativos inclui ou retira IPs da lista de acesso do painel.')
         }
+        // desligar o 2FA de todos enfraquece o acesso de toda a equipe: segue a regra de cargos administrativos
+        if (before.enforce2faForAll && !input.enforce2faForAll && !ctx.auth.perms.has(GRANT_PERM)) {
+          throw Errors.forbidden('Só quem pode conceder cargos administrativos desliga o 2FA exigido de todos.')
+        }
         // a sessão sem 2FA cai na requisição seguinte quando o 2FA passa a valer para todos (plugins/session)
         if (input.enforce2faForAll && !before.enforce2faForAll && !ctx.auth.user.totpEnabled) {
           throw Errors.invalid(

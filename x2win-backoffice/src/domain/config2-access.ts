@@ -185,13 +185,16 @@ export function validateTeamEmail(email: string, team: TeamMember[], ignoreId?: 
 }
 
 /** Nome provisório a partir do e-mail ("ana.paula@x" → "Ana Paula"). */
+/** Nome provisório a partir do e-mail, com a mesma regra do servidor (team/service.ts nameFromEmail). */
 export function nameFromEmail(email: string) {
   const local = email.split('@')[0] ?? email
   return local
-    .split(/[._-]+/)
+    .split(/[._+-]+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ''))
     .filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(' ')
+    .slice(0, 100)
 }
 
 const PASS_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'

@@ -17,10 +17,16 @@
 //   regras gravadas (campanhas.cashback e campanhas.niveis): só totais. Nada por
 //   jogador: as mesmas telas leem o público (id, XP, último acesso), e uma lista de
 //   perdas por jogador, mesmo sem id, se ligava a ele pelo XP ou pela posição.
+//
+// geral.jogadores.redes-banidas — contas de redes banidas pelo anti-fraude (seguranca.bloqueios, kind 'rede'):
+//   [{ playerId, network, bannedAt }]. Sem motivo, autor nem as demais contas da rede: só o que a ficha do jogador
+//   precisa para explicar, a quem não lê o Anti-fraude (Suporte), por que a conta segue bloqueada e por que o
+//   desbloqueio pela ficha é recusado (409 rede_banida). Versão e data: as de seguranca.bloqueios.
 import type { Db } from '../../db'
 import type { Cipher } from '../../lib/crypto'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { AFFILIATES_KEY } from './affiliates'
+import { FRAUD_BLOCKS_KEY } from './payout-guards'
 import { DEPOSITS_KEY } from './deposits'
 import { isPlainObject, type JsonObject } from './json'
 import { PLAYER_STATUSES, PLAYERS_KEY } from './player-status'
@@ -29,6 +35,7 @@ import { round2, storedList } from './validate-util'
 
 export const AUDIENCE_KEY = 'geral.jogadores.audiencia'
 export const METRICS_KEY = 'geral.jogadores.metricas'
+export const BANNED_NETWORKS_KEY = 'geral.jogadores.redes-banidas'
 
 /** Etiquetas que as campanhas usam (público VIP e "excluir abusadores de bônus"); as demais não saem. */
 export const AUDIENCE_TAGS = ['VIP', 'Bônus abuser'] as const
@@ -287,8 +294,30 @@ export function buildMetrics(
   }
 }
 
+export interface BannedNetworkAccount {
+  playerId: string
+  network: string
+  bannedAt: string | null
+}
+
+/** Contas de redes banidas (uma linha por conta; a primeira rede que a contém). */
+export function buildBannedNetworks(blocks: readonly JsonObject[]): BannedNetworkAccount[] {
+  const out = new Map<string, BannedNetworkAccount>()
+  for (const b of blocks) {
+    if (b.kind !== 'rede' || !Array.isArray(b.accounts)) continue
+    const network = typeof b.value === 'string' ? b.value : String(b.value ?? '')
+    const bannedAt = typeof b.createdAt === 'string' ? b.createdAt : null
+    for (const id of b.accounts) if (typeof id === 'string' && !out.has(id)) out.set(id, { playerId: id, network, bannedAt })
+  }
+  return [...out.values()]
+}
+
 async function read(ctx: KvContext): Promise<KvValue | null> {
   const { app, key } = ctx
+  if (key === BANNED_NETWORKS_KEY) {
+    const blocks = await list(app.db, app.cipher, FRAUD_BLOCKS_KEY)
+    return { value: buildBannedNetworks(blocks.items), version: blocks.row?.version ?? 0, updatedAt: blocks.row?.updated_at ?? null }
+  }
   const players = await list(app.db, app.cipher, PLAYERS_KEY)
   const version = players.row?.version ?? 0
   const updatedAt = players.row?.updated_at ?? null

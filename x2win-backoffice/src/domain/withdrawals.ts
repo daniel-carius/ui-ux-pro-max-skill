@@ -3,14 +3,28 @@
 // Modo API: a decisão é do servidor (POST /api/withdrawals/:id/approve|reject);
 // o painel só confere o teto antes, para avisar cedo.
 import type { RevealPixResponse, WithdrawalDecisionResponse } from '@shared/api'
-import { seedWithdrawals, type Withdrawal } from '@/data/finance'
+import { seedTransactions, seedWithdrawals, type Transaction, type Withdrawal } from '@/data/finance'
+import { seedPlayers, type Player } from '@/data/players'
+import { SEGURANCA_KEYS, seedBlocks, type Block } from '@/data/seguranca'
 import { ApiError, api, isApiMode } from '@/lib/api'
 import { brl } from '@/lib/format'
 import { dbGet, dbSet, patchCache, refreshKey } from '@/lib/store'
 import { audit } from './session'
 import type { Role } from './roles'
-import { approvalMessage, checkApprovalCeiling, type DecisionResult } from '@shared/withdrawals'
-import { WEBHOOK_KEYS, emitWebhook } from './webhooks'
+import { GERAL_KEYS, type StatusEvent } from './geral'
+import {
+  DEFAULT_WITHDRAWAL_RULES,
+  approvalMessage,
+  checkApprovalCeiling,
+  outOfRulesProblem,
+  payoutHoldMessage,
+  rejectionMessage,
+  SEGREGATION_MESSAGE,
+  SEGREGATION_WINDOW_MS,
+  type DecisionResult,
+  type WithdrawalRules,
+} from '@shared/withdrawals'
+import { WEBHOOK_KEYS, emitWebhook, isWebhookTemplateOff } from './webhooks'
 
 export const WITHDRAWAL_KEYS = {
   list: 'operacao.saques',
@@ -90,6 +104,47 @@ async function decideOnServer(w: Withdrawal, action: 'approve' | 'reject', body?
   }
 }
 
+/**
+ * Demonstração: conta bloqueada ou de rede banida (mesma regra e texto do servidor, payoutHold), com os dados do
+ * navegador. Modo API: null (a lista de jogadores não é lida pela tela de saques; o servidor decide e explica).
+ */
+export function knownPayoutHold(playerId: string): string | null {
+  if (isApiMode()) return null
+  const player = dbGet<Player[]>('geral.jogadores', seedPlayers).find((p) => p.id === playerId)
+  const net = dbGet<Block[]>(SEGURANCA_KEYS.blocks, seedBlocks).find((b) => b.kind === 'rede' && b.accounts.includes(playerId))
+  if (net) return payoutHoldMessage({ network: net.value, blocked: true })
+  if (player?.status !== 'bloqueado') return null
+  const lastBlock = dbGet<StatusEvent[]>(GERAL_KEYS.statusHistory, [])
+    .filter((h) => h.playerId === playerId && h.action === 'bloquear')
+    .sort((a, b) => b.at.localeCompare(a.at))[0]
+  return payoutHoldMessage({ blocked: true, blockReason: lastBlock?.reason ?? null })
+}
+
+/**
+ * Demonstração: as conferências que o servidor faz na aprovação (withdrawals/routes.ts, assertPayable), na mesma
+ * ordem e com o mesmo texto. Antes a demonstração só conferia o teto do cargo e aprovava saque de conta bloqueada.
+ */
+function demoApprovalProblem(w: Withdrawal, actor: DecisionActor, now = Date.now()): DecisionOutcome | null {
+  const hold = knownPayoutHold(w.playerId)
+  if (hold) return { ok: false, code: 'jogador_bloqueado', message: `Aprovação bloqueada: ${hold}`, details: { reason: hold } }
+  const rules = { ...DEFAULT_WITHDRAWAL_RULES, ...dbGet<Partial<WithdrawalRules>>(WITHDRAWAL_KEYS.rules, DEFAULT_WITHDRAWAL_RULES) }
+  const approved24h = dbGet<Withdrawal[]>(WITHDRAWAL_KEYS.list, seedWithdrawals).filter(
+    (x) => x.playerId === w.playerId && x.status === 'aprovado' && now - new Date(x.updatedAt).getTime() < 86_400_000,
+  ).length
+  const rule = outOfRulesProblem(w.amount, rules, 0) ?? outOfRulesProblem(w.amount, rules, approved24h)
+  if (rule) return { ok: false, code: 'fora_das_regras', message: rule.message, details: rule.details }
+  type ManualTx = Transaction & { by?: string; byId?: string }
+  const credited = dbGet<ManualTx[]>('geral.transacoes', seedTransactions).some(
+    (tx) =>
+      tx.playerId === w.playerId &&
+      (tx.type === 'credito_manual' || tx.type === 'estorno') &&
+      now - new Date(tx.at).getTime() < SEGREGATION_WINDOW_MS &&
+      (tx.byId ? tx.byId === actor.id : tx.by === actor.name),
+  )
+  if (credited) return { ok: false, code: 'segregacao_funcoes', message: SEGREGATION_MESSAGE }
+  return null
+}
+
 export async function approveWithdrawal(w: Withdrawal, role: Role, actor: DecisionActor): Promise<DecisionOutcome> {
   if (!['pendente', 'em_analise', 'criado'].includes(w.status)) {
     return { ok: false, message: 'Este saque já foi decidido.' }
@@ -97,11 +152,13 @@ export async function approveWithdrawal(w: Withdrawal, role: Role, actor: Decisi
   const check = checkApprovalCeiling(role, w.amount)
   if (!check.ok) return check
   if (isApiMode()) return decideOnServer(w, 'approve')
+  const problem = demoApprovalProblem(w, actor)
+  if (problem) return problem
   patch(w.id, { status: 'aprovado', decidedBy: actor.name, decidedById: actor.id, decidedByEmail: actor.email, decisionNote: null })
   audit('aprovar', `Saque #${w.id}`, `Saque de ${brl(w.amount)} de ${w.playerName} aprovado`)
   // saque.pago é um aviso aos sistemas que pagam: a mensagem diz quantos avisos saíram (mesmo texto do servidor)
   const queued = emitWebhook('saque.pago', { id: w.id, amount: w.amount, playerId: w.playerId })
-  return { ok: true, message: approvalMessage(w.amount, queued) }
+  return { ok: true, message: approvalMessage(w.amount, queued, isWebhookTemplateOff('saque.pago')) }
 }
 
 export async function rejectWithdrawal(w: Withdrawal, role: Role, actor: DecisionActor, reason: string): Promise<DecisionOutcome> {
@@ -114,8 +171,8 @@ export async function rejectWithdrawal(w: Withdrawal, role: Role, actor: Decisio
   if (isApiMode()) return decideOnServer(w, 'reject', { reason })
   patch(w.id, { status: 'recusado', decidedBy: actor.name, decidedById: actor.id, decidedByEmail: actor.email, decisionNote: reason })
   audit('recusar', `Saque #${w.id}`, `Saque de ${brl(w.amount)} recusado: ${reason}`)
-  emitWebhook('saque.rejeitado', { id: w.id, amount: w.amount, reason })
-  return { ok: true, message: `Saque recusado. ${brl(w.amount)} voltou para o saldo do jogador.` }
+  const queued = emitWebhook('saque.rejeitado', { id: w.id, amount: w.amount, reason })
+  return { ok: true, message: rejectionMessage(w.amount, queued, isWebhookTemplateOff('saque.rejeitado')) }
 }
 
 /**

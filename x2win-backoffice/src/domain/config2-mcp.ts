@@ -1,6 +1,7 @@
 // Regras das chaves de IA (Configurações › IA no painel (MCP)).
 // A chave age como quem a criou, com as permissões do cargo dessa pessoa
 // (achado 4). Escopo "somente leitura" corta tudo o que não for "ver".
+import { isApiMode } from '@/lib/api'
 import type { TeamMember } from '@/data/team'
 import { PERMISSION_BY_KEY, type Role } from './roles'
 import { randomChars } from './config2-access'
@@ -47,7 +48,8 @@ export const MCP_EXPIRY_OPTIONS: { value: McpExpiry; label: string }[] = [
   { value: 0, label: 'Sem expiração' },
 ]
 
-export const MCP_SERVER_URL = 'https://painel.x2win.bet.br/mcp'
+/** Endereço do servidor MCP: no modo API, a origem deste painel (não um domínio de demonstração). */
+export const MCP_SERVER_URL = isApiMode() && typeof window !== 'undefined' ? `${window.location.origin}/mcp` : 'https://painel.x2win.bet.br/mcp'
 
 /**
  * Status efetivo: revogada > expirada > suspensa (criador desligado) > ativa.
@@ -78,9 +80,17 @@ export interface CreateKeyCheck {
 }
 
 /** Só cria chave quem tem 2FA ligado (comportamento seguro do achado 4). */
+/**
+ * Modo API: o servidor MCP ainda não faz parte desta versão (não há rota /mcp nem chave conferida pelo servidor).
+ * Antes a tela criava no navegador uma chave "DEMO-mcp-…" e mostrava um endereço que respondia 404.
+ */
+export const MCP_UNAVAILABLE =
+  'O servidor MCP ainda não faz parte desta versão: o endereço /mcp não existe e nenhuma chave criada aqui funcionaria. Revogar chaves antigas continua disponível.'
+
 export function canCreateKey(user: TeamMember, canEdit: boolean): CreateKeyCheck {
+  if (isApiMode()) return { ok: false, message: MCP_UNAVAILABLE }
   if (!canEdit) return { ok: false, message: 'Seu cargo não pode criar chaves.' }
-  if (!user.twoFactor) return { ok: false, message: 'Ative o 2FA na sua conta para criar chaves. A chave age como você.' }
+  if (!user.twoFactor) return { ok: false, message: 'Ative o 2FA na sua conta (menu da conta › Ativar 2FA) para criar chaves. A chave age como você.' }
   return { ok: true }
 }
 
@@ -103,7 +113,7 @@ export function generateMcpToken() {
   return `DEMO-mcp-${randomChars(32, 'abcdefghijklmnopqrstuvwxyz0123456789')}`
 }
 
-export function clientConfigSnippet(token = 'DEMO-mcp-COLE-SUA-CHAVE-AQUI') {
+export function clientConfigSnippet(token = isApiMode() ? 'COLE-SUA-CHAVE-AQUI' : 'DEMO-mcp-COLE-SUA-CHAVE-AQUI') {
   return JSON.stringify(
     {
       mcpServers: {

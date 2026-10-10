@@ -37,6 +37,7 @@ import {
   Menu,
   Modal,
   Mono,
+  NoDataSource,
   NumberInput,
   PageHeader,
   SaveBar,
@@ -443,7 +444,7 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
                             </>
                           )}
                           {' · '}
-                          {a.holder}
+                          {a.holder || 'titular não informado'}
                         </p>
                       </div>
                       <div className="flex min-w-0 items-center gap-1 rounded-lg border border-line bg-surface-2 py-0.5 pl-2.5 pr-0.5 lg:w-[260px]">
@@ -497,7 +498,7 @@ function AccountModal({
   const isNew = !account
   const [id] = useState(() => account?.id ?? uid(`ga-${gateway.id.slice(0, 2)}-`))
   const main = !!account?.main
-  const [draft, setDraft] = useState({ name: account?.name ?? '', clientId: account?.clientId ?? '', secret: '', holder: account?.holder ?? 'X2Win Entretenimento Digital Ltda.', active: account?.active ?? true })
+  const [draft, setDraft] = useState({ name: account?.name ?? '', clientId: account?.clientId ?? '', secret: '', holder: account?.holder ?? (isApiMode() ? '' : 'X2Win Entretenimento Digital Ltda.'), active: account?.active ?? true })
   const [touched, setTouched] = useState(false)
   const [saving, setSaving] = useState(false)
   const [serverSecretError, setServerSecretError] = useState<string | null>(null)
@@ -607,7 +608,7 @@ function AccountModal({
                 autoComplete="new-password"
                 value={draft.secret}
                 invalid={!!serverSecretError || !!e('secret') || (requireNew && !draft.secret.trim())}
-                placeholder="DEMO-..."
+                placeholder={isApiMode() ? 'Segredo da conta' : 'DEMO-...'}
                 onChange={(x) => {
                   setServerSecretError(null)
                   setDraft((d) => ({ ...d, secret: x.target.value }))
@@ -752,7 +753,30 @@ const HEALTH_LABEL: Record<HealthStatus, string> = { operacional: 'Operacional',
 const HEALTH_TONE: Record<HealthStatus, Tone> = { operacional: 'success', degradado: 'warning', fora: 'neutral' }
 type Metric = 'approval' | 'latency' | 'volume'
 
+/**
+ * Modo API: o servidor guarda gateways e contas, mas não consulta os gateways. A aba mostrava aprovação, latência,
+ * uptime e erros gerados no navegador (inclusive "assinatura inválida" e "timeout" inventados) como se fossem reais.
+ */
 function Health() {
+  if (API) return <HealthNoSource />
+  return <HealthDemo />
+}
+
+function HealthNoSource() {
+  const { gateways, accounts } = useGatewayData()
+  const activeAccounts = accounts.items.filter((a) => a.active && gateways.items.find((g) => g.id === a.gatewayId)?.active)
+  return (
+    <NoDataSource title="Saúde dos gateways ainda sem fonte de dados">
+      Nesta versão o servidor guarda as credenciais e as contas, mas não consulta os gateways: taxa de aprovação, latência, disponibilidade e
+      erros dependem de dados do gateway que ainda não chegam ao painel.{' '}
+      {activeAccounts.length
+        ? `${plural(activeAccounts.length, 'conta ativa', 'contas ativas')} em gateway ligado; acompanhe a saúde no painel do próprio gateway.`
+        : 'Nenhuma conta ativa em gateway ligado.'}
+    </NoDataSource>
+  )
+}
+
+function HealthDemo() {
   const { gateways, accounts } = useGatewayData()
   const [refresh, setRefresh] = useState(0)
   const [loading, setLoading] = useState(false)

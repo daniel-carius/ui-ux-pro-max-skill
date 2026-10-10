@@ -25,13 +25,16 @@ import {
   type Column,
   type DateRange,
 } from '@/components/ui'
+import { WEBHOOK_MAX_ATTEMPTS } from '@shared/api'
 import { cn } from '@/lib/cn'
-import { dateShort, dateTime, num, pct, relative } from '@/lib/format'
+import { isApiMode } from '@/lib/api'
+import { dateShort, dateTime, num, pct, plural, relative } from '@/lib/format'
 import { useWebhookDestinations, useWebhookExecutions } from '@/data/hooks'
 import { NOW } from '@/data/now'
 import { audit } from '@/domain/session'
 import { WEBHOOK_EVENT_LABEL, WEBHOOK_TEST_EVENT, isTestExecution, type WebhookEvent, type WebhookExecution } from '@/domain/webhooks'
 import { daysBetween, hasTokenLikeSegment, latencyTone, maskTokenUrl, prettyJson, rollingRange, webhookStats } from '@/domain/campanhas3-webhooks'
+import { attemptLabel, isDemoExecution, isRealDelivery } from '@/domain/campanhas-webhooks'
 import { RateBar, TableFrame } from './_shared-c3'
 
 const EVENT_SLOT: Record<WebhookEvent, SeriesSlot> = {
@@ -44,6 +47,17 @@ const EVENT_SLOT: Record<WebhookEvent, SeriesSlot> = {
 
 const EVENTS = Object.keys(WEBHOOK_EVENT_LABEL) as WebhookEvent[]
 
+const API = isApiMode()
+
+type StatusFilter = 'todas' | 'sucesso' | 'falha' | 'teste'
+
+/** Linha da lista no filtro de status: sucesso e falha são entregas de verdade; testes ficam no próprio filtro. */
+function matchesStatus(e: WebhookExecution, status: StatusFilter) {
+  if (status === 'todas') return true
+  if (status === 'teste') return isTestExecution(e)
+  return !isTestExecution(e) && e.status === status
+}
+
 function delta(cur: number, prev: number) {
   return prev ? (cur - prev) / prev : null
 }
@@ -54,23 +68,36 @@ export default function Estatisticas() {
   // a base de demonstração ancora as execuções em NOW (carga da página)
   const [range, setRangeRaw] = useState<DateRange>(() => rollingRange(presetRange('30d'), NOW.getTime()))
   const setRange = (r: DateRange) => setRangeRaw(rollingRange(r, NOW.getTime()))
-  const [status, setStatus] = useState<'todas' | 'sucesso' | 'falha'>('todas')
+  const [status, setStatus] = useState<StatusFilter>('todas')
   const [event, setEvent] = useState<'todos' | WebhookEvent>('todos')
   const [openId, setOpenId] = useState<string | null>(null)
 
-  const inPeriod = useMemo(() => executions.filter((e) => inRange(e.at, range)), [executions, range])
+  // modo API: registros semeados com DEMO_DATA para destinos de demonstração (o servidor nunca envia para eles)
+  // ficam fora da tela inteira; o aviso abaixo diz quantos
+  const listed = useMemo(() => executions.filter((e) => !isDemoExecution(e, API)), [executions])
+  const demoHidden = executions.length - listed.length
+  const inPeriod = useMemo(() => listed.filter((e) => inRange(e.at, range)), [listed, range])
   const prevPeriod = useMemo(() => {
     const pr = previousRange(range)
-    return executions.filter((e) => inRange(e.at, pr))
-  }, [executions, range])
+    return listed.filter((e) => inRange(e.at, pr))
+  }, [listed, range])
   const days = useMemo(() => daysBetween(range.from, range.to), [range])
-  const stats = useMemo(() => webhookStats(inPeriod, days), [inPeriod, days])
-  const prev = useMemo(() => webhookStats(prevPeriod, []), [prevPeriod])
+  // envios de teste (botão "Testar" e teste de template) não são execuções reais: ficam na lista, no filtro "Testes",
+  // mas fora das contagens, da taxa de sucesso e da "Última execução" (mesma definição de Webhooks: isRealDelivery)
+  const stats = useMemo(() => webhookStats(inPeriod.filter((e) => isRealDelivery(e, API)), days), [inPeriod, days])
+  const prev = useMemo(() => webhookStats(prevPeriod.filter((e) => isRealDelivery(e, API)), []), [prevPeriod])
   const tokenDests = destinations.filter((d) => hasTokenLikeSegment(d.url))
   const destById = new Map(destinations.map((d) => [d.id, d]))
 
-  const rows = inPeriod.filter((e) => (status === 'todas' || e.status === status) && (event === 'todos' || e.event === event))
-  const statusCounts = { todas: inPeriod.length, sucesso: stats.success, falha: stats.failures }
+  const byEvent = inPeriod.filter((e) => event === 'todos' || e.event === event)
+  const rows = byEvent.filter((e) => matchesStatus(e, status))
+  // cada chip conta exatamente as linhas que mostra: Todas = Sucesso + Falha + Testes
+  const statusCounts: Record<StatusFilter, number> = {
+    todas: byEvent.length,
+    sucesso: byEvent.filter((e) => matchesStatus(e, 'sucesso')).length,
+    falha: byEvent.filter((e) => matchesStatus(e, 'falha')).length,
+    teste: byEvent.filter((e) => matchesStatus(e, 'teste')).length,
+  }
   const open = openId ? inPeriod.find((e) => e.id === openId) ?? executions.find((e) => e.id === openId) : undefined
 
   const execColumns: Column<WebhookExecution>[] = [
@@ -109,11 +136,15 @@ export default function Estatisticas() {
       id: 'status',
       header: 'Status',
       sortValue: (e) => e.status,
-      csv: (e) => (e.status === 'sucesso' ? 'Sucesso' : 'Falha'),
+      csv: (e) => `${e.status === 'sucesso' ? 'Sucesso' : 'Falha'}${isTestExecution(e) ? ' (teste)' : ''}${attemptLabel(e) ? ` (${attemptLabel(e)})` : ''}`,
       cell: (e) => (
-        <Badge tone={e.status === 'sucesso' ? 'success' : 'danger'} dot>
-          {e.status === 'sucesso' ? 'Sucesso' : 'Falha'}
-        </Badge>
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <Badge tone={e.status === 'sucesso' ? 'success' : 'danger'} dot>
+            {e.status === 'sucesso' ? 'Sucesso' : 'Falha'}
+          </Badge>
+          {isTestExecution(e) && <Badge tone="info">Teste</Badge>}
+          {attemptLabel(e) && <span className="whitespace-nowrap text-xs text-fg-3">{attemptLabel(e)}</span>}
+        </span>
       ),
     },
     {
@@ -121,11 +152,12 @@ export default function Estatisticas() {
       header: 'HTTP',
       align: 'center',
       sortValue: (e) => e.httpStatus,
-      cell: (e) => <Mono className={cn('font-semibold', e.httpStatus < 300 ? 'text-success' : e.httpStatus < 500 ? 'text-warning' : 'text-danger')}>{e.httpStatus}</Mono>,
+      cell: (e) => <Mono className={cn('font-semibold', httpTone(e.httpStatus))}>{httpLabel(e.httpStatus)}</Mono>,
     },
     {
       id: 'duration',
       header: 'Duração',
+      label: 'Duração (ms)',
       align: 'right',
       sortValue: (e) => e.durationMs,
       csv: (e) => e.durationMs,
@@ -149,10 +181,17 @@ export default function Estatisticas() {
       ),
     },
     { id: 'total', header: 'Execuções', align: 'right', sortValue: (r) => r.total, cell: (r) => <span className="font-semibold">{num(r.total)}</span> },
-    { id: 'share', header: 'Participação', sortValue: (r) => r.total, csv: (r) => (stats.total ? ((r.total / stats.total) * 100).toFixed(1) : 0), cell: (r) => <RateBar value={r.total} total={stats.total} tone="primary" showCount={false} /> },
+    {
+      id: 'share',
+      header: 'Participação',
+      sortValue: (r) => r.total,
+      // CSV no padrão brasileiro: "40,3%" (antes "40.3", com ponto e sem %)
+      csv: (r) => `${(stats.total ? (r.total / stats.total) * 100 : 0).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`,
+      cell: (r) => <RateBar value={r.total} total={stats.total} tone="primary" showCount={false} />,
+    },
     { id: 'success', header: 'Sucesso', sortValue: (r) => (r.total ? r.success / r.total : 0), csv: (r) => r.success, cell: (r) => <RateBar value={r.success} total={r.total} tone="success" /> },
     { id: 'failures', header: 'Falhas', align: 'right', sortValue: (r) => r.failures, cell: (r) => <span className={r.failures ? 'font-semibold text-danger' : 'text-fg-3'}>{num(r.failures)}</span> },
-    { id: 'avg', header: 'Tempo médio', align: 'right', sortValue: (r) => r.avgMs, csv: (r) => r.avgMs, cell: (r) => <Badge tone={latencyTone(r.avgMs)}>{`${num(r.avgMs)} ms`}</Badge> },
+    { id: 'avg', header: 'Tempo médio', label: 'Tempo médio (ms)', align: 'right', sortValue: (r) => r.avgMs, csv: (r) => r.avgMs, cell: (r) => <Badge tone={latencyTone(r.avgMs)}>{`${num(r.avgMs)} ms`}</Badge> },
     { id: 'last', header: 'Última execução', sortValue: (r) => r.lastAt ?? '', csv: (r) => (r.lastAt ? dateTime(r.lastAt) : ''), cell: (r) => <span className="whitespace-nowrap text-[13px] text-fg-2">{r.lastAt ? relative(r.lastAt) : '—'}</span> },
   ]
 
@@ -161,6 +200,12 @@ export default function Estatisticas() {
       <PageHeader actions={<DateRangePicker value={range} onChange={setRange} />} />
 
       <div className="space-y-5">
+        {demoHidden > 0 && (
+          <Alert tone="info" title={`${plural(demoHidden, 'registro de demonstração fica', 'registros de demonstração ficam')} fora desta tela`}>
+            São entregas fictícias gravadas com os dados de demonstração para destinos de terceiros (hooks.x2win-crm.com, api.leadflow.app), que o
+            servidor nunca chama. Não entram nas contagens nem na lista.
+          </Alert>
+        )}
         {tokenDests.length > 0 && (
           <Alert
             tone="warning"
@@ -183,7 +228,7 @@ export default function Estatisticas() {
             value={num(stats.total)}
             delta={prev.total ? delta(stats.total, prev.total) : undefined}
             hint={prev.total ? 'vs período anterior' : 'sem dados do período anterior'}
-            formula="Chamadas HTTP feitas aos destinos de webhook no período, uma por evento e destino ativo."
+            formula={`Chamadas HTTP feitas aos destinos de webhook no período. Cada tentativa conta: quando o destino falha, a mesma entrega é tentada de novo, até ${WEBHOOK_MAX_ATTEMPTS} vezes. Envios de teste ficam de fora.`}
           />
           <KpiCard
             label="Taxa de sucesso"
@@ -207,11 +252,11 @@ export default function Estatisticas() {
           <KpiCard
             label="Tempo médio de resposta"
             icon={Timer}
-            tone={latencyTone(stats.avgMs) === 'success' ? 'info' : latencyTone(stats.avgMs)}
-            value={`${num(stats.avgMs)} ms`}
-            delta={prev.total ? delta(stats.avgMs, prev.avgMs) : undefined}
+            tone={stats.avgMs === null ? 'neutral' : latencyTone(stats.avgMs) === 'success' ? 'info' : latencyTone(stats.avgMs)}
+            value={stats.avgMs === null ? '—' : `${num(stats.avgMs)} ms`}
+            delta={stats.avgMs !== null && prev.avgMs !== null ? delta(stats.avgMs, prev.avgMs) : undefined}
             goodWhenUp={false}
-            hint={`p95: ${num(stats.p95Ms)} ms`}
+            hint={stats.p95Ms === null ? 'nenhuma execução no período' : `p95: ${num(stats.p95Ms)} ms`}
             formula="Média do tempo entre o envio e a resposta do destino. p95 = 95% das chamadas responderam abaixo desse tempo."
           />
         </section>
@@ -292,6 +337,7 @@ export default function Estatisticas() {
                     { value: 'todas', label: 'Todas', count: statusCounts.todas },
                     { value: 'sucesso', label: 'Sucesso', count: statusCounts.sucesso },
                     { value: 'falha', label: 'Falha', count: statusCounts.falha, tone: 'danger' },
+                    { value: 'teste', label: 'Testes', count: statusCounts.teste },
                   ]}
                 />
                 <div className="w-full sm:w-52">
@@ -332,25 +378,47 @@ export default function Estatisticas() {
   )
 }
 
+/** Status HTTP 0 = sem resposta (conexão, DNS, tempo esgotado): falha, nunca verde. */
+function httpLabel(status: number) {
+  return status > 0 ? String(status) : 'sem resposta'
+}
+function httpTone(status: number) {
+  if (status <= 0) return 'text-danger'
+  return status < 300 ? 'text-success' : status < 500 ? 'text-warning' : 'text-danger'
+}
+
 function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: boolean | null }) {
   const body = prettyJson(e.payload)
   const tone = latencyTone(e.durationMs)
   // teste: sai como webhook.teste; a execução fica no evento do destino
   const test = isTestExecution(e)
+  // o que o destino recebeu: id da entrega (o mesmo em todas as tentativas) e o timestamp assinado. Demonstração:
+  // o envio é simulado e usa o id da execução
+  const deliveryId = e.deliveryId ?? (API ? 'não registrado' : e.id)
+  const timestamp = e.timestamp != null ? String(e.timestamp) : API ? (e.httpStatus > 0 ? 'não registrado' : 'não enviado') : String(Math.floor(new Date(e.at).getTime() / 1000))
+  // modo API: sem X-X2W-Timestamp e sem resposta, o envio parou antes de conectar (endereço recusado ou que não
+  // resolve): o servidor nem assina, então nada saiu (antes a tela listava os cabeçalhos, com assinatura, como enviados)
+  const notSent = API && e.timestamp == null && e.httpStatus <= 0
+  // entrega real que falhou antes da última tentativa: o servidor tenta de novo, salvo se o destino mudou ou saiu
+  const moreAttempts = !test && e.status === 'falha' && !!e.attempt && e.attempt < WEBHOOK_MAX_ATTEMPTS
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-3 gap-3">
         <div className="rounded-xl bg-surface-2 px-3 py-2.5">
           <p className="text-xs text-fg-3">HTTP</p>
-          <p className={cn('mt-0.5 font-mono text-xl font-bold', e.httpStatus < 300 ? 'text-success' : 'text-danger')}>{e.httpStatus}</p>
+          <p className={cn('mt-0.5 font-mono font-bold', e.httpStatus > 0 ? 'text-xl' : 'text-base leading-7', httpTone(e.httpStatus))}>{httpLabel(e.httpStatus)}</p>
         </div>
         <div className="rounded-xl bg-surface-2 px-3 py-2.5">
           <p className="text-xs text-fg-3">Duração</p>
           <p className={cn('mt-0.5 font-display text-xl font-bold tnum', tone === 'success' ? 'text-fg' : tone === 'warning' ? 'text-warning' : 'text-danger')}>{num(e.durationMs)} ms</p>
         </div>
         <div className="rounded-xl bg-surface-2 px-3 py-2.5">
-          <p className="text-xs text-fg-3">Tentativas</p>
-          <p className="mt-0.5 font-display text-xl font-bold text-fg tnum">1</p>
+          <p className="text-xs text-fg-3">Tentativa</p>
+          {/* teste: envio único, nunca repetido. Modo API: número gravado pelo servidor; registro antigo não tem.
+              Demonstração: uma tentativa simulada */}
+          <p className={cn('mt-0.5 font-display font-bold text-fg tnum', test || e.attempt || !API ? 'text-xl' : 'text-base leading-7 text-fg-3')}>
+            {test ? 'Única' : e.attempt ? `${e.attempt} de ${WEBHOOK_MAX_ATTEMPTS}` : API ? 'não registrada' : '1'}
+          </p>
         </div>
       </div>
       <DescriptionList
@@ -358,22 +426,46 @@ function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: b
           // e.url vem com os trechos sensíveis mascarados: só para exibir (o destino é o destinationId)
           { label: 'Destino', value: <Mono className="break-all">{`POST https://${maskTokenUrl(e.url)}`}</Mono>, full: true },
           { label: 'ID da execução', value: <Mono>{e.id}</Mono> },
+          { label: 'ID da entrega (X-X2W-Delivery)', value: <Mono>{deliveryId}</Mono> },
           ...(test ? [{ label: 'Origem', value: `Envio de teste (${WEBHOOK_TEST_EVENT})` }] : []),
           { label: 'Destino hoje', value: destActive === null ? 'Removido' : destActive ? 'Ativo' : 'Pausado' },
         ]}
       />
-      <section>
-        <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold text-fg">
-          <Clock size={14} className="text-fg-3" aria-hidden /> Cabeçalhos enviados
-        </h3>
-        <pre className="overflow-x-auto rounded-xl border border-line bg-surface-2 p-3 font-mono text-[12px] leading-5 text-fg-2">
-          {`Content-Type: application/json\nUser-Agent: X2Win-Webhooks/1.0\nX-X2W-Event: ${test ? WEBHOOK_TEST_EVENT : e.event}\nX-X2W-Delivery: ${e.id}\nX-X2W-Signature: sha256=••••••••••••`}
-        </pre>
-        <p className="mt-1.5 text-xs text-fg-3">A assinatura HMAC usa o segredo do destino, que nunca é exibido.</p>
-      </section>
+      {moreAttempts && (
+        <p className="text-xs text-fg-3">
+          {destActive === null
+            ? 'O destino foi removido depois desta tentativa: as tentativas que faltavam foram canceladas.'
+            : `O servidor tenta de novo até ${WEBHOOK_MAX_ATTEMPTS} vezes, com intervalos crescentes. Se o endereço ou o evento do destino mudou, ou ele foi removido, as tentativas que faltavam são canceladas (a Auditoria registra quantas).`}
+        </p>
+      )}
+      {notSent ? (
+        <section>
+          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold text-fg">
+            <CircleX size={14} className="text-danger" aria-hidden /> Nada foi enviado
+          </h3>
+          <p className="rounded-xl border border-line bg-surface-2 p-3 text-[13px] leading-5 text-fg-2">
+            {`O envio parou antes de conectar ao destino${e.error ? ` (${e.error.replace(/\.$/, '')})` : ''}: nenhum cabeçalho, assinatura ou corpo saiu do servidor.`}
+          </p>
+        </section>
+      ) : (
+        <section>
+          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold text-fg">
+            <Clock size={14} className="text-fg-3" aria-hidden /> Cabeçalhos enviados
+          </h3>
+          <pre className="overflow-x-auto rounded-xl border border-line bg-surface-2 p-3 font-mono text-[12px] leading-5 text-fg-2">
+            {`Content-Type: application/json\nUser-Agent: X2Win-Webhooks/1.0\nX-X2W-Event: ${test ? WEBHOOK_TEST_EVENT : e.event}\nX-X2W-Delivery: ${deliveryId}\nX-X2W-Timestamp: ${timestamp}\nX-X2W-Signature: sha256=••••••••••••`}
+          </pre>
+          <p className="mt-1.5 text-xs text-fg-3">
+            {test
+              ? 'Envio de teste: sai uma vez só, sem novas tentativas. '
+              : 'X-X2W-Delivery é o mesmo em todas as tentativas da entrega: quem recebe usa para não processar duas vezes. '}
+            A assinatura HMAC usa o segredo do destino, que nunca é exibido.
+          </p>
+        </section>
+      )}
       <section>
         <div className="mb-2 flex items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold text-fg">Corpo (JSON)</h3>
+          <h3 className="text-sm font-semibold text-fg">{notSent ? 'Corpo (JSON) preparado, não enviado' : 'Corpo (JSON)'}</h3>
           <CopyButton value={body} label="Copiar JSON" />
         </div>
         <pre className="max-h-80 overflow-auto rounded-xl border border-line bg-surface-2 p-3 font-mono text-[12.5px] leading-5 text-fg" aria-label="Corpo da requisição">
@@ -385,8 +477,13 @@ function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: b
           {e.status === 'sucesso' ? <CheckCircle2 size={14} className="text-success" aria-hidden /> : <CircleX size={14} className="text-danger" aria-hidden />} Resposta do destino
         </h3>
         <pre className="overflow-x-auto rounded-xl border border-line bg-surface-2 p-3 font-mono text-[12px] leading-5 text-fg-2">
-          {e.status === 'sucesso' ? `HTTP/1.1 ${e.httpStatus} OK\n\n{"received": true}` : `HTTP/1.1 ${e.httpStatus}\n\n(sem corpo)`}
+          {e.httpStatus > 0 ? `HTTP/1.1 ${e.httpStatus}\n\n(o corpo da resposta não é guardado)` : 'Sem resposta do destino.'}
         </pre>
+        {e.httpStatus === 0 && (
+          <p className="mt-1.5 text-xs text-danger">
+            {e.error || 'O destino não respondeu: falha de conexão, endereço que não resolve ou tempo esgotado.'}
+          </p>
+        )}
       </section>
     </div>
   )

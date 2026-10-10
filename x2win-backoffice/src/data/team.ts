@@ -1,6 +1,8 @@
 // Equipe do painel e histórico de auditoria.
 import { createRng } from '@/lib/random'
 import { DAY, HOUR, MIN, NOW, iso } from './now'
+import { seedWithdrawals } from './finance'
+import { DEMO_STAFF_ID } from './demo'
 
 export interface TeamMember {
   id: string
@@ -102,8 +104,6 @@ export function seedAudit(): AuditEntry[] {
   const actors = seedTeam()
   const templates: [AuditAction, string, string][] = [
     ['login', 'Sessão', 'Login com e-mail e senha'],
-    ['aprovar', 'Saque', 'Saque aprovado'],
-    ['recusar', 'Saque', 'Saque recusado: rollover não cumprido'],
     ['editar', 'Regras de saque', 'Limite diário alterado de 3 para 2'],
     ['editar', 'Banner Hero', 'Imagem do banner trocada'],
     ['criar', 'Promoção', 'Promoção "Sexta Turbo" criada'],
@@ -141,8 +141,30 @@ export function seedAudit(): AuditEntry[] {
       action,
       entity: entity + ref,
       summary,
-      ip: actor.lastIp ?? '0.0.0.0',
+      // sem IP conhecido: vazio (a tela mostra "—"), nunca um 0.0.0.0 inventado
+      ip: actor.lastIp ?? '',
     })
   }
-  return out
+  // decisões de saque: as mesmas da fila de Saques (mesmo status, data e autor genérico da demonstração), em vez de
+  // decisões sorteadas que contradiziam a fila ("recusou" um saque aprovado, um cargo sem aprovar saques "aprovou")
+  const oldest = t
+  for (const w of seedWithdrawals()) {
+    if (!w.decidedBy || (w.status !== 'aprovado' && w.status !== 'recusado')) continue
+    if (new Date(w.updatedAt).getTime() < oldest) continue
+    const approved = w.status === 'aprovado'
+    out.push({
+      id: `au-${w.id}`,
+      at: w.updatedAt,
+      // autor genérico da demonstração (não é ação automática do sistema)
+      actorId: DEMO_STAFF_ID,
+      actorName: w.decidedBy,
+      action: approved ? 'aprovar' : 'recusar',
+      entity: `Saque #${w.id}`,
+      summary: approved ? `Saque de ${brlText(w.amount)} de ${w.playerName} aprovado` : `Saque de ${brlText(w.amount)} recusado: ${w.decisionNote ?? 'sem motivo'}`,
+      ip: '',
+    })
+  }
+  return out.sort((a, b) => b.at.localeCompare(a.at))
 }
+
+const brlText = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })

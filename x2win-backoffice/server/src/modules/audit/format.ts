@@ -1,6 +1,6 @@
 // Auditoria: conversão para AuditEntry (shared/audit.ts), filtros de consulta e CSV.
 import { z } from 'zod'
-import { AUDIT_ACTION_LABEL, AUDIT_SOURCE_LABEL, isAuditAction, type AuditAction, type AuditEntry } from '@shared/audit'
+import { AUDIT_ACTION_LABEL, AUDIT_SOURCE_LABEL, isAuditAction, SYSTEM_ACTOR_FILTER, type AuditAction, type AuditEntry } from '@shared/audit'
 
 export interface AuditRow {
   id: number | string
@@ -92,7 +92,10 @@ export function buildAuditWhere(f: AuditFilter): { where: string; params: unknow
       parts.push(`at <= $${params.length}::timestamptz`)
     }
   }
-  if (f.actorId) {
+  if (f.actorId === SYSTEM_ACTOR_FILTER) {
+    // ações automáticas do servidor (sem pessoa)
+    parts.push('actor_id is null')
+  } else if (f.actorId) {
     params.push(f.actorId)
     parts.push(`actor_id = $${params.length}`)
   }
@@ -104,11 +107,36 @@ export function buildAuditWhere(f: AuditFilter): { where: string; params: unknow
 }
 
 /** Descrição curta dos filtros, para o resumo da auditoria de exportação. */
-export function describeFilter(f: AuditFilter): string {
+/** Data do filtro como a pessoa lê: 11/09/2026 (dia inteiro) ou 11/09/2026 14:32, no horário de Brasília. */
+function filterDate(v: string): string {
+  if (DATE_ONLY.test(v)) {
+    const [y, m, d] = v.split('-')
+    return `${d}/${m}/${y}`
+  }
+  const dt = new Date(v)
+  if (Number.isNaN(dt.getTime())) return v
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+    .format(dt)
+    .replace(',', '')
+}
+
+/**
+ * Descrição curta dos filtros, para o resumo da auditoria de exportação. `actorLabel` é "nome (e-mail)" de quem
+ * foi filtrado (a rota busca na equipe); sem ele, o id. Antes saíam as datas ISO e o id interno da pessoa.
+ */
+export function describeFilter(f: AuditFilter, actorLabel?: string | null): string {
   const out: string[] = []
-  if (f.from) out.push(`de ${f.from}`)
-  if (f.to) out.push(`até ${f.to}`)
-  if (f.actorId) out.push(`pessoa: ${f.actorId}`)
+  if (f.from) out.push(`de ${filterDate(f.from)}`)
+  if (f.to) out.push(`até ${filterDate(f.to)}`)
+  if (f.actorId === SYSTEM_ACTOR_FILTER) out.push('pessoa: Sistema (ações automáticas)')
+  else if (f.actorId) out.push(`pessoa: ${actorLabel || f.actorId}`)
   if (f.action) out.push(`ação: ${AUDIT_ACTION_LABEL[f.action as AuditAction]}`)
   return out.join(', ')
 }

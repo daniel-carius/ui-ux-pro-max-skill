@@ -36,6 +36,8 @@ import {
   ImageUpload,
   Input,
   KpiCard,
+  NO_SOURCE_HINT,
+  NoDataSource,
   MoneyInput,
   NumberInput,
   PageHeader,
@@ -47,6 +49,7 @@ import {
   useSettingsForm,
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
+import { isApiMode } from '@/lib/api'
 import { brl, brlCompact, dateShort, num, numCompact, pct } from '@/lib/format'
 import { NOW, dayKey } from '@/data/now'
 import { useCoinStats } from '@/domain/campanhas-jogadores'
@@ -86,6 +89,9 @@ function delta(cur: number, prev: number) {
 }
 
 /** Soma dos dias do mês corrente e do mesmo trecho do mês anterior. */
+/** Modo API: emissão e resgate vêm do extrato de moedas da plataforma, ainda não conectado. */
+const HAS_FLOW = !isApiMode()
+
 function monthTotals(flow: CoinFlowDay[]) {
   const first = dayKey(new Date(NOW.getFullYear(), NOW.getMonth(), 1))
   const prevFirst = dayKey(new Date(NOW.getFullYear(), NOW.getMonth() - 1, 1))
@@ -107,7 +113,8 @@ export default function Moeda() {
   const errs = coinConfigErrors(v)
   // demonstração: somado da lista de jogadores; modo API: contagem pronta do servidor (geral.jogadores.metricas)
   const { circulation, holders } = useCoinStats()
-  const flow = useMemo(() => seedCoinFlow(), [])
+  // emissão e resgate por dia: só na demonstração (no modo API não há extrato de moedas conectado)
+  const flow = useMemo(() => (HAS_FLOW ? seedCoinFlow() : []), [])
   const { cur, prev, sum } = useMemo(() => monthTotals(flow), [flow])
   const emitted = sum(cur, 'emitted')
   const redeemed = sum(cur, 'redeemed')
@@ -145,27 +152,27 @@ export default function Moeda() {
             label={`Emitidas em ${monthLabel}`}
             icon={ArrowDownToLine}
             tone="success"
-            value={numCompact(emitted)}
-            delta={delta(emitted, sum(prev, 'emitted'))}
-            hint="vs mesmo período do mês anterior"
+            value={HAS_FLOW ? numCompact(emitted) : '—'}
+            delta={HAS_FLOW ? delta(emitted, sum(prev, 'emitted')) : undefined}
+            hint={HAS_FLOW ? 'vs mesmo período do mês anterior' : NO_SOURCE_HINT}
             formula={<>Moedas creditadas aos jogadores no mês até hoje, somando apostas, depósitos, login, missões e níveis.</>}
-            chart={<Sparkline data={last30.map((d) => d.emitted)} slot={4} ariaLabel="Emissão diária nos últimos 30 dias" />}
+            chart={HAS_FLOW ? <Sparkline data={last30.map((d) => d.emitted)} slot={4} ariaLabel="Emissão diária nos últimos 30 dias" /> : undefined}
           />
           <KpiCard
             label={`Resgatadas em ${monthLabel}`}
             icon={ArrowUpFromLine}
             tone="info"
-            value={numCompact(redeemed)}
-            delta={delta(redeemed, sum(prev, 'redeemed'))}
-            hint={`≈ ${brlCompact(redeemed * saved.refValue)} em prêmios`}
+            value={HAS_FLOW ? numCompact(redeemed) : '—'}
+            delta={HAS_FLOW ? delta(redeemed, sum(prev, 'redeemed')) : undefined}
+            hint={HAS_FLOW ? `≈ ${brlCompact(redeemed * saved.refValue)} em prêmios` : NO_SOURCE_HINT}
             formula={<>Moedas gastas pelos jogadores na loja e na roleta no mês até hoje.</>}
-            chart={<Sparkline data={last30.map((d) => d.redeemed)} slot={1} ariaLabel="Resgate diário nos últimos 30 dias" />}
+            chart={HAS_FLOW ? <Sparkline data={last30.map((d) => d.redeemed)} slot={1} ariaLabel="Resgate diário nos últimos 30 dias" /> : undefined}
           />
           <KpiCard
             label="Taxa de resgate"
             icon={Flame}
             tone="primary"
-            value={pct(emitted ? redeemed / emitted : 0, 0)}
+            value={HAS_FLOW ? pct(emitted ? redeemed / emitted : 0, 0) : '—'}
             hint={`${num(activeEarnRules(saved))} regras de ganho ligadas`}
             formula={<>Resgatadas ÷ emitidas no mês. Abaixo de 50% indica moedas paradas: vale revisar a loja ou a validade.</>}
           />
@@ -373,6 +380,7 @@ export default function Moeda() {
 
         <Simulator cfg={v} />
 
+{HAS_FLOW ? (
         <div className="grid gap-6 xl:grid-cols-5">
           <Card className="xl:col-span-3">
             <CardHeader title="Emissão e resgate" description="Moedas por dia, últimos 30 dias" />
@@ -410,6 +418,12 @@ export default function Moeda() {
             </CardBody>
           </Card>
         </div>
+        ) : (
+          <NoDataSource title="Emissão e resgate de moedas ainda sem fonte de dados">
+            Moedas emitidas, resgatadas e a origem de cada uma vêm do extrato de moedas da plataforma de jogo, que ainda não está conectado a
+            este painel. O saldo em circulação acima vem do servidor.
+          </NoDataSource>
+        )}
       </div>
 
       <SaveBar form={form} label="Salvar moeda" />

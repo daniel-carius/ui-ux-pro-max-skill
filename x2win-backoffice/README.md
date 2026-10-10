@@ -99,7 +99,11 @@ O que o servidor garante (o painel só exibe):
   (administrativas, aprovar saques de jogadores e de afiliados, jogo responsável, países bloqueados), mudar o teto
   de aprovação, pôr alguém num cargo com elas e mexer na lista de IPs: só quem pode conceder cargos (por padrão,
   o Superadmin).
+  Deixar o 2FA opcional num cargo com essas permissões e desligar o "2FA para todos" também.
   Ninguém desativa a si mesmo nem o último Superadmin; nomes da equipe não se repetem nem se confundem.
+- **Senha esquecida**: quem administra a equipe gera uma senha temporária em Equipe (troca obrigatória no próximo
+  acesso, sessões encerradas, 2FA mantido); para cargo administrativo ou com governança, só quem concede cargos.
+  Mantenha mais de um Superadmin: o último não tem quem gere a senha dele.
 - **Saques**: teto de aprovação por cargo. Na aprovação, o servidor segura o pagamento de jogador banido pelo
   anti-fraude e confere as regras em vigor (máximo por saque e limite diário). Segregação de funções: quem lançou
   crédito manual ou estorno para o jogador nos últimos 30 dias não aprova o saque dele. Aprovação automática não
@@ -185,10 +189,17 @@ Decisões ainda em aberto:
   demonstração: as telas mostram o que está no servidor, com permissão por cargo e mascaramento. Servidor sem
   `DEMO_DATA` começa com essas listas vazias (bases entram pela importação do Superadmin com 2FA); com
   `DEMO_DATA=true`, o `seed` grava bases fictícias. As telas de campanha começam vazias no modo API.
-- **Integrações externas**: gateways PIX, agregadores, Betby, SendWork/Mailgun e pixels só simulam a resposta.
+- **Integrações externas**: gateways PIX, agregadores, Betby, SendWork/Mailgun e pixels só guardam as credenciais
+  (cifradas). No modo API nada é simulado: sincronizar catálogo, testar pixel, enviar e-mail de teste, disparos,
+  jornadas e chaves MCP ficam desligados com o motivo, e Integrações mostra "Configurado" (não "Disponível").
   Os webhooks de saque são enviados de verdade, assinados; o pagamento do saque depende de quem recebe
-  `saque.pago`.
+  `saque.pago`. Desligar o template do evento em Campanhas › Templates faz o servidor não enviar o webhook; o corpo
+  do template ainda não é aplicado (o envio usa o envelope padrão).
 - **E-mails**: convite e senha temporária aparecem na tela para quem criou o acesso (não há envio de e-mail).
+- **Indicadores sem fonte**: no modo API, GGR, depósitos e saques por período, usuários ativos, carteiras, tráfego do
+  site, sessões e bônus do anti-fraude e históricos de campanha mostram "sem fonte de dados" até a plataforma de
+  jogo ser conectada (antes eram números gerados no navegador). Os testes de domínio, agregador e e-mail ficam
+  desligados com o motivo.
 
 ## Estrutura
 

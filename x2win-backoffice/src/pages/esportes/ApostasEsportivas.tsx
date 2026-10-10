@@ -47,7 +47,7 @@ import {
   type DateRange,
   type Tone,
 } from '@/components/ui'
-import { brl, brlCompact, date, dateTime, mult, num, pct, plural, relative, time } from '@/lib/format'
+import { brl, brlCompact, date, dateTime, mult, num, parseDecimalInput, pct, plural, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { isApiMode } from '@/lib/api'
 import { dbGet, refreshKey } from '@/lib/store'
@@ -111,8 +111,9 @@ export default function ApostasEsportivas() {
   const inPeriod = useMemo(() => bets.items.filter((b) => inRange(b.at, range)), [bets.items, range])
   const providers = useMemo(() => [...new Set(bets.items.map((b) => b.provider))], [bets.items])
 
-  const min = minV === '' ? null : Number(minV)
-  const max = maxV === '' ? null : Number(maxV)
+  // texto com vírgula decimal ("12,5"); o campo recusa o que não forma número
+  const min = minV.trim() === '' ? null : parseDecimalInput(minV)
+  const max = maxV.trim() === '' ? null : parseDecimalInput(maxV)
   const rangeError = min !== null && max !== null && min > max ? 'O mínimo é maior que o máximo.' : null
   const filtersActive = !!(playerQ.trim() || provider || minV || maxV)
 
@@ -255,11 +256,11 @@ export default function ApostasEsportivas() {
         </span>
       ),
     },
-    { id: 'stake', header: 'Valor', align: 'right', sortValue: (b) => b.stake, cell: (b) => <span className="font-semibold text-fg">{brl(b.stake)}</span> },
+    { id: 'stake', money: true, header: 'Valor', align: 'right', sortValue: (b) => b.stake, cell: (b) => <span className="font-semibold text-fg">{brl(b.stake)}</span> },
     { id: 'odd', header: 'Odd', align: 'right', sortValue: (b) => b.odd, csv: (b) => b.odd, cell: (b) => <span className="text-fg-2">{mult(b.odd).replace('x', '')}</span> },
-    { id: 'potential', header: 'Potencial', label: 'Potencial de ganho', align: 'right', sortValue: (b) => b.potential, cell: (b) => <span className="text-fg">{brl(b.potential)}</span> },
+    { id: 'potential', money: true, header: 'Potencial', label: 'Potencial de ganho', align: 'right', sortValue: (b) => b.potential, cell: (b) => <span className="text-fg">{brl(b.potential)}</span> },
     {
-      id: 'paid',
+      id: 'paid', money: true,
       header: 'Valor pago',
       align: 'right',
       sortValue: (b) => b.paid,
@@ -427,14 +428,14 @@ export default function ApostasEsportivas() {
                   <label htmlFor="ae-min" className="sr-only">
                     Valor mínimo
                   </label>
-                  <Input id="ae-min" prefix="R$" type="number" inputMode="decimal" min={0} placeholder="mín." value={minV} onChange={(e) => setMinV(e.target.value)} invalid={!!rangeError} className="w-full sm:w-28 [&_input]:h-9" />
+                  <Input id="ae-min" prefix="R$" type="text" inputMode="decimal" autoComplete="off" placeholder="mín." value={minV} onChange={(e) => parseDecimalInput(e.target.value) !== null && setMinV(e.target.value)} invalid={!!rangeError} className="w-full sm:w-28 [&_input]:h-9" />
                   <span className="text-fg-3" aria-hidden>
                     –
                   </span>
                   <label htmlFor="ae-max" className="sr-only">
                     Valor máximo
                   </label>
-                  <Input id="ae-max" prefix="R$" type="number" inputMode="decimal" min={0} placeholder="máx." value={maxV} onChange={(e) => setMaxV(e.target.value)} invalid={!!rangeError} className="w-full sm:w-28 [&_input]:h-9" />
+                  <Input id="ae-max" prefix="R$" type="text" inputMode="decimal" autoComplete="off" placeholder="máx." value={maxV} onChange={(e) => parseDecimalInput(e.target.value) !== null && setMaxV(e.target.value)} invalid={!!rangeError} className="w-full sm:w-28 [&_input]:h-9" />
                 </div>
                 {rangeError && (
                   <span className="text-xs font-medium text-danger" role="alert">

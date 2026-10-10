@@ -263,10 +263,16 @@ describe('config.seguranca-painel', () => {
     // o resto da tela segue gravando sem 2FA
     await expect(save(base({ sessionTimeoutMinutes: 120 }), semFator)).resolves.toMatchObject({ value: { enforce2faForAll: false, sessionTimeoutMinutes: 120 } })
 
-    // com 2FA liga; desligar não depende do fator de quem grava
+    // com 2FA liga; desligar não depende do fator de quem grava, mas é governança (r1: o Administrador desligava)
     const comFator = await asRole(app, 'administrador', '10.1.1.1', 'Admin Com Fator', { totp: true })
     await expect(save(base({ enforce2faForAll: true }), comFator)).resolves.toMatchObject({ value: { enforce2faForAll: true } })
-    await expect(save(base(), semFator)).resolves.toMatchObject({ value: { enforce2faForAll: false } })
+    await expect(save(base(), semFator)).rejects.toMatchObject({ status: 403, code: 'sem_permissao' })
+    await expect(save(base(), comFator)).rejects.toMatchObject({ status: 403, code: 'sem_permissao' })
+    expect(((await handler.read(ctx(app, sa)))!.value as PanelSecurity).enforce2faForAll).toBe(true)
+    // manter ligado e mudar outro campo segue liberado para o Administrador
+    await expect(save(base({ enforce2faForAll: true, sessionTimeoutMinutes: 60 }), comFator)).resolves.toMatchObject({ value: { enforce2faForAll: true } })
+    // quem concede cargos (Superadmin) desliga
+    await expect(save(base(), sa)).resolves.toMatchObject({ value: { enforce2faForAll: false } })
 
     // pela rota: 400 e a sessão de quem tentou continua de pé
     const u = await createUser(app, { roleId: 'administrador', name: 'Admin Pela Rota' })

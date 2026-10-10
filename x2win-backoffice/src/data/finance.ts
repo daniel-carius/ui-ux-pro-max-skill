@@ -3,7 +3,7 @@ import { createRng } from '@/lib/random'
 import { seedGames, seedProviders } from './catalog'
 import { DEMO_STAFF_LABEL, demoRecords } from './demo'
 import { DAY, HOUR, MIN, NOW, iso } from './now'
-import { seedPlayers } from './players'
+import { seedPlayers, type Player } from './players'
 
 export type TransactionType =
   | 'deposito'
@@ -124,12 +124,23 @@ export function seedTransactions(): Transaction[] {
   const providers = new Map(seedProviders().map((p) => [p.id, p.name]))
   const list: Transaction[] = []
   const balances = new Map<string, number>()
+  // a ficha e o extrato contam a mesma história: nenhuma transação antes do cadastro ("Desde"), e os depósitos e
+  // saques do extrato cabem nos totais da conta (antes 40 jogadores tinham mais depósitos no extrato de 30 dias do
+  // que o "Depositado" desde o cadastro)
+  const byCreation = [...players].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const createdMs = byCreation.map((p) => new Date(p.createdAt).getTime())
+  let joined = 0
+  const depositsLeft = new Map(players.map((p) => [p.id, { sum: p.totalDeposited, count: p.depositsCount }]))
+  const withdrawalsLeft = new Map(players.map((p) => [p.id, p.totalWithdrawn]))
   let t = NOW.getTime() - 30 * DAY
   let n = 0
   while (t < NOW.getTime() && n < 3000) {
     t += rng.int(2, 38) * MIN
-    const p = rng.pick(players)
-    const type = rng.weighted([
+    // nenhuma transação depois de agora (antes, a última passava até 38 min do relógio)
+    if (t >= NOW.getTime()) break
+    while (joined < byCreation.length && createdMs[joined] <= t) joined++
+    const p = rng.pick(joined ? byCreation.slice(0, joined) : players)
+    let type: TransactionType = rng.weighted([
       ['aposta', 46],
       ['ganho', 26],
       ['deposito', 10],
@@ -175,6 +186,27 @@ export function seedTransactions(): Transaction[] {
         amount = rng.money(1, 50)
         break
     }
+    // depósito ou saque além do total da conta: vira um prêmio pequeno de rodada (o extrato não passa da ficha)
+    if (type === 'deposito') {
+      const left = depositsLeft.get(p.id)!
+      if (left.count <= 0 || left.sum < 20) {
+        type = 'ganho'
+        amount = Math.max(0.2, amount / 50)
+      } else {
+        amount = Math.min(amount, left.sum)
+        left.sum = cents(left.sum - amount)
+        left.count--
+      }
+    } else if (type === 'saque') {
+      const left = withdrawalsLeft.get(p.id) ?? 0
+      if (left < 20) {
+        type = 'ganho'
+        amount = Math.max(0.2, -amount / 50)
+      } else {
+        amount = -Math.min(-amount, left)
+        withdrawalsLeft.set(p.id, cents(left + amount))
+      }
+    }
     amount = Math.round(amount * 100) / 100
     const after = Math.max(0, Math.round((before + amount) * 100) / 100)
     balances.set(p.id, after)
@@ -198,8 +230,54 @@ export function seedTransactions(): Transaction[] {
     })
     n++
   }
+  reconcileWithWallets(list, players)
   _tx = list.reverse()
   return _tx
+}
+
+const cents = (v: number) => Math.round(v * 100) / 100
+
+/**
+ * O extrato termina no saldo da carteira: a última linha de cada carteira (real e bônus) de cada jogador fecha com
+ * balanceReal/balanceBonus da ficha. Antes o extrato e a carteira eram sorteados separados (a ficha dizia
+ * "Saldo real R$ 78,08" e a última linha "saldo R$ 89,47", e um crédito manual "pulava" de um para o outro).
+ * Refaz os saldos de trás para frente a partir da carteira: débito só aumenta o saldo anterior; crédito maior que o
+ * saldo de depois vira o saldo inteiro (anterior 0); sem saldo depois, o crédito vira uma aposta pequena. Os valores,
+ * as datas e os ids continuam os mesmos (o gerador não muda).
+ */
+function reconcileWithWallets(list: Transaction[], players: Player[]) {
+  const byPlayer = new Map<string, Transaction[]>()
+  for (const tx of list) {
+    const arr = byPlayer.get(tx.playerId)
+    if (arr) arr.push(tx)
+    else byPlayer.set(tx.playerId, [tx])
+  }
+  const walletOf = new Map(players.map((p) => [p.id, p]))
+  for (const [playerId, txs] of byPlayer) {
+    const p = walletOf.get(playerId)
+    if (!p) continue
+    // bônus primeiro: crédito de bônus que a carteira de bônus não comporta vira aposta na carteira real
+    for (const wallet of ['bonus', 'real'] as const) {
+      let after = cents(wallet === 'real' ? p.balanceReal : p.balanceBonus)
+      for (let i = txs.length - 1; i >= 0; i--) {
+        const tx = txs[i]
+        if (tx.wallet !== wallet) continue
+        if (tx.amount > after) {
+          if (after > 0) tx.amount = after
+          else {
+            // sem saldo para ter recebido o crédito: vira uma aposta pequena na carteira real
+            tx.type = 'aposta'
+            tx.wallet = 'real'
+            tx.amount = -1
+            if (wallet === 'bonus') continue // entra na conta da carteira real logo depois
+          }
+        }
+        tx.balanceAfter = after
+        tx.balanceBefore = cents(after - tx.amount)
+        after = tx.balanceBefore
+      }
+    }
+  }
 }
 
 let _deposits: Deposit[] | null = null
@@ -309,7 +387,8 @@ export function seedWithdrawals(): Withdrawal[] {
       pixKey,
       reference: e2e(rng),
       createdAt: iso(created),
-      updatedAt: iso(new Date(created.getTime() + (decided ? rng.int(5, 600) : 0) * MIN)),
+      // decisão nunca depois de agora (antes, até 10 h no futuro)
+      updatedAt: iso(new Date(Math.min(created.getTime() + (decided ? rng.int(5, 600) : 0) * MIN, NOW.getTime() - MIN))),
       decidedBy: decided ? rng.pick([DEMO_STAFF_LABEL]) : null,
       decisionNote: status === 'recusado' ? rng.pick(['Rollover não cumprido', 'Conta duplicada', 'Dados do PIX divergentes']) : null,
     })

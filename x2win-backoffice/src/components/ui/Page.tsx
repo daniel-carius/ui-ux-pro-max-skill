@@ -258,7 +258,7 @@ export function useSettingsForm<T>(
     successMessage?: string
     /** nomes legíveis dos campos para o resumo da auditoria */
     fieldLabels?: Partial<Record<keyof T & string, string>>
-    /** modo API: erros do servidor que a tela mostra no campo (form.error), sem o aviso "Alteração desfeita" */
+    /** modo API: erros do servidor que a tela mostra no campo (form.error), sem o aviso "Alteração não salva" */
     quiet?: (e: ApiError) => boolean
   },
 ): SettingsForm<T> {

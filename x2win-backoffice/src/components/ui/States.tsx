@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
-import { AlertTriangle, CheckCircle2, Info, Inbox, OctagonAlert } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, CloudOff, Info, Inbox, OctagonAlert } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { initials } from '@/lib/format'
 
@@ -28,6 +28,22 @@ export function EmptyState({
     </div>
   )
 }
+
+/**
+ * Modo API: indicador sem fonte de dados nesta versão (serviço de métricas, tráfego do site, sessões...).
+ * Aparece no lugar de números gerados no navegador, que antes eram mostrados como se fossem reais.
+ *   <NoDataSource title="Tráfego do site sem integração">O painel ainda não recebe...</NoDataSource>
+ */
+export function NoDataSource({ title, children, action, className, compact }: { title: string; children?: ReactNode; action?: ReactNode; className?: string; compact?: boolean }) {
+  return (
+    <div className={cn('rounded-xl border border-dashed border-line-strong/70 bg-surface-2/50', className)}>
+      <EmptyState icon={CloudOff} title={title} description={children} action={action} className={compact ? 'py-6' : 'py-10'} />
+    </div>
+  )
+}
+
+/** Texto curto para um número sem fonte (modo API): "—" com a explicação no hint. */
+export const NO_SOURCE_HINT = 'sem fonte de dados nesta versão'
 
 export function Skeleton({ className }: { className?: string }) {
   return <div className={cn('relative overflow-hidden rounded-md bg-surface-3', className)} aria-hidden>

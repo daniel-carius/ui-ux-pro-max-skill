@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { cn } from '@/lib/cn'
@@ -21,8 +21,19 @@ export function Tabs<V extends string>({
   items: TabItem<V>[]
   className?: string
 }) {
+  const listRef = useRef<HTMLDivElement>(null)
+  // aba ativa sempre à vista: no celular a lista rola de lado e a aba aberta pelo link (?aba=...) ficava cortada
+  useEffect(() => {
+    const list = listRef.current
+    const el = list?.querySelector<HTMLElement>('[aria-selected="true"]')
+    if (!list || !el) return
+    const left = el.offsetLeft - list.offsetLeft
+    const right = left + el.offsetWidth
+    if (left < list.scrollLeft) list.scrollLeft = Math.max(0, left - 8)
+    else if (right > list.scrollLeft + list.clientWidth) list.scrollLeft = right - list.clientWidth + 8
+  }, [value])
   return (
-    <div className={cn('-mb-px flex gap-1 overflow-x-auto border-b border-line scrollbar-none', className)} role="tablist">
+    <div ref={listRef} className={cn('-mb-px flex gap-1 overflow-x-auto border-b border-line scrollbar-none', className)} role="tablist">
       {items.map((t) => {
         const active = t.value === value
         const Icon = t.icon

@@ -308,6 +308,30 @@ describe('GET /api/audit/export.csv', () => {
     await probe.close()
   })
 
+  // r1: o resumo da exportação trazia datas ISO e o id interno da pessoa; o filtro "Sistema" não filtrava nada
+  it('resumo da exportação legível (datas e pessoa) e filtro de ações automáticas (Sistema)', async () => {
+    const probe = await createTestApp()
+    const { cookie } = await loginAs(probe, 'superadmin', { name: 'Exportadora Dois' })
+    const target = await createUser(probe, { roleId: 'suporte', name: 'Bia Filtrada', email: 'bia.filtrada@x2win.test' })
+    await insertAudit(probe, { at: '2026-05-01T10:00:00Z', actorId: target.id, actorName: 'Bia Filtrada', action: 'editar', entity: 'Cupom', summary: 'um' })
+    await insertAudit(probe, { at: '2026-05-01T11:00:00Z', actorId: null, actorName: 'Sistema', action: 'desligar', entity: 'Modo de ataque', summary: 'desligado automaticamente' })
+
+    const r = await api(probe, 'GET', `/api/audit/export.csv?actorId=${target.id}&from=2026-04-11T03:00:00.000Z&to=2026-05-10`, { cookie })
+    expect(r.statusCode, r.body).toBe(200)
+    const sys = await api(probe, 'GET', '/api/audit/export.csv?actorId=sistema', { cookie })
+    const sysLines = sys.rawPayload.toString('utf8').trim().split('\r\n')
+    expect(sysLines.slice(1).every((l) => l.includes(';Sistema;'))).toBe(true)
+    expect(sysLines.some((l) => l.includes('desligado automaticamente'))).toBe(true)
+    const list = await api(probe, 'GET', '/api/audit?actorId=sistema', { cookie })
+    expect((list.json() as { items: AuditEntry[] }).items.every((e) => e.actorId === '')).toBe(true)
+
+    const summaries = (await probe.db.query<{ summary: string }>(`select summary from audit_log where action = 'exportar' order by id`)).map((x) => x.summary)
+    expect(summaries[0]).toContain('de 11/04/2026 00:00, até 10/05/2026, pessoa: Bia Filtrada (bia.filtrada@x2win.test)')
+    expect(summaries[0]).not.toContain(target.id)
+    expect(summaries[1]).toContain('pessoa: Sistema (ações automáticas)')
+    await probe.close()
+  })
+
   it('exige auditoria.exportar (ver não basta); filtros inválidos → 400', async () => {
     await createRole(app, 'so-ve-auditoria', ['auditoria.ver'])
     const viewer = await loginAs(app, 'so-ve-auditoria')

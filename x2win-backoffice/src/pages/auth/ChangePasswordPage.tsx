@@ -32,6 +32,7 @@ export function ChangePasswordForm({
   onCancel?: () => void
   idPrefix?: string
 }) {
+  const { reload } = useAuthApi()
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -66,6 +67,12 @@ export function ChangePasswordForm({
       await onDone(res)
     } catch (err) {
       setError(describeAuthError(err, 'password'))
+      // senha atual errada demais com a sessão aberta: o servidor bloqueou o acesso e encerrou esta sessão.
+      // O painel sai da tela (a entrada mostra o bloqueio) em vez de deixar os dados à vista atrás do modal.
+      if (requireCurrent && err instanceof ApiError && err.status === 423) {
+        await reload()
+        return
+      }
       if (err instanceof ApiError && err.code === 'credenciais_invalidas') {
         setCurrent('')
         setTimeout(() => currentRef.current?.focus(), 0)

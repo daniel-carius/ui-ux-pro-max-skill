@@ -17,6 +17,7 @@ import {
   Formula,
   Input,
   KpiCard,
+  NoDataSource,
   PageHeader,
   PersonCell,
   Segmented,
@@ -31,6 +32,7 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, maskEmail, num, numCompact, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { isApiMode } from '@/lib/api'
 import { NOW, dayKey, endOfDay, startOfDay } from '@/data/now'
 import { useAffiliates } from '@/data/hooks'
 import { addStats, affiliateStats, oldestAffiliateDay, type PeriodStats } from '@/data/afiliados'
@@ -124,6 +126,41 @@ function delta(cur: number, prev: number) {
 }
 
 export default function AfiliadosVisaoGeral() {
+  return isApiMode() ? <ApiVisaoGeral /> : <DemoVisaoGeral />
+}
+
+/**
+ * Modo API: cliques, cadastros, FTD, GGR e comissão por gerente vêm do serviço de métricas de afiliados da plataforma,
+ * ainda não conectado. A série gerada no navegador não aparece como dado real.
+ */
+function ApiVisaoGeral() {
+  return (
+    <>
+      <PageHeader />
+      <NoDataSource
+        title="Desempenho dos afiliados ainda sem fonte de dados"
+        action={
+          <div className="flex flex-wrap justify-center gap-2">
+            <Link to="/system/programa-afiliados/saques" className="link text-[13px]">
+              Saques de afiliados
+            </Link>
+            <span className="text-fg-3" aria-hidden>
+              ·
+            </span>
+            <Link to="/analysis/leads" className="link text-[13px]">
+              Indicados
+            </Link>
+          </div>
+        }
+      >
+        Cliques, cadastros, FTD, GGR da rede, comissões e valor a pagar por gerente vêm do serviço de métricas de afiliados da plataforma de
+        jogo, que ainda não está conectado a este painel. Os saques de afiliados e os jogadores indicados estão nas telas do servidor.
+      </NoDataSource>
+    </>
+  )
+}
+
+function DemoVisaoGeral() {
   const { items: affiliates } = useAffiliates()
   const { items: withdrawals } = useAffiliateWithdrawals()
   const rules = useCommissionRules()
@@ -217,16 +254,16 @@ export default function AfiliadosVisaoGeral() {
       ),
       csv: (r) => r.ftd,
     },
-    { id: 'deposits', header: 'Valor depositado', align: 'right', sortValue: (r) => r.deposits, cell: (r) => brl(r.deposits) },
+    { id: 'deposits', money: true, header: 'Valor depositado', align: 'right', sortValue: (r) => r.deposits, cell: (r) => brl(r.deposits) },
     {
-      id: 'ggr',
+      id: 'ggr', money: true,
       header: 'GGR',
       align: 'right',
       sortValue: (r) => r.ggr,
       cell: (r) => <span className={r.ggr < 0 ? 'text-danger' : ''}>{brl(r.ggr)}</span>,
     },
     {
-      id: 'commission',
+      id: 'commission', money: true,
       header: 'Comissão',
       align: 'right',
       sortValue: (r) => r.commission,
@@ -239,14 +276,14 @@ export default function AfiliadosVisaoGeral() {
       csv: (r) => r.commission,
     },
     {
-      id: 'result',
+      id: 'result', money: true,
       header: 'Resultado',
       align: 'right',
       sortValue: (r) => r.result,
       cell: (r) => <span className={cn('font-semibold', r.result < 0 ? 'text-danger' : 'text-success')}>{brl(r.result)}</span>,
     },
     {
-      id: 'toPay',
+      id: 'toPay', money: true,
       header: 'Valor a pagar',
       align: 'right',
       pinned: true,

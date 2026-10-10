@@ -7,7 +7,7 @@ import { Badge, CopyButton, Field, Select, type SettingsForm } from '@/component
 import { isDestinationChanged, type ApiError } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import type { Role } from '@/domain/roles'
-import { ceilingLabel } from '@/domain/roles'
+import { ceilingInline } from '@/domain/roles'
 import { isAdminLevelRole, isGovernedRole, namesLookAlike, roleColorVar } from '@/domain/config2-access'
 
 /**
@@ -116,7 +116,7 @@ export function RoleSelect({
           </div>
           <p className="mt-1 text-[13px] leading-5 text-fg-2">{selected.description || 'Sem descrição.'}</p>
           <p className="mt-1 text-xs text-fg-3">
-            {selected.permissions.length} permissões · 2FA {selected.require2fa ? 'exigido' : 'opcional'} · saques: {ceilingLabel(selected).toLowerCase()}
+            {selected.permissions.length} permissões · 2FA {selected.require2fa ? 'exigido' : 'opcional'} · saques: {ceilingInline(selected)}
           </p>
           {lookAlike.length > 0 && (
             <p className="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-warning">

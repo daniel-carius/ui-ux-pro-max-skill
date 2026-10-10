@@ -26,6 +26,7 @@ import {
 import { brl, dateTime, num, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { useDb } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
 import { uid } from '@/lib/random'
 import { DEFAULT_TRACKING, TRACKING_KEYS, seedTrackingTests } from '@/data/config2-tracking'
 import { audit, usePageAccess } from '@/domain/session'
@@ -246,6 +247,13 @@ function PlatformCard({ id, cfg, serverSide, onChange }: { id: TrackingPlatform;
   )
 }
 
+/**
+ * Modo API: o servidor ainda não envia eventos às plataformas (nem de teste). Antes a tela simulava o resultado
+ * ("Recebido só pelo navegador", "200 OK · events_received: 1"), gravava no servidor e auditava como enviado.
+ */
+const API = isApiMode()
+const NO_PIXEL_TEST = 'O envio de eventos de teste às plataformas ainda não é feito pelo servidor nesta versão: nada sairia daqui. Use a ferramenta de teste de eventos da própria plataforma.'
+
 function TestPanel({ config, dirty, canEdit }: { config: TrackingConfig; dirty: boolean; canEdit: boolean }) {
   const [tests, setTests] = useDb<TrackingTestEntry[]>(TRACKING_KEYS.tests, seedTrackingTests)
   const [platform, setPlatform] = useState<TrackingPlatform>('meta')
@@ -255,6 +263,10 @@ function TestPanel({ config, dirty, canEdit }: { config: TrackingConfig; dirty: 
   const ev = EVENT_BY_ID[event]
 
   const send = () => {
+    if (API) {
+      toast.info('Teste indisponível nesta versão', { description: NO_PIXEL_TEST })
+      return
+    }
     if (ev.sendsValue && value <= 0) {
       toast.error('Informe um valor maior que zero')
       return
@@ -282,7 +294,7 @@ function TestPanel({ config, dirty, canEdit }: { config: TrackingConfig; dirty: 
       <CardHeader
         icon={FlaskConical}
         title="Testar evento"
-        description="Envia um evento simulado com os dados desta tela, mesmo antes de salvar."
+        description={API ? NO_PIXEL_TEST : 'Envia um evento simulado com os dados desta tela, mesmo antes de salvar.'}
         actions={
           tests.length > 0 && (
             <Button size="sm" variant="ghost" icon={Trash2} onClick={clear}>
@@ -308,7 +320,7 @@ function TestPanel({ config, dirty, canEdit }: { config: TrackingConfig; dirty: 
           <Field label="Valor (BRL)" htmlFor="t-value">
             <MoneyInput id="t-value" value={value} onValueChange={setValue} disabled={!ev.sendsValue} />
           </Field>
-          <Button type="submit" variant="primary" icon={Zap} loading={sending} disabled={!canEdit} title={!canEdit ? 'Seu cargo não envia testes' : undefined}>
+          <Button type="submit" variant="primary" icon={Zap} loading={sending} disabled={!canEdit || API} title={!canEdit ? 'Seu cargo não envia testes' : API ? NO_PIXEL_TEST : undefined}>
             Enviar teste
           </Button>
         </form>
@@ -348,7 +360,9 @@ function TestPanel({ config, dirty, canEdit }: { config: TrackingConfig; dirty: 
               })}
             </ol>
           ) : (
-            <p className="rounded-xl border border-dashed border-line py-8 text-center text-[13px] text-fg-3">Nenhum teste ainda. Escolha a plataforma e o evento e clique em "Enviar teste".</p>
+            <p className="rounded-xl border border-dashed border-line py-8 text-center text-[13px] text-fg-3">
+              {API ? 'Nenhum teste: o envio de teste ainda não existe no servidor.' : 'Nenhum teste ainda. Escolha a plataforma e o evento e clique em "Enviar teste".'}
+            </p>
           )}
         </div>
         {ev.sendsValue && <p className="text-xs text-fg-3">Valor enviado: {brl(value)} · moeda BRL.</p>}

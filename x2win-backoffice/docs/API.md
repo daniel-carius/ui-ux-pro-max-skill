@@ -53,7 +53,7 @@ A recusa antes de ler o corpo fecha a conexão (`Connection: close`) quando o co
 | `PUT /api/kv/:key` | 240/min por IP e 240/min por pessoa | IP e pessoa |
 | `POST /api/withdrawals/:id/reveal-pix`, `POST /api/webhooks/destinations/:id/reveal` | 30/min | IP |
 | `POST /api/webhooks/destinations/:id/test` | 10/min | IP |
-| Demais rotas | 600/min | IP |
+| Demais rotas | `API_RATE_LIMIT_PER_MINUTE` (padrão 3000/min) | IP |
 
 Acima do limite: 429 `muitas_tentativas`.
 
@@ -72,7 +72,7 @@ Corpo: `{ "error": { "code": "...", "message": "...", "details"?: ... } }`. `mes
 | 400 | `dados_invalidos` | corpo inválido (`details` com `path` e `message` de cada campo) ou regra de negócio violada (`details.field`/`details.id` quando a regra aponta um campo) |
 | 400 | `chave_local` | chave que fica só no navegador |
 | 400/415 | `requisicao_invalida` | JSON malformado e outros erros de protocolo |
-| 401 | `nao_autenticado` | sem sessão válida (inclusive sessão encerrada por exigência de 2FA) |
+| 401 | `nao_autenticado` | sem sessão válida (inclusive sessão encerrada por exigência de 2FA). Com o cookie de uma sessão que terminou, `details.reason` diz por quê (veja `GET /api/auth/session`) |
 | 401 | `credenciais_invalidas` | e-mail/senha, código do 2FA ou senha atual errados |
 | 403 | `requisicao_invalida` | sem o cabeçalho `X-Requested-With: x2w` |
 | 403 | `https_obrigatorio` | requisição que não chegou ao proxy por HTTPS |
@@ -89,13 +89,15 @@ Corpo: `{ "error": { "code": "...", "message": "...", "details"?: ... } }`. `mes
 | 404 | `sem_historico` | chave que não guarda histórico |
 | 409 | `versao_desatualizada` | outra pessoa gravou antes (`details.version` = atual) ou duas gravações se cruzaram no banco (impasse ou falha de serialização: sem `details`, transação desfeita) |
 | 409 | `ja_decidido` | saque (de jogador ou de afiliado) já decidido |
-| 409 | `jogador_bloqueado` | pagamento segurado pelo anti-fraude (`details.reason`) |
+| 409 | `jogador_bloqueado` | aprovação do saque segurada: conta bloqueada (com o motivo do bloqueio) ou de rede banida pelo anti-fraude (`details.reason`) |
+| 409 | `rede_banida` | desbloquear pela ficha uma conta de rede banida pelo anti-fraude (`details { id, network }`); desfazer o banimento da rede em Anti-fraude › Bloqueios |
 | 409 | `fora_das_regras` | saque fora das regras em vigor (`details.rule`) |
 | 409 | `pedido_invalido` | pedido de saque de afiliado com valor inválido |
 | 409 | `email_em_uso` | e-mail já cadastrado na equipe |
 | 409 | `nome_em_uso` | nome igual ou que se confunde com o de outra pessoa (`details.field = 'name'`) |
 | 409 | `bloquearia_voce` | a lista de IPs deixaria o seu IP de fora |
 | 409 | `ja_configurado` | 2FA já ligado |
+| 409 | `destino_demonstracao` | teste de webhook para um destino de demonstração (host de terceiro) |
 | 411 | `requisicao_invalida` | corpo em partes sem `Content-Length` antes do login completo |
 | 413 | `corpo_grande_demais` | corpo acima do limite da rota (API ou nginx) |
 | 413 | `dados_grandes_demais` | valor acima do limite da chave |
@@ -150,7 +152,9 @@ acesso completo.
 ### `POST /api/auth/2fa/verify` — `{ code }` → `{ stage: 'active' }` (sessão em `2fa`)
 - Aceita 6 dígitos do TOTP (janela de ±1 passo de 30 s) ou um código de recuperação.
 - Recusa reutilizar o mesmo passo de tempo (`totp_last_counter`). Código de recuperação é de uso único.
-- Erro → 401 `credenciais_invalidas` e conta para o bloqueio da conta.
+- Erro → 401 `credenciais_invalidas` e conta para o bloqueio da conta. Código de recuperação errado ou já usado
+  (entrada que não são 6 dígitos): mensagem própria ("Código de recuperação inválido ou já usado...") e
+  `details.kind = 'recuperacao'`; 6 dígitos errados: a mensagem do aplicativo autenticador.
 
 **Códigos de recuperação**: 8 por cadastro, 20 caracteres Crockford base32 em 4 grupos de 5
 (`XXXXX-XXXXX-XXXXX-XXXXX`, 100 bits). O servidor aceita minúsculas, espaços, sem hífens e as trocas O→0 e I/L→1.
@@ -178,6 +182,29 @@ Revoga a sessão do próprio cookie e apaga o cookie. Funciona fora da lista de 
 
 ### `GET /api/auth/me` → `MeResponse`
 Qualquer etapa. Sem sessão → 401. `role`, `permissions` e `sessionTimeoutMinutes` só com `stage: 'active'`.
+
+### `GET /api/auth/session` → `SessionResponse` `{ session: MeResponse | null, ended? }`
+"Há sessão?" sem erro: 200 também sem sessão (`session: null`), para a tela de entrada não gerar 401 no console. O
+painel usa esta rota ao abrir e quando uma chamada recebe 401. `ended` (e `details.reason` no 401
+`nao_autenticado` de qualquer rota) diz por que a sessão do cookie terminou (`SessionEndReason`):
+
+| `ended` | Quando |
+| --- | --- |
+| `inatividade` | passou do tempo sem uso de Segurança do painel |
+| `expirada` | passou da validade (12 h) ou da etapa pendente (10 min) |
+| `saida` | a pessoa saiu (em outra aba) |
+| `outro_login` | um login novo no mesmo navegador encerrou a anterior |
+| `senha_trocada` | a senha foi trocada em outra sessão |
+| `senha_redefinida` | um administrador gerou uma senha temporária (`POST /api/team/:id/reset-password`) |
+| `desativado` | o acesso foi desativado |
+| `2fa_exigido` | o cargo passou a exigir 2FA e a pessoa não tem |
+| `2fa_exigido_todos` | "2FA para todos" (Segurança do painel) foi ligado e a pessoa não tem 2FA (o cargo dela não exige) |
+| `2fa_redefinido` | um administrador redefiniu o 2FA |
+| `2fa_ligado` | a pessoa ligou o 2FA em outra sessão |
+| `bloqueio` | senha atual ou código errados demais com a sessão aberta |
+
+O motivo fica gravado na sessão (`sessions.revoked_reason`, migração `004_session_end_reason`) e só sai para quem
+apresenta o cookie daquela sessão. Sem cookie, ou com um cookie desconhecido, não há `ended`.
 
 ## Dados por chave — `/api/kv/:key`
 
@@ -210,7 +237,7 @@ Cada tela guarda seus dados por chave (ex.: `campanhas.cupons`). As regras de ca
   - `config.manutencao` (sem `manutencao.ver`/`.editar`): `active`, `message`, `returnAt`, `since` (sem o link de
     testes `bypassToken`). Não grave de volta o valor projetado.
 - **Chaves do servidor** (`write: 'servidor'`, PUT → 403): `geral.jogadores.pausas`, `geral.jogadores.audiencia`,
-  `geral.jogadores.metricas`, `operacao.saques`, `operacao.depositos`, `esportes.apostas`, `afiliados.saques`,
+  `geral.jogadores.metricas`, `geral.jogadores.redes-banidas`, `operacao.saques`, `operacao.depositos`, `esportes.apostas`, `afiliados.saques`,
   `campanhas.webhooks.execucoes`, `campanhas.roleta.giros`, `campanhas.cupons.resgates`, `auditoria.registros`.
 - **Chaves validadas pelo servidor** (400 `dados_invalidos` com a mensagem do painel quando a regra não passa):
   - campanhas: `campanhas.cupons`, `.bonus-deposito`, `.cashback`, `.niveis`, `.missoes`, `.torneios`, `.roleta`,
@@ -228,8 +255,10 @@ Cada tela guarda seus dados por chave (ex.: `campanhas.cupons`). As regras de ca
   - conteúdo do site público: `personalizacao.*`, `campanhas.popups-inbox(.popups|.inbox)`,
     `campanhas.notificacoes(.historico)`, `campanhas.disparos(.historico)` e `config.textos-legais`. Links só
     caminho interno (`/promocoes`) ou `https://`; imagens só data URL de imagem (SVG estático); cores `#RRGGBB`;
-    textos sem marcação HTML; redes sociais no domínio da rede; versão nova dos Termos ou da Política de jogo
-    responsável com o aviso de maioridade (18) e a menção a jogo responsável;
+    textos sem marcação HTML; redes sociais no domínio da rede; rodapé (`personalizacao.rodape`): telefone e WhatsApp
+    com DDD (WhatsApp, celular de 11 dígitos), e-mail válido, Telegram `@usuario` ou `https://t.me/...`; versão nova
+    dos Termos ou da Política de jogo responsável com o aviso de maioridade (18) e a menção a jogo responsável. A
+    regra do SVG é a mesma no painel (recusa no envio do arquivo) e no servidor (`shared/svg.ts`);
   - `config.integracoes`: formato fechado (campo desconhecido → 400), porta 1–65535, segredo vazio ou com 8+
     caracteres.
 
@@ -262,7 +291,9 @@ apagar essas linhas (gatilho `kv_history_no_change`).
   (`playerEmail`, `player_email`, `lastIp`) e os extras da regra (`piiFields`, ex.: `agency`, `account`, `holder`).
 - Quem não tem `rule.pii.revealPermission` recebe os campos mascarados: e-mail `ab***@dominio`, CPF
   `123.***.***-09`, telefone `(11) 9****-1234`, IPv4 `189.45.***.***`, IPv6 só os 2 primeiros grupos, agência
-  `••34`, conta `•••65-4`, titular `J*** S***`, outros `•••` + últimos 4. Na gravação, valores mascarados são
+  `••34`, conta `•••65-4`, titular `J*** S***`, outros `•••` + últimos 4. Chave PIX com o tipo ao lado
+  (`pixKeyType`) segue o tipo: CPF, e-mail, celular `(31) 9****-9168` (antes saía como CPF) e aleatória `•••` +
+  últimos 4. Na gravação, valores mascarados são
   restaurados do gravado (mesma regra dos segredos).
 - Leitura em claro (quem tem a permissão) vai para a auditoria do servidor: `revelar` em "Dados · <tela>", uma vez
   por sessão e chave a cada 10 minutos (também na resposta do PUT e na leitura de uma versão do histórico).
@@ -290,7 +321,9 @@ Leitura: Usuários e as telas que trabalham com jogadores individuais (`transaco
 - status (`shared/players.ts`, `STATUS_TRANSITIONS`): `ativo → pausa` e `pausa → ativo` (`usuarios.editar`);
   `ativo/pausa → bloqueado` e `bloqueado → ativo/pausa` (`usuarios.editar` ou `antifraude.banir`); `autoexcluido`
   nunca entra nem sai pelo painel. Pausa pedida pelo jogador (ou sem registro) só termina no prazo. Fora disso →
-  403 `transicao_nao_permitida`. Jogador autoexcluído não recebe moedas.
+  403 `transicao_nao_permitida`. Jogador autoexcluído não recebe moedas. Conta de uma rede banida em
+  `seguranca.bloqueios` não sai de `bloqueado` enquanto o banimento valer → 409 `rede_banida`
+  (`details { id, network }`): desfazer o banimento remove o bloqueio e depois devolve os status.
 
 `geral.usuarios.status` (domínio `player-status`, grava com `usuarios.editar`): histórico só de inclusão; o
 servidor define `at`, `by`, `byId` e `byPlayer`; `pausar` precisa de `until` no futuro e no máximo 30 dias.
@@ -328,6 +361,10 @@ Para as telas que não leem a base inteira. `version` e `updatedAt` são os de `
   referralsDeposited, cashback { diario|semanal|mensal: { active, eligible, total, capped } }, generatedAt }`.
   O cashback é a projeção do próximo crédito com as regras **gravadas** (`campanhas.cashback` e `campanhas.niveis`;
   padrão do painel quando nada gravado). Salvar essas regras muda os números sem mudar a versão: releia depois.
+- `geral.jogadores.redes-banidas` (Usuários): contas de redes banidas pelo anti-fraude,
+  `[{ playerId, network, bannedAt }]`, sem motivo, autor nem as outras contas da rede. A ficha do jogador usa para
+  explicar, a quem não lê o Anti-fraude, por que a conta segue bloqueada (desbloqueio pela ficha → 409
+  `rede_banida`). `version` e `updatedAt` são os de `seguranca.bloqueios`.
 
 ## Afiliados
 
@@ -386,7 +423,9 @@ atual da equipe). Gravação pela chave: 403.
     `queuedDeliveries` = avisos postos na fila (um por destino ativo); com 0, a mensagem avisa que o pagamento
     precisa ser feito pelo financeiro no gateway.
 - `POST /api/withdrawals/:id/reject` — `{ reason }` (3–300) → `{ ok, message, withdrawal }`, status `recusado`,
-  auditoria `recusar`, webhook `saque.rejeitado`.
+  auditoria `recusar`, webhook `saque.rejeitado`. Só registra a decisão e o aviso: devolver o valor ao saldo é da
+  plataforma de jogo (que recebe `saque.rejeitado`), e não há e-mail. A `message` diz isso
+  (`shared/withdrawals.ts` › `rejectionMessage`).
 - `POST /api/withdrawals/:id/reveal-pix` → `{ pixKey }`. Exige `saques.ver` e `usuarios.ver-dados`. Auditoria
   `revelar`.
 - Regras: `operacao.saques.regras` (GET com `saques.ver` ou `rollover.ver`; PUT com `saques.editar`), validadas por
@@ -427,6 +466,8 @@ Recusa: 403 `evento_nao_relatavel` (`details.reason`: `acao_do_servidor`, `entid
 pessoa e 120 aceitos/min por IP.
 
 ### `GET /api/audit?from&to&actorId&action&page&pageSize` → `AuditListResponse`
+`actorId=sistema` filtra as ações automáticas do servidor (linhas sem pessoa: modo de ataque desligado no prazo,
+recuperação de acesso, subida da API).
 Perm. `auditoria.ver`. `from`/`to` aceitam data (`AAAA-MM-DD`, dia inteiro em UTC) ou data e hora ISO;
 `pageSize` ≤ 200, padrão 50.
 
@@ -466,13 +507,18 @@ Estatísticas; gravação com `webhooks.editar` (permissão administrativa, veja
 - Auditoria `editar` em "Dados · Webhooks" com o que mudou (host e evento antes → depois e entregas canceladas).
 
 ### Execuções — `campanhas.webhooks.execucoes`
-Leitura das 1000 mais recentes. A URL é gravada já mascarada.
+Leitura das 1000 mais recentes. A URL é gravada já mascarada. Cada execução é uma tentativa e traz o que o destino
+recebeu (migração `005_webhook_delivery_ids`; linhas antigas não têm os três campos): `deliveryId` (o
+`x-x2w-delivery`: id do item da fila, o mesmo em todas as tentativas da entrega; no teste, o id da execução),
+`attempt` (1 a 6) e `timestamp` (o `x-x2w-timestamp` assinado, em segundos; ausente se o envio parou antes de
+assinar).
 
 ### `POST /api/webhooks/destinations/:id/test` → `{ execution }`
 Perm. `webhooks.editar`. Envia de verdade um POST assinado com o segredo do destino, com o evento próprio
 `webhook.teste` (cabeçalho `x-x2w-event` e corpo `{ id, event: 'webhook.teste', createdAt, test: true,
 data: { destinationId, destinationEvent } }`). A execução fica no evento do destino, com `test: true`. Auditoria
-`testar`.
+`testar`. Destino de demonstração (host de terceiro, `hooks.x2win-crm.com` e `api.leadflow.app`): 409
+`destino_demonstracao`, nada enviado nem gravado (o disparo também nunca envia evento real para ele).
 
 ### `POST /api/webhooks/destinations/:id/reveal` → `{ url }`
 Perm. `webhooks.editar`. URL completa do destino; 404 sem destino; 500 se não der para decifrar. Auditoria
@@ -481,7 +527,9 @@ Perm. `webhooks.editar`. URL completa do destino; 404 sem destino; 500 se não d
 
 ### Disparo
 `enqueueWebhook` grava em `webhook_outbox` um item por destino ativo, dentro da transação da ação (hoje:
-`saque.pago` na aprovação e `saque.rejeitado` na recusa). O laço processa a cada 2 s até 20 itens vencidos:
+`saque.pago` na aprovação e `saque.rejeitado` na recusa). Template do evento desligado em `campanhas.templates`
+(`active: false`): nada é enfileirado e a mensagem da decisão diz que o template está desativado. O corpo do
+template ainda não é aplicado: o envio sai sempre com o envelope padrão abaixo. O laço processa a cada 2 s até 20 itens vencidos:
 `POST` JSON `{ id, event, createdAt, data }` com `content-type: application/json`,
 `user-agent: X2Win-Webhooks/1.0`, `x-x2w-event`, `x-x2w-delivery`, `x-x2w-timestamp` (segundos) e
 `x-x2w-signature: sha256=<HMAC-SHA256(segredo, "<timestamp>.<corpo>")>`. 2xx = entregue; senão nova tentativa em
@@ -503,7 +551,8 @@ Perm. `webhooks.editar`. URL completa do destino; 404 sem destino; 500 se não d
   - não pode deixar o sistema sem Superadmin ativo;
   - mexer em pessoa com cargo administrativo (`isAdminLevelRole`) exige `cargos.conceder`;
   - pôr alguém num cargo com permissão de governança (`isGovernedRole`) exige `cargos.conceder`: troca de cargo,
-    criar acesso, convidar, reenviar convite e reativar (403 `sem_permissao`);
+    criar acesso, convidar, reenviar convite, reativar e gerar senha temporária (403 `sem_permissao`, com a mensagem
+    da ação recusada);
   - nome normalizado (NFKC, espaços colapsados), de 2 a 100 caracteres, só letras latinas, números, espaço, ponto,
     hífen e apóstrofo, começando com letra (senão 400); igual ou fácil de confundir com o de outra pessoa (em
     qualquer status) ou com rótulos da auditoria como `Sistema` → 409 `nome_em_uso`;
@@ -512,12 +561,20 @@ Perm. `webhooks.editar`. URL completa do destino; 404 sem destino; 500 se não d
   - `POST /api/team/direct` `{ name, email, roleId }` → `{ member, temporaryPassword }` (pessoa ativa com troca de
     senha obrigatória). Pode responder 503 `servidor_ocupado`.
   - `POST /api/team/invite` `{ email, roleId, name? }` → `{ member, inviteUrl }` (status `convidado`, token de 72 h
-    guardado com hash; link `<origem do painel>/#/convite?token=...`; sem nome, ele é montado a partir do e-mail).
+    guardado com hash; link `<origem do painel>/#/convite?token=...`; sem nome, ele é montado a partir do e-mail, e o
+    409 `nome_em_uso` cita o nome montado, já que o campo está vazio).
   - `POST /api/team/:id/resend-invite` → `{ inviteUrl }` (invalida o anterior).
   - `POST /api/team/:id/deactivate` / `POST /api/team/:id/reactivate` (quem nunca definiu senha volta como
     convidado).
   - `POST /api/team/:id/role` `{ roleId }`.
   - `POST /api/team/:id/reset-2fa` → desliga o 2FA da pessoa e encerra as sessões.
+  - `POST /api/team/:id/reset-password` → `{ member, temporaryPassword, sessionsEnded }`: senha esquecida. Senha
+    temporária forte (mostrada uma vez para quem gerou), troca obrigatória no próximo acesso, erros de login
+    zerados e todas as sessões da pessoa encerradas (`ended: 'senha_redefinida'`). O 2FA continua (sem o celular,
+    "Redefinir 2FA" à parte). A senha volta para quem gerou: cargo administrativo **ou** com governança só com
+    `cargos.conceder` (403); nunca para si mesmo (use "Trocar senha"); convidado → 400 (reenviar convite);
+    desligado → 400 (reativar antes). Auditoria `editar` / `Senha · <nome>`. Pode responder 503
+    `servidor_ocupado`. (O último Superadmin que esqueceu a senha não tem quem gere: mantenha mais de um.)
   - `POST /api/team/invites/accept` `{ token, password }` → `{ ok: true }` (sem sessão; 10/min por IP; `name`
     enviado é ignorado: vale o nome registrado por quem convidou). Pode responder 503 `servidor_ocupado`; o convite
     continua válido.
@@ -549,14 +606,16 @@ Perm. `webhooks.editar`. URL completa do destino; 404 sem destino; 500 se não d
   `afiliados-saques.aprovar`, `jogo-responsavel.editar` e `paises.editar`. Só quem tem `cargos.conceder`:
   dá ou tira alguma delas de um cargo; cria ou exclui cargo com alguma delas ou com teto ≠ 0; muda o teto de
   aprovação (`isGovernedChange`, teto comparado em centavos); põe alguém em cargo com alguma delas
-  (`isGovernedRole`).
+  (`isGovernedRole`); deixa o 2FA opcional (`require2fa` de `true` para `false`) num cargo que tem alguma delas,
+  antes ou depois da mudança (`isGoverned2faWeakening`).
+- Desligar "2FA para todos" em Segurança do painel também exige `cargos.conceder` (ligar não).
 - Só o Superadmin tem `cargos.conceder` entre os cargos do sistema.
 
 ## Segurança do painel — `config.seguranca-painel`
 - Formato: `{ allowlist: [{ id, value, label, createdAt, createdBy }], enforce2faForAll, sessionTimeoutMinutes }`.
 - Leitura: quem vê Segurança do painel ou Equipe. Gravação com `seguranca-painel.editar`:
-  - incluir, retirar ou trocar IPs/faixas exige também `cargos.conceder` (403); descrição, "2FA para todos" e tempo
-    de inatividade não;
+  - incluir, retirar ou trocar IPs/faixas exige também `cargos.conceder` (403); descrição, ligar "2FA para todos"
+    e tempo de inatividade não; **desligar** "2FA para todos" exige `cargos.conceder` (403);
   - cada `value` é IPv4 ou faixa CIDR IPv4, sem repetir; até 100 itens; `label` ≤ 60; `createdAt`/`createdBy`
     são carimbados pelo servidor;
   - se a lista nova não for vazia e o IP de quem grava não estiver nela → 409 `bloquearia_voce`;
@@ -603,6 +662,7 @@ Chaves genéricas cuja auditoria é feita pelo servidor (o painel não relata es
 | `WEBHOOK_ALLOW_LOCAL_TARGETS` | `false` | libera destino http/rede interna (só desenvolvimento); `true` com produção impede a subida |
 | `WEBHOOK_DISPATCHER` | `on` | `off` desliga o envio em segundo plano (testes) |
 | `PANEL_ALLOWLIST_RESET` | — | recuperação da lista de IPs na subida |
+| `API_RATE_LIMIT_PER_MINUTE` | `3000` | requisições por minuto por IP nas rotas sem limite próprio (60 a 100.000) |
 | `UV_THREADPOOL_SIZE` | 4 (16 na imagem Docker) | a fila de senhas usa metade dele, até 4 |
 
 Valor inválido para uma variável impede a subida. Se a API não sobe, ela escreve
@@ -613,7 +673,9 @@ sai com 1.
 - `server/src/db/migrations/index.ts`: `001_init` (tabelas), `002_audit_append_only` (gatilho que recusa
   `TRUNCATE` na auditoria, além de `UPDATE`/`DELETE` da 001; cria o papel `x2win_app` sem login se ele não existir
   e houver permissão), `003_ops_integrity` (gatilho `kv_history_no_change` nas linhas de histórico, índice da
-  auditoria por origem, URL de webhook cifrada com `url_enc` e `host`, fila de webhooks com `ON DELETE SET NULL`).
+  auditoria por origem, URL de webhook cifrada com `url_enc` e `host`, fila de webhooks com `ON DELETE SET NULL`),
+  `004_session_end_reason` (`sessions.revoked_reason`: por que a sessão terminou, para `GET /api/auth/session`),
+  `005_webhook_delivery_ids` (`webhook_executions.delivery_id`, `attempt` e `signed_at`: o que o destino recebeu).
 - `npm run migrate` roda com o dono das tabelas: aplica as pendentes e, em toda execução, concede de novo os
   privilégios do papel de execução `x2win_app` (uso do schema, leitura e escrita nas tabelas de operação;
   `audit_log` só `SELECT` e `INSERT`; `schema_migrations` só `SELECT`). Sem o papel (ou sem acesso), aplica as
@@ -644,4 +706,17 @@ Ligado com `VITE_API_MODE=1` (o Vite encaminha `/api` para `http://localhost:333
 - **Ações de domínio**: aprovar/recusar saque, revelar PIX, pagar/recusar/revelar saque de afiliado, reconsultar
   depósitos, criar acesso/convidar, testar e revelar webhook usam as rotas próprias. `audit()` do painel vira
   `POST /api/audit/events`, só para os eventos que `panelAuditDecision` aceita (o resto o servidor já registra).
+- **Sessão**: o painel pergunta `GET /api/auth/session` (sem 401 na tela de entrada) e mostra na entrada o motivo
+  do fim da sessão (`ended`). Sem resposta do servidor por `sessionTimeoutMinutes` (mais 5 s de folga), confere a
+  sessão e sai da tela: os dados não ficam à vista num computador sem ninguém. "Ativar 2FA" (menu da conta) faz o
+  cadastro voluntário com a senha atual (`/2fa/setup` + `/2fa/enable`). Erro 423 em "Trocar senha" (a sessão foi
+  encerrada pelo bloqueio) leva à entrada. Ao abrir a sessão, o endereço que o cargo não vê vai para a primeira
+  tela que ele vê; sair volta ao início.
+- **Leituras**: chave que o cargo não lê (`canReadKey` com as permissões de `/me`) não é pedida ao servidor (o 403
+  aparecia no console a cada tela); a tela recebe o valor de "sem leitura".
+- **Indicadores sem fonte**: Dashboard, GGR (Resumo, Provedores, Jogos), Afiliados › Visão geral, tráfego do
+  Modo de ataque, sessões e bônus do Anti-fraude, acessos barrados de Países, histórico de Moeda, Missões, Cashback
+  e Bônus de depósito, e os testes de Domínios, Agregadores e e-mail de Integrações dependem de serviços da
+  plataforma ainda não conectados: no modo API a tela diz "sem fonte de dados" em vez de números gerados no
+  navegador (que antes apareciam como reais e eram gravados como resultado).
 - **Modo demonstração** (sem `VITE_API_MODE`) continua igual: dados no navegador, sem login.

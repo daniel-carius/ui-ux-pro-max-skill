@@ -755,3 +755,24 @@ describe('kv: nomes de campo pessoal com prefixo', () => {
     expect(isPiiField('agency', ['agency'])).toBe(true)
   })
 })
+
+// ---------- r1 (testes ponta a ponta): máscara da chave PIX conforme o tipo ----------
+
+describe('kv: chave PIX mascarada conforme pixKeyType (celular não sai como CPF; aleatória com uma máscara só)', () => {
+  it('celular, e-mail, aleatória e CPF; sem tipo ao lado, a regra antiga; a máscara volta e mantém o valor gravado', async () => {
+    const { readPolicy, writePolicy, redact, restoreMasked } = await import('../src/modules/kv/redact')
+    const rule = findKvRule('afiliados.saques')!
+    const stored = [
+      { id: 'c', pixKeyType: 'Celular', pixKey: '31900589168' },
+      { id: 'e', pixKeyType: 'E-mail', pixKey: 'karina@hotmail.com' },
+      { id: 'a', pixKeyType: 'Aleatória', pixKey: '7f3a2c10-55aa-4e2b-9d1c-1b2c3d4e7o83' },
+      { id: 'f', pixKeyType: 'CPF', pixKey: '12345678909' },
+      { id: 's', pixKey: '98765432100' },
+    ]
+    const out = redact(stored, readPolicy(rule, new Set(['afiliados-saques.ver']))) as typeof stored
+    expect(out.map((x) => x.pixKey)).toEqual(['(31) 9****-9168', 'ka***@hotmail.com', '•••7o83', '123.***.***-09', '987.***.***-00'])
+    for (const x of out) expect(isMasked(x.pixKey)).toBe(true)
+    // o painel devolve a lista como recebeu: cada máscara é reconhecida e o valor gravado fica
+    expect(restoreMasked(out, stored, writePolicy(rule))).toEqual(stored)
+  })
+})

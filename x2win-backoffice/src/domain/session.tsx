@@ -2,7 +2,7 @@
 // "Ver como cargo" permite testar o painel com as permissões de outro cargo.
 //
 // Modo demonstração: a pessoa logada e os cargos vêm do navegador, sem login.
-// Modo API (VITE_API_MODE=1): login real. A sessão vem de GET /api/auth/me; as
+// Modo API (VITE_API_MODE=1): login real. A sessão vem de GET /api/auth/session (o corpo de /me); as
 // permissões do servidor são a fonte da verdade ("Ver como cargo" só restringe).
 import {
   Suspense,
@@ -16,17 +16,23 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import type { AuditEventRequest, MeResponse } from '@shared/api'
+import { flushSync } from 'react-dom'
+import type { AuditEventRequest, MeResponse, SessionResponse } from '@shared/api'
 import { panelAuditDecision } from '@shared/audit'
+import { effectivePermissions } from '@shared/permissions'
 import { seedAudit, seedTeam, type AuditAction, type AuditEntry, type TeamMember } from '@/data/team'
-import { api, isApiMode, onUnauthorized } from '@/lib/api'
-import { dbGet, dbSet, prefetchKeys, refreshKey, resetDb, useDb } from '@/lib/store'
+import { ApiError, api, isApiMode, lastApiResponseAt, onUnauthorized } from '@/lib/api'
+import { dbGet, dbSet, prefetchKeys, refreshKey, resetDb, setReadPermissions, useDb } from '@/lib/store'
 import {
+  LOGIN_NOTICES,
   focusRecheckDue,
   hasSession,
+  idleExpired,
   logoutFailureText,
+  readAccessFor,
   requestLogout,
   resolveSession,
+  sameStatus,
   setLogoutPending,
   transition,
   type AuthStatus,
@@ -127,6 +133,16 @@ interface SessionValue {
 
 const SessionContext = createContext<SessionValue | null>(null)
 
+/**
+ * "Ver como" um cargo: só cargos cujas permissões cabem nas da pessoa. Um cargo maior seria só o nome
+ * (as permissões ficam limitadas às reais), e a tela diria "como Superadmin" sem as telas dele.
+ */
+export function canSimulate(real: Pick<Role, 'permissions'>, view: Pick<Role, 'permissions'>): boolean {
+  const mine = new Set(real.permissions)
+  // permissões que não existem mais (cargo antigo) não contam
+  return effectivePermissions(view).every((p) => mine.has(p))
+}
+
 function buildSession(
   user: TeamMember,
   role: Role,
@@ -164,7 +180,8 @@ function DemoSessionProvider({ children }: { children: ReactNode }) {
   const value = useMemo<SessionValue>(() => {
     const user = team.find((m) => m.id === session.userId) ?? team[0]
     const realRole = roles.find((r) => r.id === user.roleId) ?? roles[0]
-    const role = (session.viewAsRoleId && roles.find((r) => r.id === session.viewAsRoleId)) || realRole
+    const view = session.viewAsRoleId ? roles.find((r) => r.id === session.viewAsRoleId) : undefined
+    const role = view && canSimulate(realRole, view) ? view : realRole
     return buildSession(user, role, realRole, new Set(role.permissions), setSession)
   }, [session, team, roles, setSession])
 
@@ -278,7 +295,13 @@ function flagStorage(): FlagStorage | null {
 
 /** /me, logout e a marca de saída pendente (a lógica fica em auth-state.ts) */
 const SESSION_IO: SessionIo = {
-  getMe: () => api<MeResponse>('GET', '/api/auth/me'),
+  // /session responde 200 também sem sessão (a tela de entrada não gera erro no console) e diz por que a
+  // sessão do cookie terminou; aqui vira o mesmo 401 de /me, com o motivo em details.reason
+  getMe: async () => {
+    const r = await api<SessionResponse>('GET', '/api/auth/session')
+    if (r.session) return r.session
+    throw new ApiError(401, 'nao_autenticado', 'Faça login para continuar.', r.ended ? { reason: r.ended } : undefined)
+  },
   postLogout: () => api<void>('POST', '/api/auth/logout'),
   get storage() {
     return flagStorage()
@@ -309,6 +332,9 @@ function ApiSessionProvider({ children }: { children: ReactNode }) {
   const apply = useCallback(
     (next: AuthStatus): AuthStatus => {
       const cur = statusRef.current
+      // chaves que o cargo não lê nem são pedidas ao servidor (sem 403 no console); vale antes do prefetch
+      // sem sessão ativa (saída, sessão caída, etapa do login): nada é lido do servidor
+      if (!sameStatus(cur, next)) setReadPermissions(readAccessFor(next))
       // apaga a memória (outra pessoa, nova etapa de login, outro cargo) antes do prefetch e da renderização
       const result = transition(cur, next, SHELL_KEYS, { resetStore: (o) => resetDb(o), prefetch: prefetchKeys })
       if (result === cur) return cur
@@ -328,7 +354,12 @@ function ApiSessionProvider({ children }: { children: ReactNode }) {
     const r = await resolveSession(() => statusRef.current, SESSION_IO)
     if (my !== seq.current) return statusRef.current
     if (r.loggedOut) toast.clear()
-    if (r.expired) toast.warning('Sua sessão expirou', { description: 'Entre de novo para continuar de onde parou.', duration: 6000 })
+    if (r.expired) {
+      // o aviso completo fica na tela de entrada; o toast só diz o motivo
+      const notice = LOGIN_NOTICES[(r.next.kind === 'login' && r.next.reason) || 'expired']
+      const show = notice.tone === 'danger' ? toast.error : notice.tone === 'success' ? toast.success : notice.tone === 'info' ? toast.info : toast.warning
+      show(notice.title, { duration: 6000 })
+    }
     return apply(r.next)
   }, [apply])
 
@@ -344,7 +375,13 @@ function ApiSessionProvider({ children }: { children: ReactNode }) {
       const r = await requestLogout(SESSION_IO)
       if (r.ended) {
         toast.clear()
-        apply({ kind: 'login', reason: 'logout' })
+        // as telas do painel saem ANTES de o endereço mudar: senão o roteador (atualização síncrona) as
+        // renderizaria de novo com a sessão já encerrada, e elas buscariam dados com o cookie morto (401)
+        flushSync(() => {
+          apply({ kind: 'login', reason: 'logout' })
+        })
+        // a próxima pessoa começa do início (a primeira tela do cargo dela), não na tela de quem saiu
+        if (window.location.hash && window.location.hash !== '#/') window.location.hash = '#/'
         return
       }
       // o cookie é httpOnly: só o servidor encerra a sessão. A tela não diz que saiu; a próxima
@@ -394,6 +431,21 @@ function ApiSessionProvider({ children }: { children: ReactNode }) {
       off()
     }
   }, [reload])
+
+  // inatividade: passou o tempo de Segurança do painel sem nenhuma resposta do servidor. O servidor já encerrou a
+  // sessão; o painel confere e sai da tela (os dados não ficam à vista num computador sem ninguém).
+  useEffect(() => {
+    if (status.kind !== 'active') return
+    const id = setInterval(() => {
+      if (rechecking.current || holdRef.current) return
+      if (!idleExpired({ status: statusRef.current, lastActivity: lastApiResponseAt(), now: Date.now() })) return
+      rechecking.current = true
+      void reload().finally(() => {
+        rechecking.current = false
+      })
+    }, 15_000)
+    return () => clearInterval(id)
+  }, [status.kind, reload])
 
   // voltou para a aba: confere a sessão ativa (pode ter caído, ou o cargo mudou), no máximo a cada 30 s.
   // Nunca durante uma etapa do login nem com os códigos de recuperação na tela.
@@ -483,7 +535,9 @@ function ApiActiveSession({ me, children }: { me: MeResponse; children: ReactNod
       color: 'violet',
     }
     const realRole: Role = { ...base, permissions: [...serverPerms] }
-    const view = session.viewAsRoleId && session.viewAsRoleId !== realRole.id ? roles.find((r) => r.id === session.viewAsRoleId) : undefined
+    const candidate = session.viewAsRoleId && session.viewAsRoleId !== realRole.id ? roles.find((r) => r.id === session.viewAsRoleId) : undefined
+    // cargo maior que o real (preferência antiga deste navegador): ignora, como no menu
+    const view = candidate && canSimulate(realRole, candidate) ? candidate : undefined
     // "Ver como" só restringe: nunca passa das permissões dadas pelo servidor
     const perms = view ? new Set(view.permissions.filter((p) => serverPerms.has(p))) : serverPerms
     const role: Role = view

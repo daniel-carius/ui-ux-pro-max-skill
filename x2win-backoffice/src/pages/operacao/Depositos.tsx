@@ -68,7 +68,7 @@ import {
   type Column,
   type DateRange,
 } from '@/components/ui'
-import { brl, brlCompact, dateTime, num, pct, relative, time } from '@/lib/format'
+import { brl, brlCompact, dateTime, formatDecimalInput, num, parseDecimalInput, pct, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { ApiError, api, isApiMode } from '@/lib/api'
 import { refreshKey, useDb } from '@/lib/store'
@@ -211,8 +211,8 @@ function DepositList() {
         else if (d.status === 'pendente') toast.info('Ainda aguardando pagamento', { description: `O código vale até ${time(pixDeadline(d, limits.pixExpirationMin))}.` })
         else toast.info('Nada mudou', { description: `${d.id} já estava ${DEPOSIT_STATUS_LABEL[d.status].toLowerCase()}.` })
       } else {
-        toast.success('Gateways reconsultados', {
-          description: `${num(res.expired.length)} PIX vencidos baixados como expirados${res.unchanged.length ? `; ${num(res.unchanged.length)} sem mudança` : ''}.`,
+        toast.success('PIX vencidos baixados', {
+          description: `${num(res.expired.length)} PIX vencidos marcados como expirados pelo prazo${res.unchanged.length ? `; ${num(res.unchanged.length)} sem mudança` : ''}. O gateway não foi consultado.`,
         })
       }
     } catch (e) {
@@ -238,7 +238,7 @@ function DepositList() {
       const next = recheckStatus(d, limits.pixExpirationMin, now)
       if (next !== d.status) {
         deposits.update(d.id, { status: next, updatedAt: new Date(now).toISOString() })
-        audit('sincronizar', `Depósito #${d.id}`, `Status reconsultado no ${d.gateway}: ${DEPOSIT_STATUS_LABEL[next]}`)
+        audit('sincronizar', `Depósito #${d.id}`, `Status conferido pelo prazo do PIX: ${DEPOSIT_STATUS_LABEL[next]}`)
         expired++
       }
     }
@@ -246,15 +246,16 @@ function DepositList() {
       if (expired) toast.success('PIX baixado como expirado', { description: `${list[0].id}: o prazo venceu sem pagamento.` })
       else toast.info('Ainda aguardando pagamento', { description: `O código vale até ${time(pixDeadline(list[0], limits.pixExpirationMin))}.` })
     } else {
-      toast.success('Gateways reconsultados', { description: `${num(expired)} PIX vencidos baixados como expirados.` })
+      toast.success('PIX vencidos baixados', { description: `${num(expired)} PIX vencidos marcados como expirados pelo prazo. O gateway não foi consultado.` })
     }
   }
 
   const recheckAll = async () => {
     const ok = await confirm({
-      title: `Reconsultar ${overdue.length} PIX vencidos?`,
-      description: 'O painel pergunta ao gateway o status de cada cobrança. Os que não foram pagos no prazo passam para "Expirado". Nenhum valor é movido.',
-      confirmLabel: 'Reconsultar agora',
+      title: `Marcar ${overdue.length} PIX vencidos como expirados?`,
+      description:
+        'O painel ainda não consulta o gateway: cada cobrança aguardando com o prazo do PIX vencido passa para "Expirado", só pelo prazo. Se algum desses PIX foi pago e o gateway não avisou, confira no extrato do gateway antes. Nenhum valor é movido.',
+      confirmLabel: 'Marcar como expirados',
       icon: RefreshCw,
     })
     if (ok) recheck(overdue)
@@ -292,7 +293,7 @@ function DepositList() {
       cell: (d) => <PersonCell name={d.playerName} sub={`ID ${d.playerId} · ${maskEmailShort(d.playerEmail)}`} />,
     },
     {
-      id: 'amount',
+      id: 'amount', money: true,
       header: 'Valor',
       align: 'right',
       sortValue: (d) => d.amount,
@@ -408,7 +409,7 @@ function DepositList() {
           title={`${overdue.length} PIX passaram do prazo de ${limits.pixExpirationMin} min e seguem como aguardando`}
           action={
             <Button size="sm" icon={RefreshCw} onClick={recheckAll} disabled={!canEdit} loading={rechecking} title={!canEdit ? 'Seu cargo só consulta depósitos' : undefined}>
-              Reconsultar no gateway
+              Baixar vencidos
             </Button>
           }
         >
@@ -435,7 +436,7 @@ function DepositList() {
             { label: 'Ver jogador', icon: UserRound, disabled: !canOpenPlayer, hint: canOpenPlayer ? undefined : 'só em Usuários', onSelect: () => setPlayerId(d.playerId) },
             { label: 'Copiar referência', icon: Copy, onSelect: () => copyRef(d) },
             ...(d.status === 'pendente'
-              ? [{ divider: true as const }, { label: 'Reconsultar no gateway', icon: RefreshCw, disabled: !canEdit, hint: canEdit ? undefined : 'só leitura', onSelect: () => recheck([d]) }]
+              ? [{ divider: true as const }, { label: 'Conferir o prazo do PIX', icon: RefreshCw, disabled: !canEdit, hint: canEdit ? undefined : 'só leitura', onSelect: () => recheck([d]) }]
               : []),
           ]}
           toolbar={
@@ -519,8 +520,14 @@ function DepositDrawer({
             Ver jogador
           </Button>
           {d.status === 'pendente' && (
-            <Button variant="primary" icon={RefreshCw} onClick={() => onRecheck(d)} disabled={!canEdit} title={!canEdit ? 'Seu cargo só consulta depósitos' : undefined}>
-              Reconsultar no gateway
+            <Button
+              variant="primary"
+              icon={RefreshCw}
+              onClick={() => onRecheck(d)}
+              disabled={!canEdit}
+              title={!canEdit ? 'Seu cargo só consulta depósitos' : 'Marca como expirado se o prazo do PIX venceu (o gateway não é consultado)'}
+            >
+              Conferir o prazo do PIX
             </Button>
           )}
         </>
@@ -925,6 +932,9 @@ function DepositPhonePreview({ limits, campaigns }: { limits: DepositLimits; cam
   const initialAmount = limits.defaultAmount || 0
   const initialChoice = campaigns.preselectFirst && shown[0] ? shown[0].id : 'none'
   const [amount, setAmount] = useState(initialAmount)
+  // texto digitado (vírgula decimal): o campo numérico do navegador descartava a vírgula ("12,5" virava 125)
+  const [amountDraft, setAmountDraft] = useState<string | null>(null)
+  const amountText = amountDraft !== null && parseDecimalInput(amountDraft) === amount ? amountDraft : amount ? formatDecimalInput(amount) : ''
   const [choice, setChoice] = useState(initialChoice)
   useEffect(() => setAmount(initialAmount), [initialAmount])
   useEffect(() => setChoice(initialChoice), [initialChoice])
@@ -959,12 +969,18 @@ function DepositPhonePreview({ limits, campaigns }: { limits: DepositLimits; cam
               <div className={cn('flex items-baseline gap-1 rounded-xl border bg-surface px-3 py-2', outOfRange ? 'border-danger' : 'border-line-strong')}>
                 <span className="text-sm font-semibold text-fg-3">R$</span>
                 <input
-                  type="number"
+                  type="text"
                   inputMode="decimal"
+                  autoComplete="off"
                   aria-label="Valor do depósito na prévia"
-                  value={amount || ''}
+                  value={amountText}
                   placeholder="0,00"
-                  onChange={(ev) => setAmount(Number(ev.target.value) || 0)}
+                  onChange={(ev) => {
+                    const n = parseDecimalInput(ev.target.value)
+                    if (n === null) return
+                    setAmountDraft(ev.target.value)
+                    setAmount(n)
+                  }}
                   className="w-full min-w-0 bg-transparent font-display text-2xl font-bold text-fg outline-none placeholder:text-fg-3 tnum"
                 />
               </div>

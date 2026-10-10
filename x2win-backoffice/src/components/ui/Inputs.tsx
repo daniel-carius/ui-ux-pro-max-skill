@@ -1,6 +1,7 @@
 import { useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { ArrowDown, ArrowUp, CalendarDays, Check, Copy, GripVertical, ImageUp, KeyRound, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { svgProblem } from '@shared/svg'
 import { date as fmtDate, hasMaskChars, maskSecret } from '@/lib/format'
 import { DAY, NOW, dayKey, endOfDay, startOfDay } from '@/data/now'
 import { Button, IconButton } from './Button'
@@ -174,11 +175,14 @@ export function ImageUpload({
   rounded,
   className,
   previewClassName,
+  minSquare,
 }: {
   value: string | null
   onChange: (dataUrl: string | null) => void
   width?: number
   height?: number
+  /** exige imagem quadrada com pelo menos este lado em px (PNG/JPG/WEBP; SVG é vetor e passa): fora disso, recusa */
+  minSquare?: number
   label?: string
   hint?: ReactNode
   disabled?: boolean
@@ -202,9 +206,46 @@ export function ImageUpload({
       toast.error('Imagem muito grande', { description: 'O limite é 3 MB.' })
       return
     }
+    // SVG: a mesma regra do servidor já no envio (antes a imagem entrava e a gravação inteira era desfeita ao salvar)
+    if (file.type === 'image/svg+xml') {
+      void file.text().then((text) => {
+        const problem = svgProblem(text)
+        if (problem) {
+          toast.error('Imagem SVG não aceita', {
+            description: `O arquivo tem ${problem}. Exporte o SVG sem scripts nem links externos, ou envie a imagem em PNG, JPG ou WEBP.`,
+            duration: 8000,
+          })
+          return
+        }
+        readImage(file)
+      })
+      return
+    }
+    readImage(file)
+  }
+
+  const readImage = (file: File) => {
     const reader = new FileReader()
     reader.onload = () => {
       const url = String(reader.result)
+      if (minSquare && file.type !== 'image/svg+xml') {
+        const img = new window.Image()
+        img.onload = () => {
+          const w = img.naturalWidth
+          const h = img.naturalHeight
+          if (w !== h || w < minSquare) {
+            toast.error('Imagem fora do tamanho pedido', {
+              description: `A imagem tem ${w}×${h} px. Envie uma imagem quadrada com pelo menos ${minSquare}×${minSquare} px.`,
+              duration: 7000,
+            })
+            return
+          }
+          onChange(url)
+        }
+        img.onerror = () => toast.error('Não foi possível ler a imagem', { description: 'Envie uma imagem PNG, JPG ou WEBP.' })
+        img.src = url
+        return
+      }
       if (width && height && file.type !== 'image/svg+xml') {
         const img = new window.Image()
         img.onload = () => {

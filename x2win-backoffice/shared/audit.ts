@@ -244,3 +244,9 @@ export function panelAuditDecision(action: AuditAction, entity: string): PanelAu
   if (!perms.length) return { ok: false, reason: 'evento_desconhecido' }
   return { ok: true, page: rule.page, perms }
 }
+
+/**
+ * Filtro de pessoa "ações automáticas do servidor" (linhas sem pessoa: modo de ataque desligado no prazo,
+ * recuperação de acesso, subida da API). Nenhum id de pessoa tem esse formato.
+ */
+export const SYSTEM_ACTOR_FILTER = 'sistema'

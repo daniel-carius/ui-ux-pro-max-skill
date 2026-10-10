@@ -50,7 +50,7 @@ import { dbSetAndWait, useDb } from '@/lib/store'
 import { EMAIL_KEYS } from '@/data/config2-email'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { DEFAULT_INTEGRATIONS, INTEGRATIONS_KEY, availableChannels, useIntegrations, type IntegrationsState } from '@/domain/system'
-import { PROVIDER_LABEL, validateIntegrations, validateMailgun, validateSendwork, type MailgunDraft, type SendworkDraft } from '@/domain/config2-email'
+import { NO_MESSAGE_SENDING, PROVIDER_LABEL, validateIntegrations, validateMailgun, validateSendwork, type MailgunDraft, type SendworkDraft } from '@/domain/config2-email'
 import { errorTarget, isDestinationChangedError, saveKeyDirect, useExternalSave } from './_shared-g'
 
 /**
@@ -60,6 +60,10 @@ import { errorTarget, isDestinationChangedError, saveKeyDirect, useExternalSave 
  * nunca é gravado de volta.
  */
 const API = isApiMode()
+/** Modo API: o servidor guarda as credenciais, mas ainda não envia e-mails (convites e senhas aparecem na tela). */
+const NO_EMAIL_SENDING = NO_MESSAGE_SENDING
+/** Selo de conta com credenciais (modo API: guardadas, sem verificação nem envio). */
+const SAVED_BADGE = API ? 'Credenciais salvas' : 'Conectado'
 
 /** Valor completo da chave (não a parte reduzida que Disparos, Jornadas e Templates de e-mail recebem). */
 function isFullValue(s: IntegrationsState) {
@@ -154,9 +158,17 @@ export default function Integracoes() {
   const [testing, setTesting] = useState(false)
   const setSmtp = (patch: Partial<IntegrationsState['smtp']>) => form.set('smtp', { ...v.smtp, ...patch })
 
-  const connected = (p: IntegrationsState['emailProvider']) => p === 'smtp' || (p === 'mailgun' ? saved.mailgun.connected : saved.sendwork.connected)
+  // SMTP só conta como pronto com servidor e remetente salvos (modo API começa sem nada: antes aparecia "Pronto")
+  const smtpReady = !!saved.smtp.host.trim() && !!saved.smtp.fromEmail.trim()
+  const connected = (p: IntegrationsState['emailProvider']) => (p === 'smtp' ? smtpReady : p === 'mailgun' ? saved.mailgun.connected : saved.sendwork.connected)
+  const emailOn = connected(saved.emailProvider)
 
   const sendTest = () => {
+    // modo API: o servidor ainda não envia e-mails; um teste "aceito em 338 ms" seria inventado
+    if (API) {
+      toast.info('Envio de teste indisponível nesta versão', { description: NO_EMAIL_SENDING })
+      return
+    }
     setTesting(true)
     setTimeout(() => {
       const p = saved.emailProvider
@@ -179,12 +191,15 @@ export default function Integracoes() {
   const connectMailgun = async (d: MailgunDraft) => {
     if (!(await applyNow((prev) => ({ ...prev, mailgun: { connected: true, domain: d.domain.trim().toLowerCase(), apiKey: d.apiKey.trim(), region: d.region } })))) return
     audit('ligar', 'Integração Mailgun', `Conta conectada (domínio ${d.domain.trim().toLowerCase()}, região ${d.region === 'us' ? 'EUA' : 'Europa'})`)
-    toast.success('Mailgun conectado', { description: 'Agora você pode escolher o Mailgun como provedor de e-mail.' })
+    // modo API: o servidor guarda a chave, mas não confere a conta nem envia e-mails nesta versão
+    if (API) toast.success('Credenciais do Mailgun salvas', { description: 'A conta não é verificada e o servidor ainda não envia e-mails nesta versão.', duration: 7000 })
+    else toast.success('Mailgun conectado', { description: 'Agora você pode escolher o Mailgun como provedor de e-mail.' })
   }
   const connectSendwork = async (d: SendworkDraft) => {
     if (!(await applyNow((prev) => ({ ...prev, sendwork: { connected: true, accountId: d.accountId.trim(), apiKey: d.apiKey.trim(), smsSender: d.smsSender.trim(), rcsAgent: d.rcsAgent.trim() } })))) return
     audit('ligar', 'Integração SendWork', `Conta ${d.accountId.trim()} conectada; SMS e RCS liberados em Disparos e Jornadas`)
-    toast.success('SendWork conectada', { description: 'SMS e RCS já aparecem em Disparos e Jornadas.' })
+    if (API) toast.success('Credenciais da SendWork salvas', { description: 'A conta não é verificada e o servidor ainda não envia e-mail, SMS nem RCS nesta versão.', duration: 7000 })
+    else toast.success('SendWork conectada', { description: 'SMS e RCS já aparecem em Disparos e Jornadas.' })
   }
 
   const disconnect = async (which: 'mailgun' | 'sendwork') => {
@@ -218,7 +233,7 @@ export default function Integracoes() {
     <>
       <PageHeader
         actions={
-          <Button icon={MailCheck} loading={testing} onClick={sendTest} disabled={!canEdit} title={!canEdit ? 'Seu cargo não envia testes' : `Envia para ${user.email}`}>
+          <Button icon={MailCheck} loading={testing} onClick={sendTest} disabled={!canEdit || API} title={!canEdit ? 'Seu cargo não envia testes' : API ? NO_EMAIL_SENDING : `Envia para ${user.email}`}>
             Enviar e-mail de teste
           </Button>
         }
@@ -226,11 +241,31 @@ export default function Integracoes() {
 
       <div className="space-y-5">
         <section aria-label="Canais disponíveis" className="grid gap-4 md:grid-cols-3">
-          <ChannelCard icon={Mail} title="E-mail" on={channels.email} detail={`Pelo ${PROVIDER_LABEL[saved.emailProvider]}`} />
-          <ChannelCard icon={Smartphone} title="SMS" on={channels.sms} detail={channels.sms ? `Remetente ${saved.sendwork.smsSender}` : 'Requer conta SendWork'} />
-          <ChannelCard icon={MessageSquareText} title="RCS" on={channels.rcs} detail={channels.rcs ? `Agente ${saved.sendwork.rcsAgent}` : 'Requer conta SendWork'} />
+          <ChannelCard
+            icon={Mail}
+            title="E-mail"
+            state={channelState(emailOn)}
+            detail={
+              emailOn
+                ? API
+                  ? `${PROVIDER_LABEL[saved.emailProvider]} configurado; envio ainda não ligado`
+                  : `Pelo ${PROVIDER_LABEL[saved.emailProvider]}`
+                : saved.emailProvider === 'smtp'
+                  ? 'Informe o servidor SMTP e o remetente'
+                  : `Conecte a conta ${PROVIDER_LABEL[saved.emailProvider]}`
+            }
+          />
+          <ChannelCard icon={Smartphone} title="SMS" state={channelState(channels.sms)} detail={channels.sms ? `Remetente ${saved.sendwork.smsSender}` : 'Requer conta SendWork'} />
+          <ChannelCard icon={MessageSquareText} title="RCS" state={channelState(channels.rcs)} detail={channels.rcs ? `Agente ${saved.sendwork.rcsAgent}` : 'Requer conta SendWork'} />
         </section>
 
+        {API ? (
+          <Alert tone="info" icon={Send} title="Envio de mensagens ainda não ligado">
+            O servidor guarda as credenciais, mas nesta versão não envia e-mail, SMS nem RCS: <a className="link" href="#/campanhas/disparos">Disparos</a>,{' '}
+            <a className="link" href="#/campanhas/jornadas">Jornadas</a> e os templates de e-mail ainda não mandam mensagens. Convites e senhas temporárias
+            aparecem na tela para quem os cria.
+          </Alert>
+        ) : (
         <Alert tone={channels.sms ? 'success' : 'info'} icon={Send}>
           {channels.sms ? (
             <>
@@ -243,8 +278,9 @@ export default function Integracoes() {
             </>
           )}
         </Alert>
+        )}
 
-        {lastTest && (
+        {lastTest && !API && (
           <div className={cn('flex flex-wrap items-start gap-3 rounded-xl border px-4 py-3', lastTest.ok ? 'border-success/25 bg-success/5' : 'border-danger/25 bg-danger/5')} aria-live="polite">
             {lastTest.ok ? <CircleCheck size={18} className="mt-px text-success" aria-hidden /> : <CircleX size={18} className="mt-px text-danger" aria-hidden />}
             <div className="min-w-0 flex-1 text-[13px]">
@@ -268,20 +304,34 @@ export default function Integracoes() {
               value={v.emailProvider}
               onChange={(p) => form.set('emailProvider', p)}
               options={[
-                { value: 'smtp', label: 'Padrão da plataforma', icon: Server, description: <ProviderDesc text="SMTP da Evox. Funciona sem configurar nada." badge={<Badge tone="success">Pronto</Badge>} /> },
-                { value: 'mailgun', label: 'Mailgun', icon: Mail, description: <ProviderDesc text="Envio em volume, com domínio próprio." badge={saved.mailgun.connected ? <Badge tone="success">Conectado</Badge> : <Badge>Sem conta</Badge>} /> },
-                { value: 'sendwork', label: 'SendWork', icon: MessageSquareText, description: <ProviderDesc text="E-mail, SMS e RCS na mesma conta." badge={saved.sendwork.connected ? <Badge tone="success">Conectada</Badge> : <Badge>Sem conta</Badge>} /> },
+                {
+                  value: 'smtp',
+                  label: 'Padrão da plataforma',
+                  icon: Server,
+                  description: (
+                    <ProviderDesc
+                      text={API ? 'SMTP próprio: servidor e remetente informados abaixo.' : 'SMTP da Evox. Funciona sem configurar nada.'}
+                      badge={smtpReady ? <Badge tone={API ? 'info' : 'success'}>{API ? 'Configurado' : 'Pronto'}</Badge> : <Badge>Sem servidor</Badge>}
+                    />
+                  ),
+                },
+                { value: 'mailgun', label: 'Mailgun', icon: Mail, description: <ProviderDesc text="Envio em volume, com domínio próprio." badge={saved.mailgun.connected ? <Badge tone={API ? 'info' : 'success'}>{SAVED_BADGE}</Badge> : <Badge>Sem conta</Badge>} /> },
+                { value: 'sendwork', label: 'SendWork', icon: MessageSquareText, description: <ProviderDesc text="E-mail, SMS e RCS na mesma conta." badge={saved.sendwork.connected ? <Badge tone={API ? 'info' : 'success'}>{API ? SAVED_BADGE : 'Conectada'}</Badge> : <Badge>Sem conta</Badge>} /> },
               ]}
             />
-            {!connected(v.emailProvider) && (
-              <Alert tone="warning">Conecte a conta {PROVIDER_LABEL[v.emailProvider]} abaixo antes de salvar. Sem conta, nenhum e-mail sairia.</Alert>
-            )}
+            {!connected(v.emailProvider) &&
+              (v.emailProvider === 'smtp' ? (
+                <Alert tone="warning">Informe o servidor SMTP e o remetente abaixo e salve. Sem eles, nenhum e-mail sairia.</Alert>
+              ) : (
+                <Alert tone="warning">Conecte a conta {PROVIDER_LABEL[v.emailProvider]} abaixo antes de salvar. Sem conta, nenhum e-mail sairia.</Alert>
+              ))}
+            {API && <p className="text-xs text-fg-3">{NO_EMAIL_SENDING}</p>}
           </SettingsSection>
 
           <SettingsSection
             title="Mailgun"
             description="Conta própria de envio de e-mail."
-            aside={saved.mailgun.connected ? <Badge tone="success" icon={Plug}>Conectado</Badge> : <Badge icon={Unplug}>Sem conta</Badge>}
+            aside={saved.mailgun.connected ? <Badge tone={API ? 'info' : 'success'} icon={Plug}>{SAVED_BADGE}</Badge> : <Badge icon={Unplug}>Sem conta</Badge>}
           >
             {saved.mailgun.connected ? (
               <ConnectedBox
@@ -289,7 +339,7 @@ export default function Integracoes() {
                   { label: 'Domínio de envio', value: <Mono>{saved.mailgun.domain}</Mono> },
                   { label: 'Região', value: saved.mailgun.region === 'us' ? 'EUA' : 'Europa' },
                   { label: 'Chave de API', value: <Mono>{maskSecret(saved.mailgun.apiKey)}</Mono> },
-                  { label: 'Em uso', value: saved.emailProvider === 'mailgun' ? 'Sim, envia os e-mails' : 'Não' },
+                  { label: 'Em uso', value: saved.emailProvider === 'mailgun' ? (API ? 'Escolhido como provedor (envio ainda não ligado)' : 'Sim, envia os e-mails') : 'Não' },
                 ]}
                 onDisconnect={() => disconnect('mailgun')}
                 disabled={!canEdit}
@@ -302,7 +352,7 @@ export default function Integracoes() {
           <SettingsSection
             title="SendWork"
             description="E-mail, SMS e RCS. É o único canal de SMS e RCS para Disparos e Jornadas."
-            aside={saved.sendwork.connected ? <Badge tone="success" icon={Plug}>Conectada</Badge> : <Badge icon={Unplug}>Sem conta</Badge>}
+            aside={saved.sendwork.connected ? <Badge tone={API ? 'info' : 'success'} icon={Plug}>{API ? SAVED_BADGE : 'Conectada'}</Badge> : <Badge icon={Unplug}>Sem conta</Badge>}
           >
             {saved.sendwork.connected ? (
               <ConnectedBox
@@ -320,7 +370,10 @@ export default function Integracoes() {
             )}
           </SettingsSection>
 
-          <SettingsSection title="SMTP da plataforma" description="Usado quando o provedor é o padrão da plataforma. Já vem configurado pela Evox.">
+          <SettingsSection
+            title="SMTP da plataforma"
+            description={API ? 'Usado quando o provedor é o padrão da plataforma. Informe o servidor, o login e o remetente.' : 'Usado quando o provedor é o padrão da plataforma. Já vem configurado pela Evox.'}
+          >
             <FormGrid>
               <Field label="Servidor" htmlFor="smtp-host" error={!v.smtp.host.trim() ? 'Informe o servidor.' : null}>
                 <Input id="smtp-host" value={v.smtp.host} className="font-mono" onChange={(e) => setSmtp({ host: e.target.value })} />
@@ -357,7 +410,13 @@ export default function Integracoes() {
               </Field>
             </FormGrid>
             <p className="rounded-lg bg-surface-2 px-3 py-2 text-[13px] text-fg-2">
-              Os jogadores veem: <strong className="text-fg">{v.smtp.fromName || '—'}</strong> &lt;{v.smtp.fromEmail || '—'}&gt;
+              {v.smtp.fromName.trim() || v.smtp.fromEmail.trim() ? (
+                <>
+                  Os jogadores veem: <strong className="text-fg">{v.smtp.fromName.trim() || 'sem nome'}</strong> &lt;{v.smtp.fromEmail.trim() || 'sem endereço'}&gt;
+                </>
+              ) : (
+                'Remetente ainda não definido: informe o nome e o e-mail acima.'
+              )}
             </p>
           </SettingsSection>
         </FormFieldset>
@@ -397,17 +456,36 @@ function ProviderDesc({ text, badge }: { text: string; badge: ReactNode }) {
   )
 }
 
-function ChannelCard({ icon: Icon, title, on, detail }: { icon: typeof Mail; title: string; on: boolean; detail: string }) {
+/**
+ * Situação do canal: disponível (demonstração, conta pronta), configurado (modo API: credenciais guardadas, mas o
+ * servidor ainda não envia mensagens) ou indisponível.
+ */
+type ChannelState = 'disponivel' | 'configurado' | 'indisponivel'
+
+function channelState(ready: boolean): ChannelState {
+  if (!ready) return 'indisponivel'
+  return API ? 'configurado' : 'disponivel'
+}
+
+const CHANNEL_BADGE: Record<ChannelState, { label: string; tone: 'success' | 'info' | 'neutral' }> = {
+  disponivel: { label: 'Disponível', tone: 'success' },
+  configurado: { label: 'Configurado', tone: 'info' },
+  indisponivel: { label: 'Indisponível', tone: 'neutral' },
+}
+
+function ChannelCard({ icon: Icon, title, state, detail }: { icon: typeof Mail; title: string; state: ChannelState; detail: string }) {
+  const on = state === 'disponivel'
+  const badge = CHANNEL_BADGE[state]
   return (
     <div className={cn('card flex items-center gap-3 p-4', !on && 'bg-surface-2/60')}>
-      <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl', on ? 'bg-success/10 text-success' : 'bg-surface-3 text-fg-3')}>
+      <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl', on ? 'bg-success/10 text-success' : state === 'configurado' ? 'bg-info/10 text-info' : 'bg-surface-3 text-fg-3')}>
         <Icon size={20} aria-hidden />
       </span>
       <div className="min-w-0 flex-1">
         <p className="flex items-center gap-2 text-sm font-semibold text-fg">
           {title}
-          <Badge tone={on ? 'success' : 'neutral'} icon={on ? CircleCheck : CircleX}>
-            {on ? 'Disponível' : 'Indisponível'}
+          <Badge tone={badge.tone} icon={state === 'indisponivel' ? CircleX : CircleCheck}>
+            {badge.label}
           </Badge>
         </p>
         <p className="mt-0.5 truncate text-xs text-fg-3">{detail}</p>
@@ -463,7 +541,7 @@ function MailgunConnect({ onConnect, disabled }: { onConnect: (d: MailgunDraft) 
           <Input id="mg-domain" value={c.draft.domain} invalid={!!c.err('domain')} placeholder="mg.x2win.bet.br" className="font-mono" onChange={(e) => c.set({ domain: e.target.value })} />
         </Field>
         <Field label="Chave de API" htmlFor="mg-key" error={c.err('apiKey')} hint="Cifrada ao salvar.">
-          <Input id="mg-key" type="password" autoComplete="new-password" value={c.draft.apiKey} invalid={!!c.err('apiKey')} placeholder="DEMO-mailgun-..." onChange={(e) => c.set({ apiKey: e.target.value })} />
+          <Input id="mg-key" type="password" autoComplete="new-password" value={c.draft.apiKey} invalid={!!c.err('apiKey')} placeholder="Chave de API do Mailgun" onChange={(e) => c.set({ apiKey: e.target.value })} />
         </Field>
       </FormGrid>
       <Field label="Região da conta">
@@ -500,7 +578,7 @@ function SendworkConnect({ onConnect, disabled }: { onConnect: (d: SendworkDraft
           <Input id="sw-account" value={c.draft.accountId} invalid={!!c.err('accountId')} placeholder="SW-10482" className="font-mono" onChange={(e) => c.set({ accountId: e.target.value.toUpperCase() })} />
         </Field>
         <Field label="Chave de API" htmlFor="sw-key" error={c.err('apiKey')} hint="Cifrada ao salvar.">
-          <Input id="sw-key" type="password" autoComplete="new-password" value={c.draft.apiKey} invalid={!!c.err('apiKey')} placeholder="DEMO-sendwork-..." onChange={(e) => c.set({ apiKey: e.target.value })} />
+          <Input id="sw-key" type="password" autoComplete="new-password" value={c.draft.apiKey} invalid={!!c.err('apiKey')} placeholder="Chave de API da SendWork" onChange={(e) => c.set({ apiKey: e.target.value })} />
         </Field>
         <Field label="Remetente do SMS" htmlFor="sw-sender" error={c.err('smsSender')} hint="Short code (ex.: 29012) ou nome curto (ex.: X2Win).">
           <Input id="sw-sender" value={c.draft.smsSender} invalid={!!c.err('smsSender')} placeholder="X2Win" onChange={(e) => c.set({ smsSender: e.target.value })} />

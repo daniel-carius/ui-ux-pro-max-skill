@@ -51,6 +51,7 @@ import {
 import { cn } from '@/lib/cn'
 import { brl, dateTime, num, pct, relative } from '@/lib/format'
 import { useCollection, useDb } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
 import { uid } from '@/lib/random'
 import { DAY } from '@/data/now'
 import { seedDisparos } from '@/data/campanhas3-seeds'
@@ -108,8 +109,17 @@ const KINDS: AudienceKind[] = ['todos', 'depositou', 'inativos', 'vip', 'sem_dep
 
 const CHANNEL_ICON = { email: Mail, sms: MessageSquare, rcs: MessageSquareText } as const
 const CHANNEL_TONE: Record<DisparoChannel, Tone> = { email: 'primary', sms: 'info', rcs: 'gold' }
-const STATUS_LABEL: Record<Disparo['status'], string> = { agendado: 'Agendado', enviado: 'Enviado', cancelado: 'Cancelado' }
-const STATUS_TONE: Record<Disparo['status'], Tone> = { agendado: 'info', enviado: 'success', cancelado: 'neutral' }
+/**
+ * Modo API: o servidor ainda não envia e-mail, SMS nem RCS. Antes a tela "enviava" (registro, auditoria "E-mail
+ * enviado") e mostrava taxas de entrega, abertura e clique geradas no navegador. Agora o envio fica desligado e os
+ * números aparecem sem fonte; um registro antigo de "enviado" aparece como registrado, não como entregue.
+ */
+const API = isApiMode()
+const NO_SEND = 'O servidor ainda não envia e-mail, SMS nem RCS nesta versão: nenhum disparo sai daqui. O rascunho fica salvo neste navegador.'
+const NO_METRICS_HINT = 'sem envio no servidor nesta versão'
+
+const STATUS_LABEL: Record<Disparo['status'], string> = { agendado: 'Agendado', enviado: API ? 'Registrado, não enviado' : 'Enviado', cancelado: 'Cancelado' }
+const STATUS_TONE: Record<Disparo['status'], Tone> = { agendado: 'info', enviado: API ? 'warning' : 'success', cancelado: 'neutral' }
 
 /**
  * Variáveis da prévia com um jogador do público. Modo API o público não traz nome nem
@@ -175,7 +185,8 @@ export default function Disparos() {
     () =>
       history.items.map((d) => {
         const status = effectiveDisparoStatus(d, now)
-        return { ...d, status, m: disparoMetrics({ ...d, status }, now) }
+        // modo API: nada foi enviado; números inventados no navegador nunca aparecem como dado
+        return { ...d, status, m: API ? { sent: 0, delivered: 0, opened: null, clicked: 0 } : disparoMetrics({ ...d, status }, now) }
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [history.items],
@@ -198,6 +209,10 @@ export default function Disparos() {
   const filtered = filter === 'todos' ? rows : filter === 'agendado' ? rows.filter((r) => r.status === 'agendado') : rows.filter((r) => r.channel === filter)
 
   const send = async () => {
+    if (API) {
+      toast.info('Envio indisponível nesta versão', { description: NO_SEND })
+      return
+    }
     setTouched(true)
     const first = Object.values(fieldErrors)[0] ?? audErr ?? schErr
     if (first) {
@@ -318,14 +333,14 @@ export default function Disparos() {
     { id: 'channel', header: 'Canal', sortValue: (r) => r.channel, csv: (r) => DISPARO_CHANNEL_LABEL[r.channel], cell: (r) => <Badge tone={CHANNEL_TONE[r.channel]}>{DISPARO_CHANNEL_LABEL[r.channel]}</Badge> },
     { id: 'audience', header: 'Público', sortValue: (r) => r.audienceLabel, cell: (r) => <span className="text-[13px] text-fg-2">{r.audienceLabel}</span> },
     { id: 'sent', header: 'Enviados', align: 'right', sortValue: (r) => r.m.sent, csv: (r) => r.m.sent, cell: (r) => (r.status === 'enviado' ? <span className="font-medium">{num(r.m.sent)}</span> : r.status === 'agendado' ? <span className="text-xs text-fg-3">{num(r.recipients)} prev.</span> : <Dash />) },
-    { id: 'delivered', header: 'Entregues', sortValue: (r) => (r.m.sent ? r.m.delivered / r.m.sent : 0), csv: (r) => r.m.delivered, cell: (r) => (r.status === 'enviado' ? <RateBar value={r.m.delivered} total={r.m.sent} tone="info" /> : <Dash />) },
+    { id: 'delivered', header: 'Entregues', sortValue: (r) => (r.m.sent ? r.m.delivered / r.m.sent : 0), csv: (r) => r.m.delivered, cell: (r) => (r.status === 'enviado' && !API ? <RateBar value={r.m.delivered} total={r.m.sent} tone="info" /> : <Dash />) },
     {
       id: 'opened',
       header: 'Abertos',
       sortValue: (r) => (r.m.opened !== null && r.m.delivered ? r.m.opened / r.m.delivered : -1),
       csv: (r) => r.m.opened ?? '',
       cell: (r) =>
-        r.status !== 'enviado' ? (
+        r.status !== 'enviado' || API ? (
           <Dash />
         ) : r.m.opened === null ? (
           <Tooltip content="SMS não informa abertura">
@@ -335,7 +350,7 @@ export default function Disparos() {
           <RateBar value={r.m.opened} total={r.m.delivered} tone="success" />
         ),
     },
-    { id: 'clicked', header: 'Cliques', sortValue: (r) => (r.m.delivered ? r.m.clicked / r.m.delivered : 0), csv: (r) => r.m.clicked, cell: (r) => (r.status === 'enviado' ? <RateBar value={r.m.clicked} total={r.m.delivered} tone="primary" /> : <Dash />) },
+    { id: 'clicked', header: 'Cliques', sortValue: (r) => (r.m.delivered ? r.m.clicked / r.m.delivered : 0), csv: (r) => r.m.clicked, cell: (r) => (r.status === 'enviado' && !API ? <RateBar value={r.m.clicked} total={r.m.delivered} tone="primary" /> : <Dash />) },
     {
       id: 'sendAt',
       header: 'Data',
@@ -381,13 +396,19 @@ export default function Disparos() {
       />
       <div className="space-y-5">
         <section aria-label="Resumo dos disparos" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <KpiCard label="Enviados em 30 dias" icon={Send} value={num(sent)} hint={`${num(last30.length)} disparos`} />
-          <KpiCard label="Taxa de entrega" icon={MailCheck} tone="info" value={pct(sent ? delivered / sent : 0)} hint={`${num(sent - delivered)} não entregues`} formula="Mensagens aceitas pelo provedor do jogador ÷ enviadas. Abaixo de 95% indica lista suja ou bloqueio." />
-          <KpiCard label="Taxa de abertura" icon={MailOpen} tone="success" value={pct(openBase ? opened / openBase : 0)} hint={`${num(opened)} aberturas`} formula="Aberturas ÷ entregues, só em e-mail e RCS. SMS não informa abertura." />
-          <KpiCard label="Cliques" icon={MousePointerClick} tone="warning" value={pct(delivered ? clicks / delivered : 0)} hint={`${num(clicks)} cliques nos links`} formula="Cliques em links ÷ mensagens entregues." />
+          <KpiCard label="Enviados em 30 dias" icon={Send} value={API ? '—' : num(sent)} hint={API ? NO_METRICS_HINT : `${num(last30.length)} disparos`} />
+          <KpiCard label="Taxa de entrega" icon={MailCheck} tone="info" value={API ? '—' : pct(sent ? delivered / sent : 0)} hint={API ? NO_METRICS_HINT : `${num(sent - delivered)} não entregues`} formula="Mensagens aceitas pelo provedor do jogador ÷ enviadas. Abaixo de 95% indica lista suja ou bloqueio." />
+          <KpiCard label="Taxa de abertura" icon={MailOpen} tone="success" value={API ? '—' : pct(openBase ? opened / openBase : 0)} hint={API ? NO_METRICS_HINT : `${num(opened)} aberturas`} formula="Aberturas ÷ entregues, só em e-mail e RCS. SMS não informa abertura." />
+          <KpiCard label="Cliques" icon={MousePointerClick} tone="warning" value={API ? '—' : pct(delivered ? clicks / delivered : 0)} hint={API ? NO_METRICS_HINT : `${num(clicks)} cliques nos links`} formula="Cliques em links ÷ mensagens entregues." />
         </section>
 
-        {!channels.sms && (
+        {API && (
+          <Alert tone="warning" icon={Send} title="Disparos ainda não saem do servidor">
+            {NO_SEND} Taxas de entrega, abertura e clique dependem do provedor de envio e aparecem quando o envio for ligado.
+          </Alert>
+        )}
+
+        {!API && !channels.sms && (
           <Alert
             tone="warning"
             icon={Plug}
@@ -422,7 +443,16 @@ export default function Disparos() {
                       label: DISPARO_CHANNEL_LABEL[c],
                       icon: CHANNEL_ICON[c],
                       disabled: !channels[c],
-                      description: !channels[c] ? 'Requer conta SendWork.' : c === 'email' ? 'Incluso no plano.' : c === 'sms' ? `${brl(PRICE.smsSegment)} por parte.` : `${brl(PRICE.rcs)} por mensagem.`,
+                      // modo API: o servidor não envia disparos (nem e-mail) nesta versão; "Incluso no plano" contradizia Integrações
+                      description: !channels[c]
+                        ? 'Requer conta SendWork.'
+                        : c === 'email'
+                          ? API
+                            ? 'Envio ainda não ligado nesta versão.'
+                            : 'Incluso no plano.'
+                          : c === 'sms'
+                            ? `${brl(PRICE.smsSegment)} por parte.`
+                            : `${brl(PRICE.rcs)} por mensagem.`,
                     }))}
                   />
                 </Field>
@@ -451,7 +481,15 @@ export default function Disparos() {
                   {channel === 'email' && (
                     <>
                       <p className="flex flex-wrap items-center gap-1.5 text-xs text-fg-3">
-                        Remetente: <strong className="font-medium text-fg-2">{fromName}</strong> &lt;{fromEmail}&gt; ·{' '}
+                        Remetente:{' '}
+                        {fromEmail.trim() ? (
+                          <>
+                            <strong className="font-medium text-fg-2">{fromName}</strong> &lt;{fromEmail}&gt;
+                          </>
+                        ) : (
+                          <span className="text-warning">não definido (Integrações)</span>
+                        )}{' '}
+                        ·{' '}
                         <Link to="/settings/integracoes" className="link">
                           trocar
                         </Link>
@@ -566,7 +604,7 @@ export default function Disparos() {
                 </Button>
                 <span className="text-xs text-fg-3">{cost ? `Custo estimado: ${brl(cost)}` : 'Sem custo por mensagem'}</span>
               </div>
-              <Button variant="primary" icon={later ? CalendarClock : Send} onClick={send} disabled={!canEdit} title={!canEdit ? 'Seu cargo não faz disparos' : undefined}>
+              <Button variant="primary" icon={later ? CalendarClock : Send} onClick={send} disabled={!canEdit || API} title={!canEdit ? 'Seu cargo não faz disparos' : API ? NO_SEND : undefined}>
                 {later ? 'Agendar' : 'Enviar'} para {num(recipients)} {recipients === 1 ? 'jogador' : 'jogadores'}
               </Button>
             </CardFooter>
@@ -652,7 +690,9 @@ export default function Disparos() {
       >
         {open && (
           <div className="space-y-6">
-            {open.status === 'enviado' ? (
+            {open.status === 'enviado' && API ? (
+              <Alert tone="warning">Registrado no painel, mas não enviado: o servidor ainda não envia mensagens nesta versão. Não há funil de entrega.</Alert>
+            ) : open.status === 'enviado' ? (
               <section>
                 <h3 className="mb-3 text-sm font-semibold text-fg">Funil de entrega</h3>
                 <FunnelChart

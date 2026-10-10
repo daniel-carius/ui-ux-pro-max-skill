@@ -1,3 +1,4 @@
+import { isApiMode } from '@/lib/api'
 import { useMemo, useState } from 'react'
 import {
   Activity,
@@ -60,6 +61,7 @@ import {
   effectivePermissions,
   expiryFrom,
   generateMcpToken,
+  MCP_UNAVAILABLE,
   inheritsWeak2fa,
   keyStatus,
   validateKeyName,
@@ -240,14 +242,21 @@ export default function Mcp() {
           <KpiCard label="Criador sem 2FA" icon={ShieldAlert} tone={weak.length ? 'danger' : 'success'} value={num(weak.length)} hint={weak.length ? 'chaves ativas em risco' : 'todas protegidas'} />
         </section>
 
+        {isApiMode() && (
+          <Alert tone="warning" icon={TriangleAlert} title="Servidor MCP indisponível nesta versão">
+            {MCP_UNAVAILABLE}
+          </Alert>
+        )}
+
         <Alert tone="info" icon={UserRound} title="A chave age como quem a criou">
           Cada chave usa as permissões do cargo do criador, as mesmas que ele tem no painel. Se o cargo mudar, a chave muda junto; se a pessoa for desligada, a chave é suspensa na
           hora. "Somente leitura" corta tudo o que não for consulta. Toda chamada fica registrada abaixo e na auditoria.
         </Alert>
 
-        {!user.twoFactor && (
+        {!user.twoFactor && !isApiMode() && (
           <Alert tone="danger" icon={ShieldAlert} title="Ative o 2FA para criar chaves">
             Como a chave age como você, criar chaves sem 2FA passaria a fragilidade da sua senha para a ferramenta de IA.
+            {isApiMode() ? ' Ative em "Ativar 2FA", no menu da sua conta (canto superior direito).' : ''}
           </Alert>
         )}
 
@@ -285,7 +294,7 @@ export default function Mcp() {
           ]}
           empty={{
             title: 'Nenhuma chave criada',
-            description: 'Crie uma chave para conectar o Claude ou outra ferramenta de IA ao painel.',
+            description: isApiMode() ? 'O servidor MCP ainda não faz parte desta versão.' : 'Crie uma chave para conectar o Claude ou outra ferramenta de IA ao painel.',
             icon: Bot,
             action: (
               <Button size="sm" icon={Plus} disabled={!createCheck.ok} onClick={() => setCreating(true)}>
@@ -317,6 +326,16 @@ export default function Mcp() {
 }
 
 function ConnectCard({ className }: { className?: string }) {
+  // modo API: não há servidor MCP; um endereço e um JSON para copiar levariam a um 404
+  if (isApiMode())
+    return (
+      <Card className={className}>
+        <CardHeader icon={Link2} title="Conectar uma ferramenta de IA" description="Indisponível nesta versão." />
+        <CardBody>
+          <p className="text-[13px] text-fg-2">{MCP_UNAVAILABLE}</p>
+        </CardBody>
+      </Card>
+    )
   return (
     <Card className={className}>
       <CardHeader icon={Link2} title="Conectar uma ferramenta de IA" description="Funciona com qualquer cliente compatível com MCP por HTTP." />

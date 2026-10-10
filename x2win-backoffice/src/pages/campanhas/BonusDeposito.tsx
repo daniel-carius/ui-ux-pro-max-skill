@@ -32,6 +32,7 @@ import { cn } from '@/lib/cn'
 import { brl, brlCompact, dateTime, mult, num, pct, relative } from '@/lib/format'
 import { uid } from '@/lib/random'
 import { useCollection } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
 import { DEPOSIT_BONUS_KEY, depositBonusDaily, seedDepositBonus } from '@/data/campanhas-bonus'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import {
@@ -60,7 +61,8 @@ export default function BonusDeposito() {
   const [editing, setEditing] = useState<DepositBonusCampaign | null>(null)
   const [simId, setSimId] = useState<string>('')
   const [simDeposit, setSimDeposit] = useState(50)
-  const daily = useMemo(() => depositBonusDaily(), [])
+  // série diária da demonstração; no modo API não há fonte (nada gerado no navegador aparece como real)
+  const daily = useMemo(() => (isApiMode() ? [] : depositBonusDaily()), [])
 
   const items = campaigns.items
   const active = items.filter((c) => c.active)
@@ -196,7 +198,7 @@ export default function BonusDeposito() {
         </div>
       ),
     },
-    { id: 'min', header: 'Depósito mín.', align: 'right', defaultHidden: true, sortValue: (c) => c.minDeposit, cell: (c) => brl(c.minDeposit) },
+    { id: 'min', money: true, header: 'Depósito mín.', align: 'right', defaultHidden: true, sortValue: (c) => c.minDeposit, cell: (c) => brl(c.minDeposit) },
     {
       id: 'rollover',
       header: 'Rollover',
@@ -210,10 +212,11 @@ export default function BonusDeposito() {
       ),
     },
     { id: 'redemptions', header: 'Resgates', align: 'right', sortValue: (c) => c.redemptions, cell: (c) => num(c.redemptions) },
-    { id: 'granted', header: 'Bônus concedido', align: 'right', sortValue: (c) => c.bonusGranted, cell: (c) => brl(c.bonusGranted) },
+    { id: 'granted', money: true, header: 'Bônus concedido', align: 'right', sortValue: (c) => c.bonusGranted, cell: (c) => brl(c.bonusGranted) },
     {
       id: 'converted',
       header: 'Convertido',
+      money: true,
       align: 'right',
       minWidth: 120,
       sortValue: (c) => (c.bonusGranted ? c.bonusConverted / c.bonusGranted : 0),
@@ -259,8 +262,8 @@ export default function BonusDeposito() {
           label="Resgates"
           icon={Gift}
           value={num(redemptions)}
-          hint={`${num(daily.reduce((s, d) => s + d.resgates, 0))} nos últimos 30 dias`}
-          chart={<Sparkline data={daily.map((d) => d.resgates)} slot={1} ariaLabel="Resgates por dia nos últimos 30 dias" />}
+          hint={daily.length ? `${num(daily.reduce((s, d) => s + d.resgates, 0))} nos últimos 30 dias` : 'somados das campanhas'}
+          chart={daily.length ? <Sparkline data={daily.map((d) => d.resgates)} slot={1} ariaLabel="Resgates por dia nos últimos 30 dias" /> : undefined}
         />
         <KpiCard
           label="Bônus concedido"
@@ -268,7 +271,7 @@ export default function BonusDeposito() {
           tone="info"
           value={brlCompact(granted)}
           hint={`${brl(redemptions ? granted / redemptions : 0)} por resgate`}
-          chart={<Sparkline data={daily.map((d) => d.bonus)} slot={4} ariaLabel="Bônus concedido por dia nos últimos 30 dias" />}
+          chart={daily.length ? <Sparkline data={daily.map((d) => d.bonus)} slot={4} ariaLabel="Bônus concedido por dia nos últimos 30 dias" /> : undefined}
         />
         <KpiCard
           label="Convertido"

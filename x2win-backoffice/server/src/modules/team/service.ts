@@ -287,11 +287,14 @@ export const TeamErrors = {
   inviteInvalid: () => Errors.invalid('Convite inválido. Peça um novo link a quem convidou você.'),
   inviteUsed: () => Errors.invalid('Este convite já foi usado. Entre com seu e-mail e senha.'),
   inviteExpired: () => Errors.invalid('Este convite expirou. Peça um novo link a quem convidou você.'),
-  nameInUse: () =>
+  /** `derivedName`: o nome não foi digitado e veio do e-mail; a mensagem diz qual nome colidiu (o campo está vazio). */
+  nameInUse: (derivedName?: string) =>
     new AppError(
       409,
       'nome_em_uso',
-      'Já existe uma pessoa na equipe com este nome ou com um nome que se confunde com ele. Use um nome que identifique a pessoa sem dúvida (por exemplo, com o sobrenome completo).',
+      derivedName
+        ? `O nome "${derivedName}", montado a partir do e-mail, é igual ou se confunde com o de outra pessoa da equipe. Digite no campo Nome um nome que identifique a pessoa sem dúvida (por exemplo, com o sobrenome completo).`
+        : 'Já existe uma pessoa na equipe com este nome ou com um nome que se confunde com ele. Use um nome que identifique a pessoa sem dúvida (por exemplo, com o sobrenome completo).',
       { field: 'name' },
     ),
 }
@@ -334,10 +337,10 @@ export function assertMayHandleRole(auth: AuthContext, role: Pick<Role, 'permiss
  * países bloqueados e as administrativas) só com cargos.conceder: trocar o cargo, criar acesso, convidar, reenviar convite e reativar.
  * Tirar alguém desse cargo segue só a regra de cargo administrativo (assertMayHandleRole).
  */
-export function assertMayPlaceInRole(auth: AuthContext, role: Pick<Role, 'name' | 'permissions'> | null) {
+export function assertMayPlaceInRole(auth: AuthContext, role: Pick<Role, 'name' | 'permissions'> | null, action = 'põe pessoas no cargo') {
   if (role && isGovernedRole(role) && !auth.perms.has(GRANT_PERM)) {
     throw TeamErrors.needsGrant(
-      `Só quem pode conceder cargos põe pessoas no cargo ${role.name} (aprova saques ou altera jogo responsável ou países bloqueados).`,
+      `Só quem pode conceder cargos ${action} ${role.name} (aprova saques ou altera jogo responsável ou países bloqueados).`,
     )
   }
 }
@@ -365,10 +368,11 @@ const RESERVED_NAMES = ['Sistema', 'Recuperação de acesso (servidor)']
  * desligado continua na auditoria e pode ser reativado). Chamar dentro da trava da equipe (TEAM_VERSION_KEY):
  * toda gravação de users.name passa por ela, então duas gravações simultâneas não escapam da conferência.
  */
-export async function assertNameFree(t: Db, name: string, exceptUserId: string | null = null) {
-  if (RESERVED_NAMES.some((r) => namesConflict(r, name))) throw TeamErrors.nameInUse()
+export async function assertNameFree(t: Db, name: string, exceptUserId: string | null = null, derivedFromEmail = false) {
+  const inUse = () => TeamErrors.nameInUse(derivedFromEmail ? name : undefined)
+  if (RESERVED_NAMES.some((r) => namesConflict(r, name))) throw inUse()
   const rows = await t.query<{ id: string; name: string }>('select id, name from users where id <> coalesce($1, \'\')', [exceptUserId])
-  if (rows.some((r) => namesConflict(r.name, name))) throw TeamErrors.nameInUse()
+  if (rows.some((r) => namesConflict(r.name, name))) throw inUse()
 }
 
 const entityOf = (m: Pick<MemberRow, 'name'>) => `Equipe · ${m.name}`
@@ -385,7 +389,7 @@ export async function deactivateMember(t: Db, auth: AuthContext, id: string): Pr
   if (m.status === 'desligado') throw Errors.invalid('Esta pessoa já está desligada.')
   await assertNotLastSuperadmin(t, m)
   await t.query(`update users set status = 'desligado', updated_at = now() where id = $1`, [m.id])
-  const revoked = await revokeUserSessions(t, m.id)
+  const revoked = await revokeUserSessions(t, m.id, 'desativado')
   await t.query('delete from invites where user_id = $1 and used_at is null', [m.id])
   await writeAudit(t, auth, {
     action: 'desativar',
@@ -456,13 +460,54 @@ export async function resetMember2fa(t: Db, auth: AuthContext, id: string): Prom
       where id = $1`,
     [m.id],
   )
-  const revoked = await revokeUserSessions(t, m.id)
+  const revoked = await revokeUserSessions(t, m.id, '2fa_redefinido')
   await writeAudit(t, auth, {
     action: 'desligar',
     entity: `2FA · ${m.name}`,
     summary: `2FA redefinido (${m.email}); ${sessionsLabel(revoked)}. Novo cadastro no próximo login.`,
   })
   return requireMember(t, m.id)
+}
+
+/**
+ * Gera uma senha temporária para quem esqueceu a dela: troca obrigatória no próximo acesso, sessões encerradas.
+ * O 2FA continua (a senha nova sozinha não abre a conta de quem tem 2FA; sem o celular, "Redefinir 2FA").
+ * A senha volta para quem gerou, como no acesso direto: cargo administrativo e cargo com governança só com
+ * cargos.conceder (equivale a pôr alguém no cargo). Ninguém gera para si mesmo (use "Trocar senha").
+ * O hash (lento) vem pronto de fora da transação; a guarda da rota confere antes de calculá-lo.
+ */
+export async function resetMemberPassword(
+  t: Db,
+  auth: AuthContext,
+  id: string,
+  hash: string,
+): Promise<{ member: MemberRow; sessionsEnded: number }> {
+  const m = await assertMayResetPassword(t, auth, id)
+  await t.query(
+    `update users set password_hash = $2, must_change_password = true, failed_logins = 0, locked_until = null, updated_at = now()
+      where id = $1`,
+    [m.id, hash],
+  )
+  const revoked = await revokeUserSessions(t, m.id, 'senha_redefinida')
+  await writeAudit(t, auth, {
+    action: 'editar',
+    entity: `Senha · ${m.name}`,
+    summary: `Senha temporária gerada (${m.email}); ${sessionsLabel(revoked)}. Troca obrigatória no próximo acesso.`,
+  })
+  return { member: await requireMember(t, m.id), sessionsEnded: revoked }
+}
+
+/** Confere se quem pede pode gerar a senha temporária desta pessoa (antes e dentro da transação). */
+export async function assertMayResetPassword(t: Db, auth: AuthContext, id: string): Promise<MemberRow> {
+  const m = await requireMember(t, id)
+  if (m.id === auth.user.id) throw Errors.invalid('Você não gera senha temporária para si mesmo. Use "Trocar senha" no menu da sua conta.')
+  const role = await getRole(t, m.role_id)
+  assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos gera senha temporária para pessoas com cargo administrativo.')
+  // a senha volta para quem gerou: equivale a pôr alguém no cargo (a mensagem fala da ação recusada)
+  assertMayPlaceInRole(auth, role, 'gera senha temporária para pessoas no cargo')
+  if (m.status === 'convidado') throw Errors.invalid('Esta pessoa ainda não aceitou o convite. Reenvie o convite em vez de gerar senha.')
+  if (m.status !== 'ativo') throw Errors.invalid('Este acesso está desativado. Reative o acesso antes de gerar uma senha temporária.')
+  return m
 }
 
 // ---------- Criação e convites ----------
@@ -566,7 +611,7 @@ export async function inviteMember(db: Db, auth: AuthContext, input: InviteInput
       assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos convida pessoas para cargo administrativo.')
       assertMayPlaceInRole(auth, role)
       await assertEmailFree(t, input.email)
-      await assertNameFree(t, name)
+      await assertNameFree(t, name, null, !input.name?.trim())
       const id = newId('u')
       await t.query(
         `insert into users (id, name, email, role_id, status, password_hash, must_change_password)

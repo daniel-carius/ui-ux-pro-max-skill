@@ -191,7 +191,7 @@ export async function withBusyRetry<T>(fn: () => Promise<T>, onWait: (notice: Au
 }
 
 /** Traduz o erro da API para o aviso mostrado no formulário. */
-export function describeAuthError(e: unknown, context: 'login' | 'code' | 'password' | 'invite'): AuthErrorView {
+export function describeAuthError(e: unknown, context: 'login' | 'code' | 'recovery' | 'password' | 'invite'): AuthErrorView {
   if (!(e instanceof ApiError)) return { tone: 'danger', title: 'Algo deu errado', message: 'Tente de novo em instantes.' }
   if (e.status === 0) return { tone: 'warning', title: 'Sem conexão com o servidor', message: e.message }
   if (e.status === 423) {
@@ -227,6 +227,13 @@ export function describeAuthError(e: unknown, context: 'login' | 'code' | 'passw
         title: 'E-mail ou senha incorretos',
         message: 'Confira os dados e tente de novo. Depois de 5 tentativas erradas, o acesso fica bloqueado por 15 minutos.',
       }
+    // código de recuperação (o servidor marca details.kind): a mensagem não fala do aplicativo
+    if (context === 'recovery' || (e.details as { kind?: unknown } | undefined)?.kind === 'recuperacao')
+      return {
+        tone: 'danger',
+        title: 'Código de recuperação inválido ou já usado',
+        message: 'Cada código funciona uma única vez. Confira a digitação ou use outro código da lista que você guardou.',
+      }
     if (context === 'code')
       return { tone: 'danger', title: 'Código inválido', message: 'Confira o código no aplicativo autenticador. Ele muda a cada 30 segundos.' }
     return { tone: 'danger', title: 'Senha atual incorreta', message: 'Digite a senha que você usa hoje para entrar no painel.' }
@@ -237,7 +244,7 @@ export function describeAuthError(e: unknown, context: 'login' | 'code' | 'passw
       ? 'Não foi possível trocar a senha'
       : context === 'invite'
         ? 'Não foi possível aceitar o convite'
-        : context === 'code'
+        : context === 'code' || context === 'recovery'
           ? 'Não foi possível confirmar o código'
           : 'Não foi possível entrar'
   return { tone: 'danger', title, message: e.message }

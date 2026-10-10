@@ -31,6 +31,7 @@ import {
   DataTable,
   DescriptionList,
   Drawer,
+  EmptyState,
   Field,
   IconButton,
   KpiCard,
@@ -45,6 +46,7 @@ import {
 } from '@/components/ui'
 import { brl, date, dateTime, num, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { isApiMode } from '@/lib/api'
 import { downloadFile } from '@/lib/csv'
 import { useCollection } from '@/lib/store'
 import { audit, usePageAccess, useSession } from '@/domain/session'
@@ -79,6 +81,9 @@ const KIND_META: Record<InvoiceItemKind, { icon: LucideIcon; slot: SeriesSlot; g
 }
 
 type Filter = 'todas' | InvoiceStatus
+
+/** Modo API: sem o contrato de demonstração (as condições reais não estão cadastradas no painel). */
+const API = isApiMode()
 
 export default function Faturas() {
   const invoices = useCollection<Invoice>(INVOICES_KEY, seedInvoices)
@@ -167,7 +172,7 @@ export default function Faturas() {
         )
       },
     },
-    { id: 'total', header: 'Valor', align: 'right', sortValue: (i) => i.total, csv: (i) => i.total, cell: (i) => <span className="font-semibold tnum">{brl(i.total)}</span> },
+    { id: 'total', money: true, header: 'Valor', align: 'right', sortValue: (i) => i.total, csv: (i) => i.total, cell: (i) => <span className="font-semibold tnum">{brl(i.total)}</span> },
     {
       id: 'status',
       header: 'Status',
@@ -307,6 +312,9 @@ export default function Faturas() {
         <Card className="xl:col-span-2">
           <CardHeader title="Composição por mês" description="Quanto cada parte pesou em cada fatura, por competência." />
           <CardBody>
+            {invoices.items.length === 0 ? (
+              <EmptyState icon={ReceiptText} title="Nenhuma fatura ainda" description="O gráfico aparece quando a primeira fatura da plataforma for lançada." className="py-16" />
+            ) : (
             <BarsChart
               ariaLabel="Valor das faturas por competência, separado por tipo de cobrança"
               data={chartData}
@@ -321,11 +329,23 @@ export default function Faturas() {
                 { key: 'licencas', label: 'Licenças de jogos', slot: 4 },
               ]}
             />
+            )}
           </CardBody>
         </Card>
         <Card>
-          <CardHeader icon={ReceiptText} title="Como a fatura é calculada" description="Contrato da plataforma (dados de demonstração)." />
+          <CardHeader
+            icon={ReceiptText}
+            title="Como a fatura é calculada"
+            description={API ? 'Condições do contrato com a plataforma.' : 'Contrato da plataforma (dados de demonstração).'}
+          />
           <CardBody>
+            {API ? (
+              <p className="text-[13px] leading-5 text-fg-3">
+                As condições do contrato (mensalidade, comissão sobre o GGR, mensagens e licenças) não estão cadastradas neste painel. Confira o
+                contrato assinado com a plataforma; cada fatura lançada traz o detalhe das cobranças.
+              </p>
+            ) : (
+            <>
             <ul className="space-y-3">
               <PriceRow icon={Server} slot={1} title="Mensalidade" text="R$ 2.490,00 fixos: site, painel, sportsbook e suporte técnico." />
               <PriceRow icon={Percent} slot={2} title="Comissão sobre o GGR" text="1,5% do GGR do mês (apostas menos prêmios)." />
@@ -335,6 +355,8 @@ export default function Faturas() {
             <p className="mt-4 rounded-lg bg-surface-2 px-3 py-2 text-xs leading-5 text-fg-3">
               Emitida no dia 2, vence no dia 12. Atraso: multa de 2% e juros de 1% ao mês, pro rata dia.
             </p>
+            </>
+            )}
           </CardBody>
         </Card>
       </div>
@@ -365,8 +387,13 @@ export default function Faturas() {
           />
         }
         empty={{
-          title: filter === 'vencida' ? 'Nenhuma fatura vencida' : 'Nenhuma fatura neste filtro',
-          description: filter === 'vencida' ? 'Tudo em dia com a plataforma.' : 'Troque o filtro para ver outras faturas.',
+          title: invoices.items.length === 0 ? 'Nenhuma fatura ainda' : filter === 'vencida' ? 'Nenhuma fatura vencida' : 'Nenhuma fatura neste filtro',
+          description:
+            invoices.items.length === 0
+              ? 'As faturas da plataforma aparecem aqui quando forem lançadas.'
+              : filter === 'vencida'
+                ? 'Tudo em dia com a plataforma.'
+                : 'Troque o filtro para ver outras faturas.',
           icon: filter === 'vencida' ? CheckCircle2 : ReceiptText,
         }}
       />

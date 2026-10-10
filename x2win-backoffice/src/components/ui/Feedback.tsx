@@ -59,6 +59,8 @@ export function ToastHost() {
   const [list, setList] = useState<ToastItem[]>(toasts)
   useEffect(() => {
     toastListeners.add(setList)
+    // avisos dados entre a renderização e esta inscrição (ex.: efeito de uma tela que monta junto) não se perdem
+    setList(toasts)
     return () => {
       toastListeners.delete(setList)
     }
@@ -154,6 +156,19 @@ export function confirmWithInput(opts: ConfirmOptions): Promise<{ confirmed: boo
   })
 }
 
+/**
+ * Erro de campo obrigatório com artigo: "Escolha o motivo." (lista), "Informe a referência do pagamento." (texto).
+ * Antes saía "Informe motivo.". O artigo segue a primeira palavra do rótulo (feminino em -a, -ção, -são, -dade, -gem).
+ */
+function requiredInputMessage(label: string, select: boolean): string {
+  const l = label.trim()
+  const first = (l.split(/\s+/)[0] ?? '').toLowerCase()
+  const plural = /s$/.test(first)
+  const fem = /(a|ção|são|dade|gem)s?$/.test(first) || /(ções|sões|dades|gens)$/.test(first)
+  const article = fem ? (plural ? 'as' : 'a') : plural ? 'os' : 'o'
+  return `${select ? 'Escolha' : 'Informe'} ${article} ${l.charAt(0).toLowerCase()}${l.slice(1)}.`
+}
+
 export function ConfirmHost() {
   const [req, setReq] = useState<ConfirmRequest | null>(null)
   const [value, setValue] = useState('')
@@ -184,7 +199,7 @@ export function ConfirmHost() {
   }
   const tone = req.tone ?? 'primary'
   const Icon = req.icon ?? (tone === 'danger' ? AlertTriangle : tone === 'warning' ? AlertTriangle : tone === 'success' ? CheckCircle2 : Info)
-  const inputError = touched && req.input?.required && !value.trim() ? `Informe ${req.input.label.toLowerCase()}.` : null
+  const inputError = touched && req.input?.required && !value.trim() ? requiredInputMessage(req.input.label, !!req.input.options) : null
   const typeError = touched && req.typeToConfirm && typed.trim().toUpperCase() !== req.typeToConfirm.toUpperCase() ? `Digite ${req.typeToConfirm} para confirmar.` : null
 
   return (

@@ -39,7 +39,7 @@ export default fp(async function security(app: FastifyInstance) {
   if (origins.length) {
     await app.register(cors, { origin: origins, credentials: true, methods: ['GET', 'POST', 'PUT', 'DELETE'], allowedHeaders: ['content-type', SECURITY.csrfHeader] })
   }
-  await app.register(rateLimit, { global: true, max: 600, timeWindow: '1 minute', keyGenerator: (req) => req.clientIp || req.ip })
+  await app.register(rateLimit, { global: true, max: app.config.API_RATE_LIMIT_PER_MINUTE, timeWindow: '1 minute', keyGenerator: (req) => req.clientIp || req.ip })
 
   // Atrás do proxy (TRUST_PROXY) e com cookie Secure, só atende o que chegou ao proxy por HTTPS: sem isso a
   // senha, o código do 2FA e o token de sessão emitido no login trafegariam em texto claro.

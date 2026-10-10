@@ -35,6 +35,7 @@ import {
   Drawer,
   KpiCard,
   Mono,
+  NoDataSource,
   PageHeader,
   Select,
   Tabs,
@@ -65,6 +66,7 @@ import {
   SETTLEMENT_STATUS_LABEL,
   aggregateByProvider,
   closeBlocker,
+  isDueToday,
   isOverdue,
   lastMonths,
   monthBounds,
@@ -135,7 +137,7 @@ export default function Ggr() {
     <>
       <PageHeader
         actions={
-          tab !== 'apuracoes' ? (
+          tab !== 'apuracoes' && !isApiMode() ? (
             <>
               <Select
                 aria-label="Escolher mês"
@@ -163,10 +165,28 @@ export default function Ggr() {
         />
       </PageHeader>
 
-      {tab === 'resumo' && <Summary range={range} data={data} />}
-      {tab === 'provedores' && <ProvidersTab range={range} rows={data.byProvider} />}
-      {tab === 'jogos' && <GamesTab range={range} stats={data.stats} />}
-      {tab === 'apuracoes' && <Settlements />}
+      {/* modo API: Resumo, Provedores e Jogos vêm do serviço de métricas da plataforma, ainda não conectado.
+          A série do navegador não aparece como dado real; as apurações (servidor) continuam. */}
+      {tab !== 'apuracoes' && isApiMode() ? (
+        <NoDataSource
+          title="GGR por período ainda sem fonte de dados"
+          action={
+            <Button variant="primary" onClick={() => setTab('apuracoes')}>
+              Ver apurações
+            </Button>
+          }
+        >
+          Apostado, pago, GGR por provedor e por jogo vêm do serviço de métricas da plataforma de jogo, que ainda não está conectado a este
+          painel. As apurações mensais gravadas no servidor estão na aba Apurações.
+        </NoDataSource>
+      ) : (
+        <>
+          {tab === 'resumo' && <Summary range={range} data={data} />}
+          {tab === 'provedores' && <ProvidersTab range={range} rows={data.byProvider} />}
+          {tab === 'jogos' && <GamesTab range={range} stats={data.stats} />}
+          {tab === 'apuracoes' && <Settlements />}
+        </>
+      )}
     </>
   )
 }
@@ -386,10 +406,10 @@ function ProvidersTab({ range, rows }: { range: DateRange; rows: ProviderGgr[] }
         </span>
       ),
     },
-    { id: 'bets', header: 'Apostado', align: 'right', sortValue: (r) => r.bets, csv: (r) => r.bets.toFixed(2), cell: (r) => brl(r.bets) },
-    { id: 'wins', header: 'Pago', align: 'right', sortValue: (r) => r.wins, csv: (r) => r.wins.toFixed(2), cell: (r) => <span className="text-fg-2">{brl(r.wins)}</span> },
+    { id: 'bets', money: true, header: 'Apostado', align: 'right', sortValue: (r) => r.bets, csv: (r) => r.bets.toFixed(2), cell: (r) => brl(r.bets) },
+    { id: 'wins', money: true, header: 'Pago', align: 'right', sortValue: (r) => r.wins, csv: (r) => r.wins.toFixed(2), cell: (r) => <span className="text-fg-2">{brl(r.wins)}</span> },
     {
-      id: 'ggr',
+      id: 'ggr', money: true,
       header: 'Receita bruta',
       align: 'right',
       sortValue: (r) => r.ggr,
@@ -398,8 +418,8 @@ function ProvidersTab({ range, rows }: { range: DateRange; rows: ProviderGgr[] }
     },
     { id: 'rtp', header: 'RTP', align: 'right', sortValue: (r) => r.rtp, csv: (r) => (r.rtp * 100).toFixed(2), cell: (r) => pct(r.rtp, 2) },
     { id: 'feePct', header: 'Taxa %', align: 'right', sortValue: (r) => r.feePct, csv: (r) => r.feePct, cell: (r) => pct(r.feePct, 0, true) },
-    { id: 'fee', header: 'Valor da taxa', align: 'right', sortValue: (r) => r.fee, csv: (r) => r.fee.toFixed(2), cell: (r) => <span className="text-warning">{brl(r.fee)}</span> },
-    { id: 'net', header: 'GGR líquido', align: 'right', sortValue: (r) => r.net, csv: (r) => r.net.toFixed(2), cell: (r) => <span className={cn('font-semibold', r.net < 0 ? 'text-danger' : 'text-success')}>{brl(r.net)}</span> },
+    { id: 'fee', money: true, header: 'Valor da taxa', align: 'right', sortValue: (r) => r.fee, csv: (r) => r.fee.toFixed(2), cell: (r) => <span className="text-warning">{brl(r.fee)}</span> },
+    { id: 'net', money: true, header: 'GGR líquido', align: 'right', sortValue: (r) => r.net, csv: (r) => r.net.toFixed(2), cell: (r) => <span className={cn('font-semibold', r.net < 0 ? 'text-danger' : 'text-success')}>{brl(r.net)}</span> },
     { id: 'rounds', header: 'Rodadas', align: 'right', defaultHidden: true, sortValue: (r) => r.rounds, cell: (r) => num(r.rounds) },
   ]
   return (
@@ -494,13 +514,13 @@ function GamesTab({ range, stats }: { range: DateRange; stats: GameStat[] }) {
         return c ? <Badge icon={CATEGORY_ICON[c]}>{GAME_CATEGORY_LABEL[c]}</Badge> : '—'
       },
     },
-    { id: 'bets', header: 'Apostado', align: 'right', sortValue: (s) => s.bets, csv: (s) => s.bets.toFixed(2), cell: (s) => brl(s.bets) },
-    { id: 'wins', header: 'Pago', align: 'right', sortValue: (s) => s.wins, csv: (s) => s.wins.toFixed(2), cell: (s) => <span className="text-fg-2">{brl(s.wins)}</span> },
-    { id: 'ggr', header: 'GGR', align: 'right', sortValue: (s) => s.ggr, csv: (s) => s.ggr.toFixed(2), cell: (s) => <span className={cn('font-semibold', s.ggr < 0 ? 'text-danger' : 'text-fg')}>{brl(s.ggr)}</span> },
+    { id: 'bets', money: true, header: 'Apostado', align: 'right', sortValue: (s) => s.bets, csv: (s) => s.bets.toFixed(2), cell: (s) => brl(s.bets) },
+    { id: 'wins', money: true, header: 'Pago', align: 'right', sortValue: (s) => s.wins, csv: (s) => s.wins.toFixed(2), cell: (s) => <span className="text-fg-2">{brl(s.wins)}</span> },
+    { id: 'ggr', money: true, header: 'GGR', align: 'right', sortValue: (s) => s.ggr, csv: (s) => s.ggr.toFixed(2), cell: (s) => <span className={cn('font-semibold', s.ggr < 0 ? 'text-danger' : 'text-fg')}>{brl(s.ggr)}</span> },
     { id: 'rtp', header: 'RTP real', align: 'right', sortValue: (s) => (s.bets ? s.wins / s.bets : 0), csv: (s) => (s.bets ? ((s.wins / s.bets) * 100).toFixed(2) : ''), cell: (s) => pct(s.bets ? s.wins / s.bets : 0, 2) },
     { id: 'rounds', header: 'Rodadas', align: 'right', sortValue: (s) => s.rounds, cell: (s) => numCompact(s.rounds) },
     { id: 'players', header: 'Jogadores', align: 'right', sortValue: (s) => s.players, cell: (s) => num(s.players) },
-    { id: 'perPlayer', header: 'GGR por jogador', align: 'right', defaultHidden: true, sortValue: (s) => s.ggr / Math.max(1, s.players), csv: (s) => (s.ggr / Math.max(1, s.players)).toFixed(2), cell: (s) => brl(s.ggr / Math.max(1, s.players)) },
+    { id: 'perPlayer', money: true, header: 'GGR por jogador', align: 'right', defaultHidden: true, sortValue: (s) => s.ggr / Math.max(1, s.players), csv: (s) => (s.ggr / Math.max(1, s.players)).toFixed(2), cell: (s) => brl(s.ggr / Math.max(1, s.players)) },
   ]
   const categories = [...new Set(games.map((g) => g.category))] as GameCategory[]
   return (
@@ -582,6 +602,7 @@ function Settlements() {
   const toClose = settlements.items.filter((s) => s.status === 'aberta' && monthEnded(s.month, now))
   const awaiting = settlements.items.filter((s) => s.status === 'fechada')
   const overdue = awaiting.filter((s) => isOverdue(s, now))
+  const dueToday = awaiting.filter((s) => isDueToday(s, now))
   const year = String(now.getFullYear())
   const paidYear = settlements.items.filter((s) => s.status === 'paga' && s.paidAt?.startsWith(year))
   const sumFee = (list: Settlement[]) => list.reduce((acc, s) => acc + view(s).feeDue, 0)
@@ -734,9 +755,9 @@ function Settlements() {
         </span>
       ),
     },
-    { id: 'ggr', header: 'GGR', align: 'right', sortValue: (s) => s.ggr, csv: (s) => s.ggr.toFixed(2), cell: (s) => <span className={cn(s.ggr < 0 && 'text-danger')}>{brl(s.ggr)}</span> },
+    { id: 'ggr', money: true, header: 'GGR', align: 'right', sortValue: (s) => s.ggr, csv: (s) => s.ggr.toFixed(2), cell: (s) => <span className={cn(s.ggr < 0 && 'text-danger')}>{brl(s.ggr)}</span> },
     { id: 'feePct', header: 'Taxa', align: 'right', sortValue: (s) => view(s).feePct, csv: (s) => view(s).feePct, cell: (s) => pct(view(s).feePct, 0, true) },
-    { id: 'feeDue', header: 'Taxa devida', align: 'right', sortValue: (s) => view(s).feeDue, csv: (s) => view(s).feeDue.toFixed(2), cell: (s) => <span className="font-semibold">{brl(view(s).feeDue)}</span> },
+    { id: 'feeDue', money: true, header: 'Taxa devida', align: 'right', sortValue: (s) => view(s).feeDue, csv: (s) => view(s).feeDue.toFixed(2), cell: (s) => <span className="font-semibold">{brl(view(s).feeDue)}</span> },
     {
       id: 'status',
       header: 'Status',
@@ -753,13 +774,14 @@ function Settlements() {
               Vencida
             </Badge>
           )}
+          {isDueToday(s, now) && <Badge tone="warning">Vence hoje</Badge>}
         </span>
       ),
     },
     { id: 'due', header: 'Vencimento', sortValue: (s) => s.dueDate, csv: (s) => date(s.dueDate), cell: (s) => <span className="text-fg-2">{date(s.dueDate)}</span> },
     { id: 'closed', header: 'Fechada por', defaultHidden: true, csv: (s) => (s.closedBy ? `${s.closedBy} ${dateTime(s.closedAt)}` : ''), cell: (s) => (s.closedBy ? <span className="text-fg-2">{s.closedBy}</span> : '—') },
     { id: 'ref', header: 'Referência', defaultHidden: true, csv: (s) => s.paymentRef ?? '', cell: (s) => (s.paymentRef ? <Mono>{s.paymentRef}</Mono> : '—') },
-    { id: 'action', header: 'Ação', pinned: true, csv: () => '', cell: (s) => <div onClick={(e) => e.stopPropagation()}>{actionCell(s)}</div> },
+    { id: 'action', header: 'Ação', pinned: true, csv: false, cell: (s) => <div onClick={(e) => e.stopPropagation()}>{actionCell(s)}</div> },
   ]
 
   const open = openId ? settlements.get(openId) : undefined
@@ -768,7 +790,7 @@ function Settlements() {
     <div className="space-y-5">
       <section aria-label="Resumo das apurações" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="A fechar" icon={Hourglass} tone={toClose.length ? 'warning' : 'neutral'} value={brl(sumFee(toClose))} hint={`${toClose.length} apurações de meses encerrados`} />
-        <KpiCard label="Fechadas a pagar" icon={ReceiptText} tone="info" value={brl(sumFee(awaiting))} hint={<span className={cn(overdue.length && 'font-semibold text-danger')}>{`${awaiting.length} apurações · ${overdue.length} vencidas`}</span>} />
+        <KpiCard label="Fechadas a pagar" icon={ReceiptText} tone="info" value={brl(sumFee(awaiting))} hint={<span className={cn(overdue.length && 'font-semibold text-danger')}>{`${awaiting.length} apurações · ${overdue.length} vencidas${dueToday.length ? ` · ${dueToday.length} vencem hoje` : ''}`}</span>} />
         <KpiCard label={`Pagas em ${year}`} icon={BadgeCheck} tone="success" value={brlCompact(sumFee(paidYear))} hint={`${paidYear.length} pagamentos registrados`} />
         <KpiCard label="Mês atual (parcial)" icon={CalendarCheck} tone="primary" value={brlCompact(sumFee(settlements.items.filter((s) => s.month === monthKey(now))))} hint="taxa estimada até hoje" formula={<>O mês em andamento fica aberto até o fim. A taxa muda conforme o GGR e a taxa atual de cada provedora.</>} />
       </section>

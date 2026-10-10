@@ -12,7 +12,6 @@ import {
   Field,
   FormFieldset,
   FormGrid,
-  Input,
   MoneyInput,
   NumberInput,
   PageHeader,
@@ -215,18 +214,15 @@ export default function Comissoes() {
                   htmlFor="sim-ggr"
                   hint="Apostado − pago aos indicados. Pode ser negativo: aí o Rev Share não paga nada."
                 >
-                  <Input
+                  <MoneyInput
                     id="sim-ggr"
-                    prefix="R$"
-                    type="number"
-                    inputMode="decimal"
+                    min={Number.MIN_SAFE_INTEGER}
                     step={100}
-                    value={Number.isFinite(sim.ggr) ? sim.ggr : ''}
-                    onChange={(e) => {
-                      setSim((s) => ({ ...s, ggr: e.target.value === '' ? 0 : Number(e.target.value) }))
+                    value={sim.ggr}
+                    onValueChange={(v) => {
+                      setSim((s) => ({ ...s, ggr: v }))
                       setPreset('livre')
                     }}
-                    className="tnum"
                   />
                 </Field>
               </FormGrid>

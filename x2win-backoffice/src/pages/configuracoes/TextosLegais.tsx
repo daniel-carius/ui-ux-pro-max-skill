@@ -45,7 +45,7 @@ import {
   toast,
   useTabParam,
 } from '@/components/ui'
-import { date, dateTime, num, pct, relative } from '@/lib/format'
+import { date, dateTime, num, pct, plural, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { useCollection, useDb } from '@/lib/store'
 import { usePlayerCounts } from '@/domain/config1-metricas'
@@ -517,7 +517,7 @@ function HistoryCard({ doc, onView, onRestore, draftDirty }: { doc: LegalDoc; on
   }
   return (
     <Card>
-      <CardHeader icon={History} title="Histórico de versões" description={`${doc.versions.length} versões publicadas`} />
+      <CardHeader icon={History} title="Histórico de versões" description={plural(doc.versions.length, 'versão publicada', 'versões publicadas')} />
       <CardBody>
         <ol className="relative space-y-4 before:absolute before:bottom-2 before:left-[13px] before:top-2 before:w-px before:bg-line">
           {list.map((v) => {

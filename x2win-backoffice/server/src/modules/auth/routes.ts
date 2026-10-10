@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type {
   LoginResponse,
   MeResponse,
+  SessionResponse,
   TwoFactorEnableResponse,
   TwoFactorSetupResponse,
 } from '@shared/api'
@@ -122,7 +123,7 @@ export default async function routes(app: FastifyInstance) {
     if (await withPasswordSlot(reply, () => verifyPassword(currentPassword, user.password_hash))) return
     const lock = await registerFailure(app.db, user, req.clientIp, reason)
     if (lock) {
-      await revokeSession(app.db, auth.sessionId)
+      await revokeSession(app.db, auth.sessionId, 'bloqueio')
       throw lock
     }
     throw AuthErrors.badCurrentPassword()
@@ -158,7 +159,7 @@ export default async function routes(app: FastifyInstance) {
       // devolve as tentativas do código
       if (!inputs.totp_enabled) await clearFailures(db, user.id)
       // mesmo navegador: a sessão anterior deixa de valer
-      if (previous) await revokeSession(db, sha256(previous))
+      if (previous) await revokeSession(db, sha256(previous), 'outro_login')
       const s = await createSession(db, user.id, stage, { ip: req.clientIp, userAgent: req.headers['user-agent'] })
       if (stage === 'active') await recordLogin(db, toAuthUser(user), req.clientIp, 'Login com senha')
       return { stage, token: s.token }
@@ -188,9 +189,16 @@ export default async function routes(app: FastifyInstance) {
     })
     if (!accepted) {
       // fora da transação: a tentativa errada precisa ficar registrada
-      const lock = await registerFailure(app.db, user, req.clientIp, 'Código do 2FA incorreto depois da senha correta')
+      // código de recuperação (não são 6 dígitos): a mensagem fala dele, não do aplicativo
+      const recovery = !/^\d{6}$/.test(code.replace(/\s+/g, ''))
+      const lock = await registerFailure(
+        app.db,
+        user,
+        req.clientIp,
+        recovery ? 'Código de recuperação inválido ou já usado depois da senha correta' : 'Código do 2FA incorreto depois da senha correta',
+      )
       if (lock) throw lock
-      throw AuthErrors.badCode()
+      throw recovery ? AuthErrors.badRecoveryCode() : AuthErrors.badCode()
     }
     const res: LoginResponse = { stage: 'active' }
     return res
@@ -244,7 +252,7 @@ export default async function routes(app: FastifyInstance) {
       // código errado conta para o bloqueio (impede adivinhar o código do segredo pendente)
       const lock = await registerFailure(app.db, user, req.clientIp, 'Código incorreto ao confirmar o cadastro do 2FA')
       if (lock) {
-        if (auth.stage === 'active') await revokeSession(app.db, auth.sessionId)
+        if (auth.stage === 'active') await revokeSession(app.db, auth.sessionId, 'bloqueio')
         throw lock
       }
       throw AuthErrors.badCode()
@@ -274,7 +282,7 @@ export default async function routes(app: FastifyInstance) {
       }
       await clearFailures(db, user.id)
       // o novo fator vale a partir de agora: as outras sessões (abertas sem ele) caem
-      const revoked = await revokeUserSessions(db, user.id, auth.sessionId)
+      const revoked = await revokeUserSessions(db, user.id, '2fa_ligado', auth.sessionId)
       const parts = [`Ligou o 2FA com aplicativo autenticador e gerou ${RECOVERY_CODES} códigos de recuperação`]
       if (revoked > 0) parts.push(`${revoked} ${revoked === 1 ? 'outra sessão encerrada' : 'outras sessões encerradas'}`)
       await writeAudit(db, { user: auth.user, ip: req.clientIp }, { action: 'ligar', entity: '2FA', summary: parts.join('; ') })
@@ -313,7 +321,7 @@ export default async function routes(app: FastifyInstance) {
         `update users set password_hash = $2, must_change_password = false, updated_at = now() where id = $1`,
         [user.id, hash],
       )
-      const revoked = await revokeUserSessions(db, user.id, auth.sessionId)
+      const revoked = await revokeUserSessions(db, user.id, 'senha_trocada', auth.sessionId)
       // sessão ativa continua ativa; na troca obrigatória segue para a próxima etapa
       const next: SessionStage = auth.stage === 'password' ? await computeStage(db, user.id) : 'active'
       if (next !== auth.stage) await promoteSession(db, auth.sessionId, next)
@@ -330,15 +338,13 @@ export default async function routes(app: FastifyInstance) {
   // ---------- POST /logout ----------
   app.post('/logout', SMALL_BODY, async (req, reply) => {
     const token = req.cookies[SECURITY.sessionCookie]
-    if (token) await revokeSession(app.db, sha256(token))
+    if (token) await revokeSession(app.db, sha256(token), 'saida')
     clearSessionCookie(reply, app.config)
     return reply.status(204).send()
   })
 
-  // ---------- GET /me ----------
-  app.get('/me', async (req) => {
-    const auth = req.auth
-    if (!auth) throw Errors.unauthenticated()
+  /** Corpo de /me para a sessão do cookie (null se a pessoa sumiu). */
+  async function meFor(auth: AuthContext): Promise<MeResponse | null> {
     const row = await app.db.one<{
       id: string
       name: string
@@ -355,7 +361,7 @@ export default async function routes(app: FastifyInstance) {
         where u.id = $1`,
       [auth.user.id],
     )
-    if (!row) throw Errors.unauthenticated()
+    if (!row) return null
     const res: MeResponse = {
       stage: auth.stage,
       user: {
@@ -373,6 +379,25 @@ export default async function routes(app: FastifyInstance) {
       res.permissions = [...auth.perms]
       res.sessionTimeoutMinutes = row.timeout ?? 240
     }
+    return res
+  }
+
+  // ---------- GET /me ----------
+  app.get('/me', async (req) => {
+    const auth = req.auth
+    if (!auth) throw Errors.unauthenticated()
+    const res = await meFor(auth)
+    if (!res) throw Errors.unauthenticated()
+    return res
+  })
+
+  // ---------- GET /session ----------
+  // "Há sessão?" sem erro: o painel pergunta isto ao abrir e quando uma chamada recebe 401. Sem sessão a resposta
+  // é 200 com session null (a tela de entrada não gera erro no console) e, se o cookie era de uma sessão que
+  // terminou, o motivo (inatividade, senha trocada, acesso desativado...), para a tela dizer por que saiu.
+  app.get('/session', async (req) => {
+    const res: SessionResponse = { session: req.auth ? await meFor(req.auth) : null }
+    if (!res.session && req.sessionEnded) res.ended = req.sessionEnded
     return res
   })
 }

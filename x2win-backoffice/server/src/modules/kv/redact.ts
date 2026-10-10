@@ -19,7 +19,7 @@
 //    clona o segredo).
 import { isPiiField, SECRET_FIELD, URL_FIELD, type KvRule } from '@shared/kv-registry'
 import { Errors } from '../../errors'
-import { isMasked, maskPii, maskSecret, maskUrlTokens, SECRET_BULLETS, SECRET_MASK_RE } from '../../lib/mask'
+import { isMasked, maskCpf, maskEmail, maskGeneric, maskPhone, maskPii, maskSecret, maskUrlTokens, SECRET_BULLETS, SECRET_MASK_RE } from '../../lib/mask'
 import { deepEqual, hasOwn, isPlainObject, itemId, MISSING, setOwn, type JsonObject, type Maybe } from './json'
 
 export interface MaskPolicy {
@@ -60,15 +60,39 @@ interface Ctx {
   pii: string | null
   /** dentro de um campo de URL */
   url: boolean
+  /** tipo da chave PIX do mesmo objeto (pixKeyType ao lado de pixKey), para mascarar conforme o tipo */
+  pixType?: string | null
 }
 
 const ROOT: Ctx = { secret: false, pii: null, url: false }
 
-function childCtx(ctx: Ctx, field: string, policy: MaskPolicy): Ctx {
+/** Campo de chave PIX (pixKey, affiliatePixKey...). */
+const PIX_KEY_FIELD = /^pixKey$|PixKey$/
+
+/**
+ * Tipo da chave PIX ao lado do campo (pixKey → pixKeyType), no objeto que contém o campo. Sem ele, a máscara
+ * genérica adivinhava pelo formato: um celular de 11 dígitos saía como CPF ("319.***.***-68").
+ */
+function pixTypeFor(obj: unknown, field: string): string | null {
+  if (!PIX_KEY_FIELD.test(field) || !isPlainObject(obj)) return null
+  const t = obj[`${field}Type`]
+  return typeof t === 'string' && t ? t : null
+}
+
+/** Máscara da chave PIX conforme o tipo (sempre com *** ou •, para a restauração reconhecer). */
+function maskPixTyped(type: string, value: string): string {
+  if (type === 'CPF') return maskCpf(value)
+  if (type === 'E-mail' || /@/.test(value)) return maskEmail(value)
+  if (type === 'Celular' || type === 'Telefone') return maskPhone(value)
+  return maskGeneric(value)
+}
+
+function childCtx(ctx: Ctx, field: string, policy: MaskPolicy, pixType: string | null = null): Ctx {
   return {
     secret: ctx.secret || (policy.secrets && SECRET_FIELD.test(field)),
     pii: policy.pii && isPiiField(field, policy.piiFields) ? field : ctx.pii,
     url: ctx.url || (!!policy.urls && URL_FIELD.test(field)),
+    pixType: pixType ?? ctx.pixType ?? null,
   }
 }
 
@@ -91,7 +115,8 @@ function maskLeaf(v: string | number | boolean, ctx: Ctx): unknown {
   if (ctx.pii !== null) {
     const s = String(v)
     if (s === '') return s
-    return isMasked(s) ? s : maskPii(ctx.pii, s)
+    if (isMasked(s)) return s
+    return ctx.pixType && PIX_KEY_FIELD.test(ctx.pii) ? maskPixTyped(ctx.pixType, s) : maskPii(ctx.pii, s)
   }
   return v
 }
@@ -102,7 +127,7 @@ function redactNode(v: unknown, ctx: Ctx, policy: MaskPolicy): unknown {
   if (Array.isArray(v)) return v.map((item) => redactNode(item, ctx, policy))
   if (isPlainObject(v)) {
     const out: JsonObject = {}
-    for (const [k, child] of Object.entries(v)) setOwn(out, k, redactNode(child, childCtx(ctx, k, policy), policy))
+    for (const [k, child] of Object.entries(v)) setOwn(out, k, redactNode(child, childCtx(ctx, k, policy, pixTypeFor(v, k)), policy))
     return out
   }
   return v
@@ -277,7 +302,8 @@ function restoreNode(v: unknown, stored: Maybe<unknown>, ctx: Ctx, policy: MaskP
     let keepsSecret = false
     for (const [k, child] of Object.entries(v)) {
       const cp = isPlainObject(stored) && hasOwn(stored, k) ? stored[k] : MISSING
-      const cctx = childCtx(ctx, k, policy)
+      // a máscara esperada é a que a leitura emitiu para o valor gravado: o tipo da chave PIX gravado
+      const cctx = childCtx(ctx, k, policy, isPlainObject(stored) ? pixTypeFor(stored, k) : pixTypeFor(v, k))
       const before = state.keptSecrets
       setOwn(out, k, restoreNode(child, cp, cctx, policy, [...path, k], state))
       // este objeto guarda o segredo (o campo k entra no contexto de segredo) e ele foi mantido

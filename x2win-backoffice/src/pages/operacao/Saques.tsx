@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Ban,
   Calculator,
@@ -8,6 +8,7 @@ import {
   Eye,
   Hourglass,
   ListChecks,
+  Lock,
   RotateCcw,
   Scale,
   ShieldAlert,
@@ -55,11 +56,13 @@ import {
   type DateRange,
   type Tone,
 } from '@/components/ui'
-import { brl, dateTime, duration, maskCpf, maskEmail, maskPhone, num, relative } from '@/lib/format'
+import { brl, dateTime, duration, maskCpf, maskEmail, maskPhone, num, pixKey as fmtPixKey, plural, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { ApiError, isApiMode } from '@/lib/api'
 import { useDb } from '@/lib/store'
 import { useWithdrawals } from '@/data/hooks'
+import { TEMPLATE_KEY, seedTemplates } from '@/data/campanhas-templates'
+import type { WebhookTemplate } from '@/domain/campanhas-templates'
 import { WITHDRAWAL_STATUS_LABEL, type RiskLevel, type Withdrawal, type WithdrawalStatus } from '@/data/finance'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { ceilingLabel } from '@/domain/roles'
@@ -67,6 +70,7 @@ import {
   DEFAULT_WITHDRAWAL_RULES,
   WITHDRAWAL_KEYS,
   approveWithdrawal,
+  knownPayoutHold,
   canDecideWithdrawals,
   checkApprovalCeiling,
   checkAutoApproveCeiling,
@@ -102,7 +106,8 @@ const REJECT_REASONS = [
 
 const OPEN: WithdrawalStatus[] = ['criado', 'pendente', 'em_analise']
 
-type Filter = 'todos' | WithdrawalStatus
+/** 'abertos' = criado, pendente e em análise (o card "Aguardando decisão"); 'atrasados' = abertos há mais de 24 h */
+type Filter = 'todos' | 'abertos' | 'atrasados' | WithdrawalStatus
 
 /** Quem decidiu, com o e-mail (separa pessoas com o mesmo nome). */
 function deciderText(w: Withdrawal) {
@@ -150,6 +155,9 @@ function Queue() {
   const [filter, setFilter] = useState<Filter>('todos')
   const [openId, setOpenId] = useState<string | null>(null)
   const [rules] = useDb<WithdrawalRules>(WITHDRAWAL_KEYS.rules, DEFAULT_WITHDRAWAL_RULES)
+  // template "Saque pago" desligado: nenhum aviso sai na aprovação (a confirmação avisa antes, não só o resultado)
+  const [templates] = useDb<WebhookTemplate[]>(TEMPLATE_KEY, seedTemplates)
+  const paidNoticeOff = templates.some((t) => t.event === 'saque.pago' && t.active === false)
   const [busy, setBusy] = useState<Busy>({})
   const canDecide = can('saques.aprovar') && role.approvalCeiling !== 0
 
@@ -175,7 +183,15 @@ function Queue() {
     for (const w of inPeriod) c[w.status] = (c[w.status] ?? 0) + 1
     return c
   }, [inPeriod])
-  const rows = filter === 'todos' ? inPeriod : inPeriod.filter((w) => w.status === filter)
+  const isLate = (w: Withdrawal) => OPEN.includes(w.status) && now - new Date(w.createdAt).getTime() > 24 * 3600_000
+  const rows =
+    filter === 'todos'
+      ? inPeriod
+      : filter === 'abertos'
+        ? inPeriod.filter((w) => OPEN.includes(w.status))
+        : filter === 'atrasados'
+          ? inPeriod.filter(isLate)
+          : inPeriod.filter((w) => w.status === filter)
 
   const waiting = items.filter((w) => OPEN.includes(w.status))
   const waitingLate = waiting.filter((w) => now - new Date(w.createdAt).getTime() > 24 * 3600_000)
@@ -184,6 +200,15 @@ function Queue() {
   const refused = inPeriod.filter((w) => w.status === 'recusado' || w.status === 'expirado')
   const cancelled = inPeriod.filter((w) => w.status === 'cancelado')
 
+  /** Aprovação segurada (conta bloqueada ou de rede banida): o saque continua aberto; recusar devolve o valor. */
+  const holdToast = (w: Withdrawal, message: string) =>
+    toast.error('Aprovação bloqueada', {
+      // a mensagem do servidor já começa com "Aprovação bloqueada:" (o título não se repete)
+      description: `${message.replace(/^(Aprovação|Pagamento) bloquead[ao]:\s*/i, '')} Recuse o saque se ele não for seguir.`,
+      action: canDecide ? { label: 'Recusar saque', onClick: () => void reject(w) } : undefined,
+      duration: 8000,
+    })
+
   const approve = async (w: Withdrawal) => {
     if (busy[w.id]) return
     const check = checkApprovalCeiling(role, w.amount)
@@ -191,11 +216,19 @@ function Queue() {
       toast.error('Não foi possível aprovar', { description: check.message })
       return
     }
+    // demonstração: conta bloqueada ou de rede banida já se sabe aqui (mesma regra do servidor); nem pede confirmação
+    const hold = knownPayoutHold(w.playerId)
+    if (hold) {
+      holdToast(w, hold)
+      return
+    }
     const ok = await confirm({
       title: `Aprovar saque de ${brl(w.amount)}?`,
-      description: 'O saque fica aprovado e o aviso de pagamento vai para o sistema que paga (saque.pago). Não pode ser desfeito.',
+      description: paidNoticeOff
+        ? 'Aprovar registra a decisão; não paga o PIX. O template "Saque pago" está desativado em Campanhas › Templates: nenhum aviso "saque.pago" sai, e o financeiro precisa fazer o pagamento no gateway. Não pode ser desfeito.'
+        : 'Aprovar registra a decisão e põe na fila o aviso "saque.pago" para os sistemas cadastrados em Webhooks; não paga o PIX. Sem destino ativo, o financeiro faz o pagamento no gateway (o resultado avisa). Não pode ser desfeito.',
+      tone: paidNoticeOff ? 'warning' : 'success',
       confirmLabel: 'Aprovar saque',
-      tone: 'success',
       icon: CheckCircle2,
       details: (
         <DescriptionList
@@ -217,11 +250,8 @@ function Queue() {
     }
     // regras do servidor: o saque continua aberto (não é conflito de versão); explica o próximo passo
     if (r.code === 'jogador_bloqueado') {
-      toast.error('Pagamento bloqueado', {
-        description: `${r.message} Para devolver o valor ao saldo do jogador, recuse o saque.`,
-        action: canDecide ? { label: 'Recusar saque', onClick: () => void reject(w) } : undefined,
-        duration: 8000,
-      })
+      // aprovar não paga o PIX: o que a conta bloqueada segura é a aprovação
+      holdToast(w, r.message)
     } else if (r.code === 'fora_das_regras') {
       const kind = outOfRulesKind(r.details)
       toast.error('Fora das regras de saque', {
@@ -241,7 +271,8 @@ function Queue() {
     if (busy[w.id]) return
     const r = await confirmWithInput({
       title: `Recusar saque de ${brl(w.amount)}?`,
-      description: 'O valor volta para o saldo do jogador e ele recebe o motivo por e-mail.',
+      description:
+        'Recusar registra a decisão e põe na fila o aviso "saque.rejeitado" para os sistemas cadastrados em Webhooks. A devolução do valor ao saldo do jogador é feita pela plataforma de jogo; o painel não envia e-mail.',
       confirmLabel: 'Recusar saque',
       tone: 'danger',
       icon: XCircle,
@@ -280,7 +311,7 @@ function Queue() {
       sortValue: (w) => w.playerName,
       cell: (w) => <PersonCell name={w.playerName} sub={maskEmail(w.playerEmail)} />,
     },
-    { id: 'amount', header: 'Valor', align: 'right', sortValue: (w) => w.amount, cell: (w) => <span className="font-semibold">{brl(w.amount)}</span> },
+    { id: 'amount', money: true, header: 'Valor', align: 'right', sortValue: (w) => w.amount, cell: (w) => <span className="font-semibold">{brl(w.amount)}</span> },
     {
       id: 'risk',
       header: 'Risco',
@@ -313,6 +344,8 @@ function Queue() {
     {
       id: 'decision',
       header: 'Decisão',
+      // no CSV a coluna diz quem decidiu (vazia nos abertos); os botões ficam só na tela
+      label: 'Decidido por',
       pinned: true,
       csv: deciderText,
       cell: (w) =>
@@ -364,10 +397,10 @@ function Queue() {
               {num(waiting.length)} saques · <span className={waitingLate.length ? 'font-semibold text-danger' : ''}>{waitingLate.length} há +24 h</span>
             </>
           }
-          onClick={() => setFilter('pendente')}
-          active={filter === 'pendente'}
+          onClick={() => setFilter('abertos')}
+          active={filter === 'abertos'}
         />
-        <KpiCard label="Aprovado no período" icon={CheckCircle2} tone="success" value={brl(sum(approved))} hint={`${num(approved.length)} saques pagos`} onClick={() => setFilter('aprovado')} active={filter === 'aprovado'} />
+        <KpiCard label="Aprovado no período" icon={CheckCircle2} tone="success" value={brl(sum(approved))} hint={`${plural(approved.length, 'saque aprovado', 'saques aprovados')} (aprovar não paga o PIX)`} onClick={() => setFilter('aprovado')} active={filter === 'aprovado'} />
         <KpiCard label="Recusado ou expirado" icon={Ban} tone="danger" value={brl(sum(refused))} hint={`${num(refused.length)} saques`} onClick={() => setFilter('recusado')} active={filter === 'recusado'} />
         <KpiCard label="Cancelado pelo jogador" icon={Undo2} tone="neutral" value={brl(sum(cancelled))} hint="valor devolvido ao saldo" onClick={() => setFilter('cancelado')} active={filter === 'cancelado'} />
         <KpiCard
@@ -382,10 +415,10 @@ function Queue() {
       {waitingLate.length > 0 && (
         <Alert
           tone="warning"
-          title={`${waitingLate.length} saques estão em análise há mais de 24 horas`}
+          title={`${plural(waitingLate.length, 'saque está aberto', 'saques estão abertos')} há mais de 24 horas`}
           action={
-            <Button size="sm" onClick={() => setFilter('em_analise')}>
-              Ver em análise
+            <Button size="sm" onClick={() => setFilter('atrasados')}>
+              Ver os atrasados
             </Button>
           }
         >
@@ -412,9 +445,11 @@ function Queue() {
             onChange={setFilter}
             options={[
               { value: 'todos', label: 'Todos', count: counts.todos ?? 0 },
+              { value: 'abertos', label: 'Abertos', count: waiting.length, tone: 'warning' },
+              { value: 'atrasados', label: 'Abertos há +24 h', count: waitingLate.length, tone: 'danger' },
               { value: 'criado', label: 'Criados', count: counts.criado ?? 0 },
-              { value: 'pendente', label: 'Pendentes', count: counts.pendente ?? 0, tone: 'warning' },
-              { value: 'em_analise', label: 'Em análise (+24h)', count: counts.em_analise ?? 0, tone: 'danger' },
+              { value: 'pendente', label: 'Pendentes', count: counts.pendente ?? 0 },
+              { value: 'em_analise', label: 'Em análise', count: counts.em_analise ?? 0 },
               { value: 'aprovado', label: 'Aprovados', count: counts.aprovado ?? 0 },
               { value: 'recusado', label: 'Recusados', count: counts.recusado ?? 0 },
               { value: 'expirado', label: 'Expirados', count: counts.expirado ?? 0 },
@@ -461,6 +496,7 @@ function WithdrawalDrawer({
   const [revealing, setRevealing] = useState(false)
   if (!w) return null
   const isOpen = OPEN.includes(w.status)
+  const hold = isOpen ? knownPayoutHold(w.playerId) : null
   const revealed = revealedKey?.id === w.id ? revealedKey.pixKey : null
   const reveal = async () => {
     if (!can('usuarios.ver-dados')) {
@@ -506,6 +542,12 @@ function WithdrawalDrawer({
       }
     >
       <div className="space-y-6">
+        {/* demonstração: a conta bloqueada (ou de rede banida) já é conhecida; o servidor recusa a aprovação do mesmo jeito */}
+        {isOpen && hold && (
+          <Alert tone="danger" title="Aprovação bloqueada">
+            {hold} Recuse o saque se ele não for seguir.
+          </Alert>
+        )}
         <div className="rounded-xl bg-surface-2 p-4">
           <p className="text-xs text-fg-3">Valor solicitado</p>
           <p className="mt-1 font-display text-3xl font-bold text-fg">{brl(w.amount)}</p>
@@ -524,8 +566,13 @@ function WithdrawalDrawer({
                 label: 'Chave PIX',
                 value: (
                   <span className="flex items-center gap-2">
-                    <Mono>{revealed ?? maskPix(w)}</Mono>
-                    {revealed === null && (
+                    <Mono>{revealed !== null ? fmtPixKey(w.pixKeyType, revealed) : maskPix(w)}</Mono>
+                    {revealed === null && !can('usuarios.ver-dados') && (
+                      <span className="inline-flex items-center gap-1 text-xs text-fg-3" title="Seu cargo vê a chave mascarada (LGPD)">
+                        <Lock size={11} aria-hidden /> mascarada
+                      </span>
+                    )}
+                    {revealed === null && can('usuarios.ver-dados') && (
                       <button
                         type="button"
                         onClick={reveal}
@@ -621,7 +668,15 @@ function Rules() {
     quiet: isCeilingError,
   })
   const v = form.values
-  const autoOn = v.autoApproveMax > 0
+  // ligada pelo switch, mesmo com o campo vazio enquanto a pessoa digita (vazio vira 0 no campo de dinheiro, e
+  // "0 = desligada" escondia o campo e desligava o switch no meio da digitação)
+  const [autoTyping, setAutoTyping] = useState(false)
+  useEffect(() => {
+    // voltou ao salvo (descartar, salvar) com a automática desligada: o switch acompanha, a não ser que a pessoa
+    // esteja no campo (apagou o valor para digitar outro)
+    if (!form.dirty && v.autoApproveMax === 0 && document.activeElement?.id !== 'r-auto') setAutoTyping(false)
+  }, [form.dirty, v.autoApproveMax])
+  const autoOn = v.autoApproveMax > 0 || autoTyping
   const autoErr = autoApproveError(role, v.autoApproveMax, form.saved.autoApproveMax) ?? (form.error && isCeilingError(form.error) ? form.error.message : null)
   // sem decidir saques, só dá para desligar ou manter o valor salvo
   const canTurnOnAuto = canDecideWithdrawals(role)
@@ -695,7 +750,7 @@ function Rules() {
         >
           <Switch
             label="Aprovar automaticamente saques pequenos"
-            description={autoOn ? `Ligada até ${brl(v.autoApproveMax)}.` : 'Desligada: todo saque passa pela fila operacional.'}
+            description={autoOn ? (v.autoApproveMax > 0 ? `Ligada até ${brl(v.autoApproveMax)}.` : 'Informe o valor máximo abaixo.') : 'Desligada: todo saque passa pela fila operacional.'}
             checked={autoOn}
             disabled={!autoOn && !canTurnOnAuto}
             title={!autoOn && !canTurnOnAuto ? `O cargo ${role.name} não aprova saques e por isso não liga a aprovação automática.` : undefined}
@@ -703,6 +758,7 @@ function Rules() {
               // ao religar, volta ao valor salvo se houver; senão, o menor entre R$ 200,00, o máximo por saque e o teto do cargo
               const ceiling = role.approvalCeiling ?? Number.POSITIVE_INFINITY
               const start = form.saved.autoApproveMax > 0 ? form.saved.autoApproveMax : Math.min(200, v.maxPerRequest, ceiling)
+              setAutoTyping(on)
               form.set('autoApproveMax', on ? start : 0)
             }}
           />
@@ -710,12 +766,20 @@ function Rules() {
             <Field
               label="Máximo automático"
               htmlFor="r-auto"
-              error={autoErr ?? centsErr(v.autoApproveMax)}
+              error={autoErr ?? centsErr(v.autoApproveMax) ?? (v.autoApproveMax <= 0 ? 'Informe o valor máximo. Salvar com o campo vazio (ou zero) desliga a aprovação automática.' : null)}
               hint={`Recomendado: até R$ 200,00 enquanto o anti-fraude estiver em calibração.${
                 canTurnOnAuto && role.approvalCeiling !== null ? ` Não passa do teto do seu cargo (${brl(role.approvalCeiling)}).` : ''
               }`}
             >
-              <MoneyInput id="r-auto" value={v.autoApproveMax} invalid={!!autoErr} onValueChange={(n) => form.set('autoApproveMax', n)} />
+              <MoneyInput
+                id="r-auto"
+                value={v.autoApproveMax}
+                invalid={!!autoErr}
+                onValueChange={(n) => {
+                  setAutoTyping(true)
+                  form.set('autoApproveMax', n)
+                }}
+              />
             </Field>
           )}
           {!canTurnOnAuto && <p className="text-xs text-fg-3">Só quem aprova saques liga ou muda a aprovação automática. Desligar vale para qualquer pessoa que edita as regras.</p>}
@@ -752,7 +816,7 @@ function Rules() {
             <div className="mb-3 flex items-center justify-between gap-2">
               <p className="text-sm font-semibold text-fg">Resultado</p>
               <Badge tone={result.allowed ? (result.auto ? 'success' : 'info') : 'danger'} size="md">
-                {result.allowed ? (result.auto ? 'Pago automaticamente' : 'Vai para a fila') : 'Bloqueado'}
+                {result.allowed ? (result.auto ? 'Aprovado automaticamente' : 'Vai para a fila') : 'Bloqueado'}
               </Badge>
             </div>
             <ul className="space-y-2">

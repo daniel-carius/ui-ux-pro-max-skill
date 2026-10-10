@@ -1,3 +1,4 @@
+import { csvMoney } from '@/lib/csv-format'
 import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { ArrowDownToLine, ArrowUpFromLine, Copy, Dices, Eye, Trophy, Undo2, UserRound, X } from 'lucide-react'
@@ -227,7 +228,7 @@ export default function Transacoes() {
       header: 'Valor',
       align: 'right',
       sortValue: (t) => t.amount,
-      csv: (t) => t.amount,
+      csv: (t) => csvMoney(t.amount),
       cell: (t) => (
         <div className="leading-tight">
           <SignedAmount value={t.amount} />
@@ -235,8 +236,8 @@ export default function Transacoes() {
         </div>
       ),
     },
-    { id: 'balanceBefore', header: 'Saldo anterior', align: 'right', sortValue: (t) => t.balanceBefore, cell: (t) => <span className="text-fg-2">{brl(t.balanceBefore)}</span> },
-    { id: 'balanceAfter', header: 'Saldo atual', align: 'right', sortValue: (t) => t.balanceAfter, cell: (t) => <span className="font-medium text-fg">{brl(t.balanceAfter)}</span> },
+    { id: 'balanceBefore', money: true, header: 'Saldo anterior', align: 'right', sortValue: (t) => t.balanceBefore, cell: (t) => <span className="text-fg-2">{brl(t.balanceBefore)}</span> },
+    { id: 'balanceAfter', money: true, header: 'Saldo atual', align: 'right', sortValue: (t) => t.balanceAfter, cell: (t) => <span className="font-medium text-fg">{brl(t.balanceAfter)}</span> },
     {
       id: 'game',
       header: 'Jogo',

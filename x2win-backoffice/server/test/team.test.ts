@@ -515,6 +515,153 @@ describe('equipe: desativar, reativar, cargo e 2FA', () => {
   })
 })
 
+// r1 (rodada de testes ponta a ponta): "Esqueceu a senha? Peça a um administrador..." sem rota para isso
+describe('equipe: senha temporária para quem esqueceu a senha', () => {
+  let app: FastifyInstance
+  let sa: Awaited<ReturnType<typeof loginAs>>
+  let adm: Awaited<ReturnType<typeof loginAs>>
+  beforeAll(async () => {
+    app = await createTestApp()
+    sa = await loginAs(app, 'superadmin', { name: 'Dona Senhas' })
+    adm = await loginAs(app, 'administrador', { name: 'Admin Senhas' })
+  })
+  afterAll(async () => app.close())
+
+  it('gera senha forte mostrada uma vez, exige troca, encerra as sessões com o motivo e mantém o 2FA', async () => {
+    const target = await createUser(app, { roleId: 'suporte', name: 'Sara Esquecida', totp: true })
+    await app.db.query('update users set failed_logins = 3 where id = $1', [target.id])
+    const c = await sessionCookie(app, target.id)
+    const r = await api(app, 'POST', `/api/team/${target.id}/reset-password`, { cookie: adm.cookie })
+    expect(r.statusCode, r.body).toBe(200)
+    const body = r.json() as { temporaryPassword: string; sessionsEnded: number; member: { id: string; activeSessions: number } }
+    expect(passwordProblem(body.temporaryPassword, 10)).toBeNull()
+    expect(body).toMatchObject({ sessionsEnded: 1, member: { id: target.id, activeSessions: 0 } })
+    expect(r.headers['cache-control']).toBe('no-store')
+    const row = await userRow(app, target.id)
+    expect(row).toMatchObject({ must_change_password: true, totp_enabled: true })
+    // a sessão aberta cai, e quem tinha o cookie fica sabendo por quê
+    const me = await api(app, 'GET', '/api/auth/me', { cookie: c })
+    expect(me.statusCode).toBe(401)
+    expect(me.json().error).toMatchObject({ code: 'nao_autenticado', details: { reason: 'senha_redefinida' } })
+    expect((await api(app, 'GET', '/api/auth/session', { cookie: c })).json()).toEqual({ session: null, ended: 'senha_redefinida' })
+    // senha antiga não entra; a nova leva à troca obrigatória
+    expect((await login(app, target.email, target.password)).statusCode).toBe(401)
+    expect((await login(app, target.email, body.temporaryPassword)).json()).toEqual({ stage: 'password' })
+    const audit = await lastAudit(app)
+    expect(audit).toMatchObject({ action: 'editar', entity: 'Senha · Sara Esquecida', actor_id: adm.user.id })
+    expect(audit?.summary).toMatch(/Senha temporária gerada .*1 sessão encerrada.*Troca obrigatória/)
+    expect(audit?.summary).not.toContain(body.temporaryPassword)
+  })
+
+  it('exige equipe.editar; cargo administrativo ou com governança só com cargos.conceder; nunca para si mesmo', async () => {
+    const sup = await loginAs(app, 'suporte', { name: 'Suporte Sem Equipe' })
+    const alvo = await createUser(app, { roleId: 'marketing', name: 'Alvo Comum' })
+    expect((await api(app, 'POST', `/api/team/${alvo.id}/reset-password`, { cookie: sup.cookie })).statusCode).toBe(403)
+    for (const roleId of ['financeiro', 'superadmin', 'administrador']) {
+      const t = await createUser(app, { roleId })
+      const r = await api(app, 'POST', `/api/team/${t.id}/reset-password`, { cookie: adm.cookie })
+      expect(r.statusCode, `${roleId}: ${r.body}`).toBe(403)
+      expect((await userRow(app, t.id))?.must_change_password).toBe(false)
+      // r3: a recusa fala da ação pedida (gerar senha), não de "pôr pessoas no cargo"
+      if (roleId === 'financeiro') {
+        expect(r.json().error.message).toMatch(/^Só quem pode conceder cargos gera senha temporária para pessoas no cargo Financeiro/)
+        expect(r.json().error.message).not.toContain('põe pessoas')
+      }
+    }
+    const fin = await createUser(app, { roleId: 'financeiro' })
+    expect((await api(app, 'POST', `/api/team/${fin.id}/reset-password`, { cookie: sa.cookie })).statusCode).toBe(200)
+    expectSelf(await api(app, 'POST', `/api/team/${sa.user.id}/reset-password`, { cookie: sa.cookie }))
+  })
+
+  it('convidado e desligado: recusa com a orientação certa', async () => {
+    const inv = await createUser(app, { roleId: 'suporte', status: 'convidado' })
+    const off = await createUser(app, { roleId: 'suporte', status: 'desligado' })
+    const a = await api(app, 'POST', `/api/team/${inv.id}/reset-password`, { cookie: sa.cookie })
+    expect(a.statusCode).toBe(400)
+    expect(a.json().error.message).toMatch(/Reenvie o convite/)
+    const b = await api(app, 'POST', `/api/team/${off.id}/reset-password`, { cookie: sa.cookie })
+    expect(b.statusCode).toBe(400)
+    expect(b.json().error.message).toMatch(/Reative o acesso/)
+  })
+})
+
+function expectSelf(r: { statusCode: number; json: () => { error: { message: string } } }) {
+  expect(r.statusCode).toBe(400)
+  expect(r.json().error.message).toMatch(/Trocar senha/)
+}
+
+// r1: toda saída forçada aparecia como "Sua sessão expirou… depois de um tempo sem uso"
+describe('sessão encerrada: o motivo chega a quem tinha o cookie', () => {
+  let app: FastifyInstance
+  let sa: Awaited<ReturnType<typeof loginAs>>
+  beforeAll(async () => {
+    app = await createTestApp()
+    sa = await loginAs(app, 'superadmin', { name: 'Dona Motivos' })
+  })
+  afterAll(async () => app.close())
+
+  const reasonOf = async (cookie: string) => {
+    const s = await api(app, 'GET', '/api/auth/session', { cookie })
+    expect(s.statusCode).toBe(200)
+    return (s.json() as { session: unknown; ended?: string }).ended
+  }
+
+  it('desativado, 2FA redefinido, 2FA exigido pelo cargo, inatividade e saída', async () => {
+    const kiko = await createUser(app, { roleId: 'suporte', name: 'Kiko Motivo' })
+    const ck = await sessionCookie(app, kiko.id)
+    await api(app, 'POST', `/api/team/${kiko.id}/deactivate`, { cookie: sa.cookie })
+    expect(await reasonOf(ck)).toBe('desativado')
+
+    const fabio = await createUser(app, { roleId: 'suporte', name: 'Fabio Motivo', totp: true })
+    const cf = await sessionCookie(app, fabio.id)
+    await api(app, 'POST', `/api/team/${fabio.id}/reset-2fa`, { cookie: sa.cookie })
+    expect(await reasonOf(cf)).toBe('2fa_redefinido')
+
+    const sara = await createUser(app, { roleId: 'marketing', name: 'Sara Motivo' })
+    const cs = await sessionCookie(app, sara.id)
+    await app.db.query(`update roles set require_2fa = true where id = 'marketing'`)
+    const kicked = await api(app, 'GET', '/api/kv/cargos.lista', { cookie: cs })
+    expect(kicked.statusCode).toBe(401)
+    expect(kicked.json().error.details).toEqual({ reason: '2fa_exigido' })
+    expect(await reasonOf(cs)).toBe('2fa_exigido')
+    await app.db.query(`update roles set require_2fa = false where id = 'marketing'`)
+
+    // r2: "2FA de todos" com o cargo sem exigência: o motivo diz que foi o painel, não o cargo
+    const bruno = await createUser(app, { roleId: 'marketing', name: 'Bruno Motivo' })
+    const cbr = await sessionCookie(app, bruno.id)
+    await app.db.query('update panel_security set enforce_2fa_all = true where id = 1')
+    try {
+      const all = await api(app, 'GET', '/api/kv/cargos.lista', { cookie: cbr })
+      expect(all.statusCode).toBe(401)
+      expect(all.json().error.details).toEqual({ reason: '2fa_exigido_todos' })
+      expect(await reasonOf(cbr)).toBe('2fa_exigido_todos')
+    } finally {
+      await app.db.query('update panel_security set enforce_2fa_all = false where id = 1')
+    }
+
+    const ivo = await createUser(app, { roleId: 'suporte', name: 'Ivo Motivo' })
+    const ci = await sessionCookie(app, ivo.id)
+    await app.db.query(`update sessions set last_seen_at = now() - interval '5 hours' where id = $1`, [sha256(ci.split('=')[1])])
+    expect(await reasonOf(ci)).toBe('inatividade')
+
+    const bia = await createUser(app, { roleId: 'suporte', name: 'Bia Motivo' })
+    const cb = await sessionCookie(app, bia.id)
+    await api(app, 'POST', '/api/auth/logout', { cookie: cb })
+    expect(await reasonOf(cb)).toBe('saida')
+  })
+
+  it('sem cookie: 200 com session null e sem motivo (nenhum erro na tela de entrada); com sessão: o corpo de /me', async () => {
+    const none = await api(app, 'GET', '/api/auth/session')
+    expect(none.statusCode).toBe(200)
+    expect(none.json()).toEqual({ session: null })
+    const unknown = await api(app, 'GET', '/api/auth/session', { cookie: 'x2w_sid=nao-existe' })
+    expect(unknown.json()).toEqual({ session: null })
+    const me = await api(app, 'GET', '/api/auth/me', { cookie: sa.cookie })
+    const s = await api(app, 'GET', '/api/auth/session', { cookie: sa.cookie })
+    expect(s.json()).toEqual({ session: me.json() })
+  })
+})
+
 describe('equipe: nunca sem Superadmin ativo', () => {
   let app: FastifyInstance
   beforeAll(async () => {
@@ -986,6 +1133,10 @@ describe('equipe: nome exibido único e sem caracteres enganosos', () => {
     const derived = await api(app, 'POST', '/api/team/invite', { cookie: daniel.cookie, body: { email: 'joao.silva@outro.bet', roleId: 'suporte' } })
     expect(derived.statusCode).toBe(409)
     expect(derived.json().error.code).toBe('nome_em_uso')
+    // r3: o campo Nome está vazio, então a mensagem cita o nome montado a partir do e-mail
+    expect(derived.json().error.message).toContain('"Joao Silva", montado a partir do e-mail')
+    expect(derived.json().error.details).toMatchObject({ field: 'name' })
+    expect(typed.json().error.message).not.toContain('montado a partir do e-mail')
     const zw = await api(app, 'POST', '/api/team/invite', { cookie: daniel.cookie, body: { email: 'zw@x2win.bet', roleId: 'suporte', name: 'Jo​ão' } })
     expect(zw.statusCode).toBe(400)
     const junk = await api(app, 'POST', '/api/team/invite', { cookie: daniel.cookie, body: { email: '!x@x2win.bet', roleId: 'suporte' } })

@@ -45,14 +45,72 @@ type RoleLike = Pick<Role, 'name' | 'permissions' | 'approvalCeiling'>
  * integração com gateway). Com destino ativo, o aviso fica na fila de envio; sem nenhum, o pagamento é manual.
  * `queued`: avisos saque.pago enfileirados (um por destino ativo). Mesmo texto no servidor e na demonstração.
  */
-export function approvalMessage(amount: number, queued: number): string {
+export function approvalMessage(amount: number, queued: number, templateOff = false): string {
   const head = `Saque de ${brl(amount)} aprovado.`
   if (queued > 0) return `${head} Aviso de pagamento na fila para ${queued} ${queued === 1 ? 'sistema' : 'sistemas'}.`
+  if (templateOff) return `${head} O template "Saque pago" está desativado em Campanhas › Templates: nenhum aviso saiu, e o pagamento precisa ser feito pelo financeiro no gateway.`
   return `${head} Nenhum destino "saque.pago" ativo: o pagamento precisa ser feito pelo financeiro no gateway.`
+}
+
+/**
+ * Resultado da recusa, sem prometer o que não aconteceu: o painel registra a decisão e põe na fila o aviso
+ * saque.rejeitado; devolver o valor ao saldo é com a plataforma de jogo (que recebe o aviso), e não há e-mail.
+ * `queued`: avisos saque.rejeitado enfileirados (um por destino ativo). Mesmo texto no servidor e na demonstração.
+ */
+export function rejectionMessage(amount: number, queued: number, templateOff = false): string {
+  const head = `Saque de ${brl(amount)} recusado.`
+  if (queued > 0) {
+    return `${head} Aviso "saque.rejeitado" na fila para ${queued} ${queued === 1 ? 'sistema' : 'sistemas'}: a devolução ao saldo do jogador é feita pela plataforma de jogo.`
+  }
+  if (templateOff) {
+    return `${head} O template "Saque rejeitado" está desativado em Campanhas › Templates: nenhum aviso saiu; confira na plataforma de jogo a devolução do valor ao saldo do jogador.`
+  }
+  return `${head} Nenhum destino "saque.rejeitado" ativo: confira na plataforma de jogo a devolução do valor ao saldo do jogador.`
 }
 
 export function canDecideWithdrawals(role: RoleLike) {
   return role.permissions.includes('saques.aprovar') && role.approvalCeiling !== 0
+}
+
+// ---------- Conferências da aprovação (servidor e demonstração, mesmo texto) ----------
+
+/** Janela da segregação de funções: quem lançou crédito manual ou estorno para o jogador não aprova o saque dele. */
+export const SEGREGATION_WINDOW_MS = 30 * 86_400_000
+export const SEGREGATION_MESSAGE = 'Você lançou crédito manual para este jogador nos últimos 30 dias; outra pessoa precisa aprovar.'
+
+/**
+ * Motivo para segurar a aprovação do saque, ou null: conta de rede banida pelo anti-fraude (primeiro: só sai do
+ * bloqueio desfazendo o banimento) ou conta bloqueada na ficha, por qualquer motivo (com o motivo do bloqueio, quando
+ * conhecido; não é atribuída ao anti-fraude). Jogador autoexcluído ou em pausa continua recebendo o saldo.
+ */
+export function payoutHoldMessage(h: { network?: string | null; blocked: boolean; blockReason?: string | null }): string | null {
+  if (h.network) return `Conta de uma rede banida pelo anti-fraude (${h.network}). Para liberar, desfaça o banimento da rede em Anti-fraude › Bloqueios.`
+  if (h.blocked) {
+    const reason = h.blockReason?.trim().slice(0, 300)
+    return `Conta bloqueada${reason ? ` (motivo: ${reason})` : ''}. Para liberar, desbloqueie a conta na ficha do jogador, em Usuários › Status e saldo.`
+  }
+  return null
+}
+
+export type OutOfRules =
+  | { message: string; details: { rule: 'maxPerRequest'; limit: number; amount: number } }
+  | { message: string; details: { rule: 'dailyLimit'; limit: number; count: number } }
+
+/** Regras de saque em vigor na aprovação (409 fora_das_regras): valor acima do máximo ou limite diário atingido. */
+export function outOfRulesProblem(amount: number, rules: Pick<WithdrawalRules, 'maxPerRequest' | 'dailyLimit'>, approvedLast24h: number): OutOfRules | null {
+  if (amount > rules.maxPerRequest) {
+    return {
+      message: `Valor acima do máximo por saque das regras em vigor (${brl(rules.maxPerRequest)}).`,
+      details: { rule: 'maxPerRequest', limit: rules.maxPerRequest, amount },
+    }
+  }
+  if (approvedLast24h >= rules.dailyLimit) {
+    return {
+      message: `O jogador já tem ${approvedLast24h} ${approvedLast24h === 1 ? 'saque aprovado' : 'saques aprovados'} nas últimas 24 horas (limite diário: ${rules.dailyLimit}).`,
+      details: { rule: 'dailyLimit', limit: rules.dailyLimit, count: approvedLast24h },
+    }
+  }
+  return null
 }
 
 /** O cargo pode aprovar este valor? */

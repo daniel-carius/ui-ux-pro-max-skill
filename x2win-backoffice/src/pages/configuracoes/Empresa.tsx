@@ -46,6 +46,18 @@ export default function Empresa() {
   const form = useSettingsForm<CompanyState>(COMPANY_KEY, DEFAULT_COMPANY, {
     entity: ENTITY,
     successMessage: 'Dados da empresa salvos',
+    // nomes que a auditoria mostra (a chave técnica "tradeName" não diz nada a quem lê)
+    fieldLabels: {
+      legalName: 'Razão social',
+      tradeName: 'Nome fantasia',
+      cnpj: 'CNPJ',
+      license: 'Autorização SPA/MF',
+      licenseValidUntil: 'Validade da autorização',
+      address: 'Endereço',
+      email: 'E-mail',
+      phone: 'Telefone',
+      description: 'Descrição',
+    },
     validate: firstCompanyError,
     // modo API: o servidor grava a linha "Empresa e licença" na auditoria; traz para a "Última alteração"
     onSaved: () => {
@@ -58,6 +70,7 @@ export default function Empresa() {
   const savedCnpj = validateCnpj(form.saved.cnpj)
   const lic = licenseStatus(v.licenseValidUntil)
   const pending = Object.keys(errors).length
+  const cnpjEmpty = !v.cnpj.trim()
   const [audit] = useAudit()
   // gravada pelo servidor ao salvar a chave (linhas antigas: "Dados · Empresa e licença"); relatos do painel não contam
   const last = audit.find((a) => (a.entity === ENTITY || a.entity === `Dados · ${ENTITY}`) && !isPanelReported(a))
@@ -70,9 +83,17 @@ export default function Empresa() {
         <KpiCard
           label="CNPJ"
           icon={cnpj.ok ? BadgeCheck : XCircle}
-          tone={cnpj.ok ? 'success' : 'danger'}
+          tone={cnpj.ok ? 'success' : cnpjEmpty ? 'warning' : 'danger'}
           value={<span className="font-mono text-[22px]">{formatCnpj(v.cnpj) || '—'}</span>}
-          hint={cnpj.ok ? (cnpj.alphanumeric ? 'Alfanumérico · dígitos conferidos' : 'Dígitos verificadores conferidos') : 'Dígitos verificadores não conferem'}
+          hint={
+            cnpj.ok
+              ? cnpj.alphanumeric
+                ? 'Alfanumérico · dígitos conferidos'
+                : 'Dígitos verificadores conferidos'
+              : cnpjEmpty
+                ? 'CNPJ não cadastrado'
+                : 'Dígitos verificadores não conferem'
+          }
         />
         <KpiCard
           label="Autorização SPA/MF"
@@ -97,11 +118,17 @@ export default function Empresa() {
         />
       </section>
 
-      {!savedCnpj.ok && (
-        <Alert tone="danger" title="O CNPJ cadastrado não passa na conferência dos dígitos" className="mb-5">
-          O número {formatCnpj(form.saved.cnpj)} aparece hoje no rodapé e nos textos legais. Confira no cartão CNPJ da Receita Federal e corrija abaixo: nada é salvo
-          enquanto o CNPJ estiver inválido.
+      {!form.saved.cnpj.trim() ? (
+        <Alert tone="warning" title="CNPJ não cadastrado" className="mb-5">
+          Informe a razão social e o CNPJ abaixo: eles aparecem no rodapé do site, nos textos legais e nas faturas.
         </Alert>
+      ) : (
+        !savedCnpj.ok && (
+          <Alert tone="danger" title="O CNPJ cadastrado não passa na conferência dos dígitos" className="mb-5">
+            O número {formatCnpj(form.saved.cnpj)} aparece hoje no rodapé e nos textos legais. Confira no cartão CNPJ da Receita Federal e corrija abaixo: nada é
+            salvo enquanto o CNPJ estiver inválido.
+          </Alert>
+        )
       )}
 
       <FormFieldset readOnly={form.readOnly}>

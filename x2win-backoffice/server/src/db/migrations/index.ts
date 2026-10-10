@@ -286,10 +286,27 @@ alter table webhook_outbox add constraint webhook_outbox_destination_id_fkey
   foreign key (destination_id) references webhook_destinations(id) on delete set null;
 `
 
+const m004 = `
+-- Motivo do fim da sessão (shared/api.ts › SessionEndReason): o painel diz à pessoa por que saiu
+-- ("seu acesso foi desativado", "sua senha foi trocada em outra sessão") em vez de sempre "sessão expirou".
+alter table sessions add column revoked_reason text;
+`
+
+const m005 = `
+-- Cada tentativa de webhook guarda o que o destino recebeu: X-X2W-Delivery (o id da entrega, o mesmo em todas as
+-- tentativas da fila: quem recebe deduplica por ele), o número da tentativa e o X-X2W-Timestamp assinado. Antes a
+-- tela mostrava o id da execução como X-X2W-Delivery e "Tentativas 1" fixo. Linhas antigas ficam sem os três.
+alter table webhook_executions add column delivery_id text;
+alter table webhook_executions add column attempt int;
+alter table webhook_executions add column signed_at bigint;
+`
+
 export const MIGRATIONS: Migration[] = [
   { id: '001_init', sql: m001 },
   { id: '002_audit_append_only', sql: m002 },
   { id: '003_ops_integrity', sql: m003 },
+  { id: '004_session_end_reason', sql: m004 },
+  { id: '005_webhook_delivery_ids', sql: m005 },
 ]
 
 /**

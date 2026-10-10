@@ -216,7 +216,7 @@ export default function Indicacao() {
                           <Package size={17} aria-hidden />
                           <span className="sr-only">Baú {i + 1}</span>
                         </span>
-                        <NumberInput value={c.referrals} min={1} suffix="indic." invalid={!!err && err.includes('anterior')} onValueChange={(n) => setChest(c.id, { referrals: Math.round(n) })} />
+                        <NumberInput value={c.referrals} min={1} suffix="indic." ariaLabel={`Indicações para abrir o baú ${i + 1}`} invalid={!!err && err.includes('anterior')} onValueChange={(n) => setChest(c.id, { referrals: Math.round(n) })} />
                         <IconButton
                           icon={Trash2}
                           label={`Remover baú ${i + 1}`}
@@ -236,9 +236,9 @@ export default function Indicacao() {
                           <div className="flex items-center gap-2">
                             <div className="min-w-0 flex-1">
                               {c.kind === 'bonus_brl' || c.kind === 'dinheiro' ? (
-                                <MoneyInput value={c.value} onValueChange={(n) => setChest(c.id, { value: n })} invalid={!!err && !(c.value > 0)} />
+                                <MoneyInput value={c.value} ariaLabel={`Prêmio do baú ${i + 1}`} onValueChange={(n) => setChest(c.id, { value: n })} invalid={!!err && !(c.value > 0)} />
                               ) : (
-                                <NumberInput value={c.value} min={1} suffix={c.kind === 'moedas' ? coin.symbol : 'giros'} onValueChange={(n) => setChest(c.id, { value: Math.round(n) })} invalid={!!err && !(c.value > 0)} />
+                                <NumberInput value={c.value} min={1} suffix={c.kind === 'moedas' ? coin.symbol : 'giros'} ariaLabel={`Prêmio do baú ${i + 1}`} onValueChange={(n) => setChest(c.id, { value: Math.round(n) })} invalid={!!err && !(c.value > 0)} />
                               )}
                             </div>
                             <span className="hidden w-20 shrink-0 text-right text-xs text-fg-3 tnum lg:block">≈ {brl(chestCost(c, coin))}</span>
@@ -484,7 +484,7 @@ function ReferrersTable({ referrers, cfg, coin, on }: { referrers: ReferrerSumma
         )
       },
     },
-    { id: 'cost', header: 'Custo', align: 'right', sortValue: (r) => r.cost, csv: (r) => r.cost.toFixed(2), cell: (r) => <span className="tnum">{brl(r.cost)}</span> },
+    { id: 'cost', money: true, header: 'Custo', align: 'right', sortValue: (r) => r.cost, csv: (r) => r.cost.toFixed(2), cell: (r) => <span className="tnum">{brl(r.cost)}</span> },
   ]
   return (
     <section aria-label="Quem mais indica" className="space-y-3">

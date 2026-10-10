@@ -20,6 +20,7 @@
 //  - endereço canônico do SEO não for https:// sem parâmetros nem âncora;
 //  - versão nova (ou alterada) dos Termos ou da Política de jogo responsável não
 //    trouxer o aviso de maioridade (18) e a menção a jogo responsável (Lei 14.790/2023).
+import { svgProblem } from '@shared/svg'
 import { Errors } from '../../errors'
 import { hasOwn, isPlainObject, MISSING, type JsonObject, type Maybe } from './json'
 import type { KvValidator } from './validate-util'
@@ -66,122 +67,10 @@ export function linkError(raw: string, opts: { mailto?: boolean } = {}): string 
 
 // ---------- imagens ----------
 
+export { svgProblem }
 const RASTER_DATA_URL = /^data:image\/(?:png|jpeg|jpg|webp|gif|avif|x-icon|vnd\.microsoft\.icon);base64,[A-Za-z0-9+/]*={0,2}$/i
 const SVG_DATA_URL = /^data:image\/svg\+xml((?:;[a-z0-9-]+=[a-z0-9-]+)*)(;base64)?,([\s\S]*)$/i
-const IMAGE_HINT = 'Envie a imagem pelo painel (PNG, JPG, WEBP, GIF ou SVG sem scripts).'
-
-/** Elementos aceitos num SVG estático (desenho, gradiente, texto, recorte, filtro sem imagem). */
-const SVG_ELEMENTS = new Set(
-  [
-    'svg',
-    'g',
-    'defs',
-    'title',
-    'desc',
-    'metadata',
-    'linearGradient',
-    'radialGradient',
-    'stop',
-    'rect',
-    'circle',
-    'ellipse',
-    'line',
-    'polyline',
-    'polygon',
-    'path',
-    'text',
-    'tspan',
-    'textPath',
-    'clipPath',
-    'mask',
-    'pattern',
-    'symbol',
-    'use',
-    'marker',
-    'filter',
-    'feGaussianBlur',
-    'feOffset',
-    'feBlend',
-    'feColorMatrix',
-    'feComponentTransfer',
-    'feFuncR',
-    'feFuncG',
-    'feFuncB',
-    'feFuncA',
-    'feMerge',
-    'feMergeNode',
-    'feFlood',
-    'feComposite',
-    'feDropShadow',
-    'feMorphology',
-  ].map((e) => e.toLowerCase()),
-)
-
-const XML_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
-
-/** Decodifica as entidades XML de um atributo; entidade desconhecida → null. */
-function decodeXmlEntities(v: string): string | null {
-  let bad = false
-  const out = v.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);?/gi, (_m, e: string) => {
-    if (e[0] === '#') {
-      const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)
-      if (!Number.isFinite(n) || n > 0x10ffff) {
-        bad = true
-        return ''
-      }
-      return String.fromCodePoint(n)
-    }
-    const named = hasOwn(XML_ENTITIES, e) ? XML_ENTITIES[e] : undefined
-    if (named === undefined) bad = true
-    return named ?? ''
-  })
-  return bad ? null : out
-}
-
-/** Problema de um valor de atributo do SVG (já decodificado), ou null. */
-function svgAttrValueProblem(value: string): string | null {
-  const compact = value.replace(/[\s\u0000-\u001F\u007F]+/g, '').toLowerCase()
-  if (/(javascript|vbscript|data|livescript):/.test(compact)) return 'endereço ativo (javascript:/data:) no SVG'
-  if (compact.includes('@import') || compact.includes('expression(')) return 'CSS ativo no SVG'
-  for (const m of compact.matchAll(/url\(([^)]*)\)?/g)) {
-    const inner = m[1].replace(/^['"]/, '')
-    if (!m[0].endsWith(')') || !inner.startsWith('#')) return 'url() externo no SVG'
-  }
-  return null
-}
-
-/** SVG estático (sem nada que execute ou carregue algo de fora)? Devolve o problema ou null. */
-export function svgProblem(source: string): string | null {
-  const s = source
-    .replace(/^﻿/, '')
-    .replace(/^\s*<\?xml\s[^>]*\?>/i, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-  if (/<[!?]/.test(s)) return 'DOCTYPE, entidades, CDATA e instruções não são aceitos no SVG'
-  if (!/^\s*<svg[\s>/]/i.test(s)) return 'o arquivo não é um SVG'
-  const tag = /<\/?([A-Za-z][\w.:-]*)((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*\/?>/g
-  let tags = 0
-  for (const m of s.matchAll(tag)) {
-    tags++
-    const name = m[1]
-    if (!SVG_ELEMENTS.has(name.toLowerCase())) return `elemento <${name}> não é aceito no SVG`
-    for (const a of m[2].matchAll(/([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
-      const attr = a[1].toLowerCase()
-      const value = decodeXmlEntities(a[2] ?? a[3] ?? '')
-      if (value === null) return 'entidade desconhecida no SVG'
-      if (attr.startsWith('on')) return `atributo de evento (${a[1]}) no SVG`
-      if (attr === 'href' || attr.endsWith(':href')) {
-        if (!/^#[\w.:-]*$/.test(value.trim())) return 'link externo (href) no SVG'
-        continue
-      }
-      if (attr === 'xmlns' || attr.startsWith('xmlns:')) continue
-      const p = svgAttrValueProblem(value)
-      if (p) return p
-    }
-  }
-  // todo "<" precisa ser o início de uma marcação reconhecida acima
-  if ((s.match(/</g) ?? []).length !== tags) return 'marcação inválida no SVG'
-  return null
-}
+const IMAGE_HINT = 'Use PNG, JPG, WEBP, GIF ou um SVG sem scripts.'
 
 /** Imagem enviada pelo painel (data URL), ou a mensagem do problema. Vazio/null = sem imagem. */
 export function imageError(v: string): string | null {
@@ -238,6 +127,8 @@ interface Walk {
 }
 
 const bad = (w: Walk, message: string) => Errors.invalid(`${w.path.join('.') || 'valor'}: ${message}`, { path: w.path.join('.'), field: w.field })
+/** Imagem recusada: a mensagem já diz o que houve ("Imagem SVG recusada: ..."); o caminho do campo vai só em details. */
+const badImage = (w: Walk, message: string) => Errors.invalid(message, { path: w.path.join('.'), field: w.field })
 
 function checkText(v: string, w: Walk) {
   if (v.length > w.max) throw bad(w, `texto longo demais (máximo ${w.max} caracteres).`)
@@ -257,7 +148,7 @@ function checkLeaf(v: string, w: Walk) {
   }
   if (isImageField(w.field)) {
     const e = imageError(v)
-    if (e) throw bad(w, e)
+    if (e) throw badImage(w, e)
     return
   }
   if (isLinkField(w.field)) {
@@ -340,12 +231,37 @@ function checkFooter(v: unknown) {
       if (e) throw Errors.invalid(`Rodapé (${f}): ${e}`, { field: f })
     }
   }
+  // canais de contato: mesma regra do painel (data/personalizacao2-config.ts › contactError). Antes só o painel
+  // conferia, e o site público receberia "javascript:alert(1)" no WhatsApp gravado direto pela API.
+  const onlyDigits = (x: string) => x.replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '')
+  for (const f of ['phone', 'whatsapp'] as const) {
+    const raw = v[f]
+    if (typeof raw !== 'string' || !raw.trim()) continue
+    const t = raw.trim()
+    const d = onlyDigits(t)
+    if (!/^[\d\s()+.-]+$/.test(t) || d.length < 10 || d.length > 11) {
+      throw Errors.invalid(`Rodapé (${f}): use DDD + número (10 ou 11 dígitos).`, { field: f })
+    }
+    if (f === 'whatsapp' && d.length !== 11) throw Errors.invalid('Rodapé (whatsapp): WhatsApp precisa ser celular (11 dígitos com DDD).', { field: f })
+  }
+  const em = v.email
+  if (typeof em === 'string' && em.trim() && !EMAIL.test(em.trim())) {
+    throw Errors.invalid('Rodapé (email): e-mail inválido.', { field: 'email' })
+  }
   const tg = v.telegram
   if (typeof tg === 'string' && tg.trim()) {
     const t = tg.trim()
     if (!/^@[A-Za-z0-9_]{5,32}$/.test(t) && !/^https:\/\/(t\.me|telegram\.me)\/[A-Za-z0-9_+]{3,}\/?$/i.test(t)) {
       throw Errors.invalid('Rodapé (telegram): use @usuario (5 a 32 letras) ou https://t.me/usuario.', { field: 'telegram' })
     }
+  }
+  // texto da licença que termina num separador ("… Ministério da Fazenda · "): o site mostraria a frase sem o número
+  // da autorização (mesma regra do painel, footerErrors)
+  const lic = typeof v.licenseText === 'string' ? v.licenseText.trim() : ''
+  if (/[·•|:;,–—-]$/.test(lic)) {
+    throw Errors.invalid(`Rodapé (licenseText): o texto da licença termina em "${lic.slice(-1)}" sem nada depois. Complete com o número da autorização.`, {
+      field: 'licenseText',
+    })
   }
 }
 
@@ -482,10 +398,12 @@ function checkLegal(v: unknown, stored: Maybe<unknown>) {
 }
 
 /** Validador: regras gerais do conteúdo público + regra da chave. */
-function content(extra?: (v: unknown, stored: Maybe<unknown>) => void): KvValidator {
+function content(extra?: (v: unknown, stored: Maybe<unknown>) => void, opts: { extraFirst?: boolean } = {}): KvValidator {
   return ({ next, stored }) => {
+    // regra da chave antes das gerais quando ela tem a mensagem certa (redes sociais: um caminho interno nunca vale)
+    if (opts.extraFirst) extra?.(next, stored)
     walkAll(next)
-    extra?.(next, stored)
+    if (!opts.extraFirst) extra?.(next, stored)
     return { value: next }
   }
 }
@@ -516,7 +434,7 @@ export const CONTENT_VALIDATORS: Record<string, KvValidator> = {
   'personalizacao.menus': content((v) => checkMenus(v)),
   'personalizacao.carrosseis': content(),
   'personalizacao.rodape': content((v) => checkFooter(v)),
-  'personalizacao.redes-sociais': content((v) => checkSocial(v)),
+  'personalizacao.redes-sociais': content((v) => checkSocial(v), { extraFirst: true }),
   'personalizacao.seo': content((v) => checkSeo(v)),
   'campanhas.popups-inbox': content(),
   'campanhas.popups-inbox.popups': content((v) => checkPopups(v)),

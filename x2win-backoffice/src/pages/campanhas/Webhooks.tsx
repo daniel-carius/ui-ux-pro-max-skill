@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
   Activity,
@@ -51,12 +51,14 @@ import {
   toast,
   type Column,
 } from '@/components/ui'
-import type { WebhookTestResponse } from '@shared/api'
+import { WEBHOOK_MAX_ATTEMPTS, type WebhookTestResponse } from '@shared/api'
 import { cn } from '@/lib/cn'
 import { ApiError, api, isApiMode, isVersionConflict } from '@/lib/api'
-import { dateTime, maskSecret, num, pct, relative } from '@/lib/format'
+import { dateTime, maskSecret, num, pct, plural, relative } from '@/lib/format'
 import { uid } from '@/lib/random'
-import { dbSetAndWait, dbSetAndWaitResult, patchCache, refreshKey } from '@/lib/store'
+import { dbSetAndWait, dbSetAndWaitResult, patchCache, refreshKey, useDb } from '@/lib/store'
+import { TEMPLATE_KEY, seedTemplates } from '@/data/campanhas-templates'
+import type { WebhookTemplate } from '@/domain/campanhas-templates'
 import { useWebhookDestinations, useWebhookExecutions } from '@/data/hooks'
 import { audit, usePageAccess } from '@/domain/session'
 import {
@@ -71,14 +73,20 @@ import {
   type WebhookExecution,
 } from '@/domain/webhooks'
 import {
+  attemptLabel,
   deliveryStats,
+  destinationReceives,
   exampleSignature,
   findTokenSegments,
   generateDemoSecret,
   hasTokenInUrl,
   hostOf,
+  isDemoDestination,
+  isDemoExecution,
   isDemoWebhookHost,
+  isRealDelivery,
   lastExecutionFor,
+  latestAttempts,
   maskToken,
   maskUrlTokens,
   MIN_SECRET_LENGTH,
@@ -96,6 +104,9 @@ const API = isApiMode()
 /** Cabeçalho da assinatura e tempo limite de resposta (no modo API, os do servidor). */
 const SIGNATURE_HEADER = 'X-X2W-Signature'
 const TIMEOUT_S = API ? 5 : 10
+
+/** Motivo de "Testar" desligado num destino de demonstração (o servidor recusa com 409 destino_demonstracao). */
+const DEMO_TEST_REFUSED = 'Destino de demonstração (host de terceiro): o servidor não envia testes nem eventos para ele. Edite o endereço para um sistema da operação.'
 
 /** Execução como o servidor devolve no teste (com o motivo da falha, quando houver). */
 type ServerExecution = WebhookExecution & { test?: boolean; error?: string }
@@ -165,6 +176,14 @@ function formSecretError(f: FormState) {
   return webhookSecretError(f.secret, { rejectDemo: API })
 }
 
+/**
+ * Endereço na auditoria: só o host. A auditoria é lida por quem tem auditoria.ver, e a máscara da tela
+ * (4 primeiros + 2 últimos caracteres de cada token) deixava pedaços do token no registro.
+ */
+function auditUrl(url: string) {
+  return hostOf(url)
+}
+
 /** Endereço de demonstração em destino novo ou endereço trocado (modo API): o servidor recusa. */
 function demoHostError(f: FormState, url: string) {
   if (!API || !isDemoWebhookHost(url)) return null
@@ -184,9 +203,19 @@ export default function Webhooks() {
   const [saving, setSaving] = useState(false)
 
   const since30 = Date.now() - 30 * 86_400_000
-  const stats = useMemo(() => deliveryStats(execs.items, since30), [execs.items, since30])
-  const activeCount = dests.items.filter((d) => d.active).length
-  const coveredEvents = EVENTS.filter((e) => dests.items.some((d) => d.event === e && d.active)).length
+  // modo API: registros semeados para destinos de demonstração não são entregas (o servidor nunca envia para eles)
+  const shownExecs = useMemo(() => execs.items.filter((e) => !isDemoExecution(e, API)), [execs.items])
+  // entregas de verdade: sem testes e sem registros de demonstração (a mesma conta de Estatísticas)
+  const stats = useMemo(() => deliveryStats(shownExecs.filter((e) => isRealDelivery(e, API)), since30), [shownExecs, since30])
+  // template do evento desligado (Campanhas › Templates): o evento acontece, mas nenhum aviso sai (mesma regra do servidor)
+  const [templates] = useDb<WebhookTemplate[]>(TEMPLATE_KEY, seedTemplates)
+  const offEvents = new Set(templates.filter((t) => t.active === false).map((t) => t.event))
+  // modo API: destino de demonstração (host de terceiro) nunca recebe evento real; não conta como ativo. Nem destino
+  // de evento com o template desligado
+  const receives = (d: (typeof dests.items)[number]) => destinationReceives(d, API) && !offEvents.has(d.event)
+  const activeCount = dests.items.filter(receives).length
+  const demoCount = dests.items.filter((d) => isDemoDestination(d, API)).length
+  const coveredEvents = EVENTS.filter((e) => dests.items.some((d) => d.event === e && receives(d))).length
   const tokenDests = dests.items.filter((d) => hasTokenInUrl(d.url))
   const lockedTitle = !canEdit ? 'Seu cargo pode ver, mas não editar webhooks' : undefined
 
@@ -244,7 +273,7 @@ export default function Webhooks() {
       audit(
         'editar',
         `Webhook ${label}`,
-        `${prev && prev.url !== url ? `Endereço trocado para ${maskUrlTokens(url)}` : 'Destino atualizado'}${secret ? ' · segredo de assinatura novo' : ''}`,
+        `${prev && prev.url !== url ? `Endereço trocado para ${auditUrl(url)}` : 'Destino atualizado'}${secret ? ' · segredo de assinatura novo' : ''}`,
       )
       toast.success('Destino atualizado', { description: secret ? 'Atualize o segredo no sistema que recebe.' : undefined })
       setForm(null)
@@ -253,7 +282,7 @@ export default function Webhooks() {
       const secret = newSigningSecret()
       const d: WebhookDestination = { id: uid('wh'), event: form.event, url, active: form.active, secret, createdAt: new Date().toISOString() }
       if (!(await saveDestinations((list) => [...list, d]))) return
-      audit('criar', `Webhook ${label}`, `Destino ${maskUrlTokens(url)} criado${form.active ? '' : ' (inativo)'}`)
+      audit('criar', `Webhook ${label}`, `Destino ${auditUrl(url)} criado${form.active ? '' : ' (inativo)'}`)
       toast.success('Destino criado', { description: 'Copie o segredo de assinatura para o sistema que recebe.' })
       setForm(null)
       setNewSecret({ label, secret })
@@ -274,7 +303,7 @@ export default function Webhooks() {
   const toggle = async (d: WebhookDestination, on: boolean) => {
     if (!(await saveDestinations((list) => list.map((x) => (x.id === d.id ? { ...x, active: on } : x))))) return
     const othersOn = dests.items.some((x) => x.id !== d.id && x.event === d.event && x.active)
-    audit(on ? 'ligar' : 'desligar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Destino ${maskUrlTokens(d.url)} ${on ? 'ativado' : 'desativado'}`)
+    audit(on ? 'ligar' : 'desligar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Destino ${auditUrl(d.url)} ${on ? 'ativado' : 'desativado'}`)
     toast.success(on ? 'Destino ativado' : 'Destino desativado', {
       description: on ? 'Recebe os próximos eventos.' : othersOn ? 'Os outros destinos deste evento continuam recebendo.' : 'Este evento deixa de ser enviado para fora.',
     })
@@ -291,7 +320,7 @@ export default function Webhooks() {
     if (!ok) return
     if (!(await saveDestinations((list) => list.filter((x) => x.id !== d.id)))) return
     setDetailId(null)
-    audit('excluir', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Destino ${maskUrlTokens(d.url)} excluído`)
+    audit('excluir', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Destino ${auditUrl(d.url)} excluído`)
     toast.success('Destino excluído')
   }
 
@@ -307,7 +336,7 @@ export default function Webhooks() {
     const secret = newSigningSecret()
     // só mostra o segredo depois que o servidor gravou (recusado, o antigo continua valendo)
     if (!(await saveDestinations((list) => list.map((x) => (x.id === d.id ? { ...x, secret } : x))))) return
-    audit('editar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Segredo de assinatura trocado (${maskUrlTokens(d.url)})`)
+    audit('editar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Segredo de assinatura trocado (${auditUrl(d.url)})`)
     setNewSecret({ label: WEBHOOK_EVENT_LABEL[d.event], secret })
   }
 
@@ -340,6 +369,10 @@ export default function Webhooks() {
   }
 
   const test = (d: WebhookDestination) => {
+    if (isDemoDestination(d, API)) {
+      toast.error('Destino de demonstração', { description: DEMO_TEST_REFUSED })
+      return
+    }
     if (API) {
       if (testing) {
         toast.info('Aguarde o teste em andamento terminar')
@@ -365,14 +398,15 @@ export default function Webhooks() {
         payload: JSON.stringify(webhookTestBody(d, now)),
         test: true,
       })
-      audit('testar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `POST de teste para ${maskUrlTokens(d.url)}: HTTP ${res.httpStatus} em ${res.durationMs} ms`)
+      audit('testar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `POST de teste para ${auditUrl(d.url)}: HTTP ${res.httpStatus} em ${res.durationMs} ms`)
       if (res.status === 'sucesso') toast.success('Teste entregue', { description: `HTTP ${res.httpStatus} em ${num(res.durationMs)} ms. Enviado como ${WEBHOOK_TEST_EVENT}.` })
       else toast.error('O teste falhou', { description: res.message })
       setTesting(null)
     }, 700)
   }
 
-  const recent = useMemo(() => [...execs.items].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 8), [execs.items])
+  // uma linha por entrega (a tentativa mais recente, com "tentativa N de 6"): antes a mesma entrega aparecia 6 vezes
+  const recent = useMemo(() => latestAttempts(shownExecs).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 8), [shownExecs])
   const detail = detailId ? dests.get(detailId) : undefined
 
   return (
@@ -386,17 +420,49 @@ export default function Webhooks() {
       />
 
       <section aria-label="Resumo dos webhooks" className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Destinos ativos" icon={Webhook} value={`${num(activeCount)} de ${num(dests.items.length)}`} hint={`${coveredEvents} de ${EVENTS.length} eventos com destino`} />
-        <KpiCard label="Entregas em 30 dias" icon={Activity} tone="info" value={num(stats.total)} hint={`${num(stats.failed)} ${stats.failed === 1 ? 'falha' : 'falhas'}`} onClick={() => navigate('/campanhas/estatisticas')} />
+        <KpiCard
+          label="Destinos ativos"
+          icon={Webhook}
+          value={`${num(activeCount)} de ${num(dests.items.length)}`}
+          hint={demoCount ? `${coveredEvents} de ${EVENTS.length} eventos · ${num(demoCount)} de demonstração` : `${coveredEvents} de ${EVENTS.length} eventos com destino`}
+          formula={
+            demoCount || offEvents.size ? (
+              <>
+                {demoCount ? 'Destinos de demonstração (hooks.x2win-crm.com, api.leadflow.app) não recebem eventos nem testes: não contam como ativos. ' : ''}
+                {offEvents.size ? 'Destinos de eventos com o template desligado em Campanhas › Templates não recebem nada: também não contam.' : ''}
+              </>
+            ) : undefined
+          }
+        />
+        <KpiCard
+          label="Entregas em 30 dias"
+          icon={Activity}
+          tone="info"
+          value={num(stats.total)}
+          hint={`${plural(stats.failed, 'falha', 'falhas')}${stats.attempts > stats.total ? ` · ${plural(stats.attempts, 'tentativa', 'tentativas')}` : ''}`}
+          formula={
+            <>
+              Eventos reais enviados aos destinos nos últimos 30 dias. Cada entrega conta uma vez, mesmo com novas tentativas (até {WEBHOOK_MAX_ATTEMPTS}, com o
+              mesmo X-X2W-Delivery); Estatísticas mostra cada tentativa. Envios de teste ficam de fora.
+            </>
+          }
+          onClick={() => navigate('/campanhas/estatisticas')}
+        />
         <KpiCard
           label="Taxa de sucesso"
           icon={CheckCircle2}
           tone={stats.rate === null || stats.rate >= 0.98 ? 'success' : stats.rate >= 0.9 ? 'warning' : 'danger'}
           value={stats.rate === null ? '—' : pct(stats.rate)}
           hint={`respostas 2xx em até ${TIMEOUT_S} s`}
-          formula={<>Entregas com resposta HTTP 2xx dividido pelo total de entregas nos últimos 30 dias. Testes entram na conta.</>}
+          formula={<>Entregas que receberam resposta HTTP 2xx em alguma tentativa, divididas pelo total de entregas dos últimos 30 dias. Envios de teste ficam de fora.</>}
         />
-        <KpiCard label="Tempo médio de resposta" icon={Gauge} tone="neutral" value={`${num(stats.avgMs)} ms`} hint="do envio à resposta do destino" />
+        <KpiCard
+          label="Tempo médio de resposta"
+          icon={Gauge}
+          tone="neutral"
+          value={stats.avgMs === null ? '—' : `${num(stats.avgMs)} ms`}
+          hint={stats.avgMs === null ? 'nenhuma tentativa em 30 dias' : 'do envio à resposta do destino'}
+        />
       </section>
 
       {tokenDests.length > 0 && (
@@ -438,12 +504,22 @@ export default function Webhooks() {
                     Adicionar destino
                   </Button>
                 </div>
+                {offEvents.has(ev) && list.length > 0 && (
+                  <Alert tone="warning" className="mx-5 mb-4">
+                    O template deste evento está desativado em{' '}
+                    <Link to="/campanhas/templates" className="link">
+                      Campanhas › Templates
+                    </Link>
+                    : o evento acontece, mas nada é enviado a {list.length === 1 ? 'este destino' : 'estes destinos'}.
+                    {ev === 'saque.pago' ? ' Saques aprovados não avisam ninguém: o financeiro paga pelo gateway.' : ''}
+                  </Alert>
+                )}
                 <ul className="divide-y divide-line border-t border-line">
                   {list.map((d) => (
                     <DestinationRow
                       key={d.id}
                       d={d}
-                      last={lastExecutionFor(execs.items, d.id)}
+                      last={lastExecutionFor(shownExecs, d.id)}
                       canEdit={canEdit}
                       testing={testing === d.id}
                       onOpen={() => setDetailId(d.id)}
@@ -473,7 +549,7 @@ export default function Webhooks() {
             <CardHeader icon={ShieldCheck} title="Como validar a assinatura" description="Todo envio é um POST JSON assinado com o segredo do destino." />
             <CardBody className="space-y-3 text-[13px] leading-5 text-fg-2">
               <CodeBlock label="Cabeçalhos de exemplo" className="text-[11.5px]">
-                {`X-X2W-Event: saque.pago\nX-X2W-Delivery: ex_7f3a…\nX-X2W-Timestamp: 1760020320\nX-X2W-Signature:\n  sha256=${exampleSignature('exemplo', 1760020320).slice(7, 33)}…`}
+                {`X-X2W-Event: saque.pago\nX-X2W-Delivery: 4182\nX-X2W-Timestamp: 1760020320\nX-X2W-Signature:\n  sha256=${exampleSignature('exemplo', 1760020320).slice(7, 33)}…`}
               </CodeBlock>
               <ol className="list-decimal space-y-1.5 pl-4">
                 <li>
@@ -484,6 +560,9 @@ export default function Webhooks() {
                 </li>
                 <li>Recuse envios com timestamp mais velho que 5 minutos.</li>
                 <li>Responda 2xx em até {TIMEOUT_S} s. Falhas são tentadas de novo até 5 vezes, com espera crescente.</li>
+                <li>
+                  <Mono>X-X2W-Delivery</Mono> é o mesmo em todas as tentativas da mesma entrega: use para não processar duas vezes.
+                </li>
                 <li>
                   Testes chegam com <Mono>X-X2W-Event: {WEBHOOK_TEST_EVENT}</Mono> e <Mono>"test": true</Mono>; o evento do destino vem em <Mono>data.destinationEvent</Mono>. Não trate um teste como evento real.
                 </li>
@@ -506,8 +585,15 @@ export default function Webhooks() {
                 <li key={e.id} className="flex items-center gap-3 px-5 py-2.5">
                   {e.status === 'sucesso' ? <CheckCircle2 size={15} className="shrink-0 text-success" aria-label="Sucesso" /> : <XCircle size={15} className="shrink-0 text-danger" aria-label="Falha" />}
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13px] font-medium text-fg">{WEBHOOK_EVENT_LABEL[e.event]}</p>
-                    <p className="truncate font-mono text-[11px] text-fg-3">{hostOf(e.url)}</p>
+                    <p className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-fg">
+                      <span className="truncate">{WEBHOOK_EVENT_LABEL[e.event]}</span>
+                      {/* envio de teste: não é um evento real do destino */}
+                      {isTestExecution(e) && <Badge tone="info">Teste</Badge>}
+                    </p>
+                    <p className="truncate font-mono text-[11px] text-fg-3">
+                      {hostOf(e.url)}
+                      {attemptLabel(e) && <span className="font-sans"> · {attemptLabel(e)}</span>}
+                    </p>
                   </div>
                   <div className="shrink-0 text-right">
                     <p className={cn('text-xs font-semibold tnum', e.status === 'sucesso' ? 'text-fg-2' : 'text-danger')}>
@@ -529,7 +615,7 @@ export default function Webhooks() {
         <DestinationDrawer
           key={detail.id}
           d={detail}
-          execs={execs.items}
+          execs={shownExecs}
           canEdit={canEdit}
           testing={testing === detail.id}
           onClose={() => setDetailId(null)}
@@ -610,6 +696,7 @@ function DestinationRow({
   onRemove: () => void
 }) {
   const token = hasTokenInUrl(d.url)
+  const demo = isDemoDestination(d, API)
   return (
     <li className={cn('flex flex-col gap-3 px-5 py-3.5 sm:flex-row sm:items-center', !d.active && 'bg-surface-2/60')}>
       <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -625,17 +712,32 @@ function DestinationRow({
               </Badge>
             )}
             {!d.active && <Badge>Inativo</Badge>}
+            {demo && (
+              <span title="O servidor não envia eventos nem testes para endereços de demonstração">
+                <Badge tone="warning" icon={ShieldAlert}>
+                  Demonstração: não recebe eventos
+                </Badge>
+              </span>
+            )}
           </span>
           <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-fg-3">
             <span className="inline-flex items-center gap-1">
               <KeyRound size={12} aria-hidden /> {maskSecret(d.secret)}
             </span>
-            <LastDelivery e={last} />
+            {/* destino de demonstração nunca recebe: sem "última entrega" ao lado do aviso */}
+            {!demo && <LastDelivery e={last} />}
           </span>
         </button>
       </div>
       <div className="flex shrink-0 items-center gap-1.5 pl-12 sm:pl-0">
-        <Button size="sm" icon={Send} onClick={onTest} loading={testing} disabled={!canEdit} title={!canEdit ? 'Seu cargo não testa webhooks' : `Envia um POST de teste (evento ${WEBHOOK_TEST_EVENT}, assinado com o segredo do destino)`}>
+        <Button
+          size="sm"
+          icon={Send}
+          onClick={onTest}
+          loading={testing}
+          disabled={!canEdit || demo}
+          title={!canEdit ? 'Seu cargo não testa webhooks' : demo ? DEMO_TEST_REFUSED : `Envia um POST de teste (evento ${WEBHOOK_TEST_EVENT}, assinado com o segredo do destino)`}
+        >
           Testar
         </Button>
         <Menu
@@ -809,8 +911,10 @@ function DestinationDrawer({
   /** endereço completo revelado: só nesta tela aberta, nunca guardado */
   const [revealed, setRevealed] = useState<string | null>(null)
   const [revealing, setRevealing] = useState(false)
+  const demo = isDemoDestination(d, API)
   const list = useMemo(() => execs.filter((e) => e.destinationId === d.id).sort((a, b) => b.at.localeCompare(a.at)), [execs, d.id])
-  const st = deliveryStats(list, Date.now() - 30 * 86_400_000)
+  // entregas de verdade (sem testes), como nos números da tela
+  const st = deliveryStats(list.filter((e) => isRealDelivery(e, API)), Date.now() - 30 * 86_400_000)
   const tokens = findTokenSegments(d.url)
   // endereço editado com a ficha aberta: esconde de novo
   useEffect(() => setRevealed(null), [d.url])
@@ -860,9 +964,13 @@ function DestinationDrawer({
       header: 'Resultado',
       sortValue: (e) => e.status,
       cell: (e) => (
-        <Badge tone={e.status === 'sucesso' ? 'success' : 'danger'} dot>
-          {e.status === 'sucesso' ? 'Entregue' : 'Falhou'}
-        </Badge>
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <Badge tone={e.status === 'sucesso' ? 'success' : 'danger'} dot>
+            {e.status === 'sucesso' ? 'Entregue' : 'Falhou'}
+          </Badge>
+          {/* cada linha é uma tentativa: as da mesma entrega levam o mesmo X-X2W-Delivery */}
+          {attemptLabel(e) && <span className="whitespace-nowrap text-xs text-fg-3">{attemptLabel(e)}</span>}
+        </span>
       ),
     },
     { id: 'http', header: 'HTTP', align: 'right', sortValue: (e) => e.httpStatus, cell: (e) => e.httpStatus || '—' },
@@ -893,7 +1001,7 @@ function DestinationDrawer({
           <Button icon={Pencil} onClick={onEdit} disabled={!canEdit}>
             Editar
           </Button>
-          <Button variant="primary" icon={Send} onClick={onTest} loading={testing} disabled={!canEdit}>
+          <Button variant="primary" icon={Send} onClick={onTest} loading={testing} disabled={!canEdit || demo} title={demo ? DEMO_TEST_REFUSED : undefined}>
             Testar agora
           </Button>
         </>
@@ -907,7 +1015,20 @@ function DestinationDrawer({
           </Alert>
         )}
 
-        <Switch label="Destino ativo" description={d.active ? 'Recebe cada novo evento.' : 'Não recebe nada até ser ativado.'} checked={d.active} onChange={onToggle} disabled={!canEdit} />
+        {demo && (
+          <Alert tone="warning" icon={ShieldAlert} title="Destino de demonstração: não recebe eventos">
+            {hostOf(d.url)} é um endereço de terceiro gravado com os dados de demonstração. O servidor não envia eventos nem testes para ele, mesmo
+            ativo. Para usar este evento, edite o endereço para um sistema da operação (com um segredo novo) ou exclua o destino.
+          </Alert>
+        )}
+
+        <Switch
+          label="Destino ativo"
+          description={demo ? 'Ligado, mas não recebe nada: endereço de demonstração.' : d.active ? 'Recebe cada novo evento.' : 'Não recebe nada até ser ativado.'}
+          checked={d.active}
+          onChange={onToggle}
+          disabled={!canEdit}
+        />
 
         <DescriptionList
           items={[
@@ -956,17 +1077,17 @@ function DestinationDrawer({
         />
 
         <div className="grid grid-cols-3 gap-2.5">
-          <MiniStat label="Entregas (30 dias)" value={num(st.total)} />
-          <MiniStat label="Sucesso" value={st.rate === null ? '—' : pct(st.rate, 0)} sub={st.failed ? `${st.failed} falhas` : undefined} />
-          <MiniStat label="Tempo médio" value={`${num(st.avgMs)} ms`} />
+          <MiniStat label="Entregas (30 dias)" value={num(st.total)} sub={st.attempts > st.total ? `sem os testes · ${plural(st.attempts, 'tentativa', 'tentativas')}` : 'sem os testes'} />
+          <MiniStat label="Sucesso" value={st.rate === null ? '—' : pct(st.rate, 0)} sub={st.failed ? plural(st.failed, 'falha', 'falhas') : undefined} />
+          <MiniStat label="Tempo médio" value={st.avgMs === null ? '—' : `${num(st.avgMs)} ms`} />
         </div>
 
         <section>
-          <BlockTitle icon={Activity}>Últimas entregas</BlockTitle>
+          <BlockTitle icon={Activity}>Últimas tentativas de entrega</BlockTitle>
           <DataTable
             bare
             className="relative overflow-hidden rounded-xl border border-line"
-            caption="Últimas entregas deste destino"
+            caption="Últimas tentativas de entrega deste destino"
             rows={list}
             columns={columns}
             rowKey={(e) => e.id}
@@ -974,7 +1095,11 @@ function DestinationDrawer({
             pageSize={8}
             pageSizeOptions={[8, 25, 50]}
             initialSort={{ id: 'at', dir: 'desc' }}
-            empty={{ title: 'Nenhuma entrega ainda', description: 'Use "Testar agora" para enviar um POST de teste.', icon: Send }}
+            empty={
+              demo
+                ? { title: 'Nenhuma entrega', description: 'Destino de demonstração: o servidor não envia nada para ele.', icon: Send }
+                : { title: 'Nenhuma entrega ainda', description: 'Use "Testar agora" para enviar um POST de teste.', icon: Send }
+            }
           />
         </section>
       </div>

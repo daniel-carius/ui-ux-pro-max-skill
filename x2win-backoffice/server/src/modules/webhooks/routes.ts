@@ -16,7 +16,7 @@ import {
   type DestinationRow,
   type ExecutionRow,
 } from './kv'
-import { WEBHOOK_EVENT_LABEL } from './url'
+import { isDemoHost, isDemoWebhookHost, WEBHOOK_EVENT_LABEL } from './url'
 
 const idParams = z.object({ id: z.string().trim().min(1).max(64) })
 
@@ -50,6 +50,16 @@ export default async function routes(app: FastifyInstance) {
     const { id } = idParams.parse(req.params)
     const dest = await app.db.one<DestinationRow>('select * from webhook_destinations where id = $1', [id])
     if (!dest) throw Errors.notFound('Destino de webhook')
+    // destino de demonstração (host de terceiro, segredo público no bundle): nem evento real nem teste saem para ele
+    // (antes o teste resolvia o host e tentava o POST assinado para um domínio que a operação não controla)
+    const plainUrl = safeDestinationUrl(dest, app.cipher)
+    if (dest.host ? isDemoHost(dest.host) : isDemoWebhookHost(plainUrl ?? '')) {
+      throw new AppError(
+        409,
+        'destino_demonstracao',
+        'Destino de demonstração (host de terceiro): o servidor não envia testes nem eventos para ele. Edite o endereço para um sistema da operação ou exclua o destino.',
+      )
+    }
 
     const executionId = newId('ex')
     const body = buildBody({
@@ -73,7 +83,18 @@ export default async function routes(app: FastifyInstance) {
     const host = destinationHost(dest)
     await app.db.tx(async (t) => {
       // a execução fica no evento do destino (Estatísticas agrupam por ele), marcada test = true
-      await recordExecution(t, { id: executionId, event: dest.event, destinationId: dest.id, url: url ?? `https://${host}/`, result, payload: body, test: true })
+      await recordExecution(t, {
+        id: executionId,
+        event: dest.event,
+        destinationId: dest.id,
+        url: url ?? `https://${host}/`,
+        result,
+        payload: body,
+        test: true,
+        // o teste sai uma vez, com X-X2W-Delivery = id da execução
+        deliveryId: executionId,
+        attempt: 1,
+      })
       await writeAudit(t, auth, {
         action: 'testar',
         entity: `Webhook ${label}`,

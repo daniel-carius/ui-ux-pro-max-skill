@@ -541,6 +541,50 @@ describe('kv: público de marketing e métricas da base calculados pelo servidor
   })
 })
 
+describe('kv: contas de redes banidas para a ficha de quem não lê o Anti-fraude (r3)', () => {
+  let app: FastifyInstance
+  const cookies: Record<string, string> = {}
+  beforeAll(async () => {
+    app = await createTestApp()
+    await seed(app, 'seguranca.bloqueios', [
+      {
+        id: 'b1',
+        kind: 'rede',
+        value: 'RD-100644',
+        reason: 'Multicontas com o mesmo PIX',
+        accounts: ['p1', 'p2'],
+        previousStatuses: { p1: 'ativo', p2: 'ativo' },
+        createdAt: '2026-10-09T12:00:00.000Z',
+        createdBy: 'Analista Antifraude',
+      },
+      { id: 'b2', kind: 'ip', value: '10.0.0.1', reason: 'Proxy', accounts: ['p3'], createdAt: '2026-10-09T12:00:00.000Z', createdBy: 'Analista Antifraude' },
+    ])
+    cookies.suporte = (await loginAs(app, 'suporte')).cookie
+    cookies.tema = await customRole(app, 'so-tema', ['tema.ver'])
+  })
+  afterAll(async () => app.close())
+
+  it('Suporte (sem Anti-fraude) lê só jogador, rede e data; sem motivo, autor nem bloqueios de outro tipo', async () => {
+    expect((await get(app, cookies.suporte, 'seguranca.bloqueios')).statusCode).toBe(403)
+    const r = await get(app, cookies.suporte, 'geral.jogadores.redes-banidas')
+    expect(r.statusCode, r.body).toBe(200)
+    expect(r.json().value).toEqual([
+      { playerId: 'p1', network: 'RD-100644', bannedAt: '2026-10-09T12:00:00.000Z' },
+      { playerId: 'p2', network: 'RD-100644', bannedAt: '2026-10-09T12:00:00.000Z' },
+    ])
+    for (const leak of ['Multicontas', 'Analista', 'p3', '10.0.0.1', 'previousStatuses']) expect(r.body, leak).not.toContain(leak)
+    const base = await app.db.one<{ version: number }>(`select version from kv_store where key = 'seguranca.bloqueios'`)
+    expect(r.json().version).toBe(base!.version)
+  })
+
+  it('quem não vê Usuários → 403; ninguém grava (PUT → 403)', async () => {
+    expect((await get(app, cookies.tema, 'geral.jogadores.redes-banidas')).statusCode).toBe(403)
+    const w = await put(app, (await loginAs(app)).cookie, 'geral.jogadores.redes-banidas', [])
+    expect(w.statusCode).toBe(403)
+    expect(await app.db.one('select 1 from kv_store where key = $1', ['geral.jogadores.redes-banidas'])).toBeNull()
+  })
+})
+
 describe('kv: métricas da base sem valor por jogador; projeção do cashback feita no servidor com as regras gravadas', () => {
   let app: FastifyInstance
   const now = Date.now()

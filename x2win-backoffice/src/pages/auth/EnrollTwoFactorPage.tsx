@@ -13,11 +13,27 @@ interface Setup extends TwoFactorSetupResponse {
 }
 
 /** Chave em grupos de 4 para facilitar a digitação manual. */
-function groupSecret(secret: string) {
-  return secret.replace(/\s+/g, '').match(/.{1,4}/g)?.join(' ') ?? secret
+export function secretGroups(secret: string): string[] {
+  return secret.replace(/\s+/g, '').match(/.{1,4}/g) ?? [secret]
 }
 
-function downloadCodes(codes: string[], email: string) {
+/**
+ * Chave para digitar no aplicativo: cada grupo de 4 fica inteiro na mesma linha (a quebra só acontece entre
+ * grupos). Com "break-all" a linha quebrava no meio de um grupo e a quebra parecia um separador.
+ */
+export function SecretKey({ secret }: { secret: string }) {
+  return (
+    <code className="flex min-w-0 flex-1 flex-wrap gap-x-2 font-mono text-[13px] font-medium tracking-wide text-fg" aria-label={`Chave: ${secretGroups(secret).join(' ')}`}>
+      {secretGroups(secret).map((g, i) => (
+        <span key={i} className="whitespace-nowrap">
+          {g}
+        </span>
+      ))}
+    </code>
+  )
+}
+
+export function downloadCodes(codes: string[], email: string) {
   const lines = [
     'X2Win Backoffice - códigos de recuperação do 2FA',
     `Conta: ${email}`,
@@ -149,7 +165,7 @@ export function EnrollTwoFactorPage({ me }: { me: MeResponse }) {
                   <p className="text-xs text-fg-3">Não consegue ler? Digite esta chave no aplicativo:</p>
                   <div className="mt-1.5 flex items-center gap-1 rounded-lg border border-line bg-surface-2 py-1 pl-3 pr-1">
                     {setup ? (
-                      <code className="min-w-0 flex-1 break-all font-mono text-[13px] font-medium tracking-wide text-fg">{groupSecret(setup.secret)}</code>
+                      <SecretKey secret={setup.secret} />
                     ) : (
                       <Skeleton className="my-1.5 h-4 flex-1" />
                     )}
@@ -222,6 +238,41 @@ export function RecoveryCodes({ codes, email, onContinue }: { codes: string[]; e
       title="Guarde os códigos de recuperação"
       description="O 2FA está ligado. Se você perder o celular, entre com um destes códigos. Cada um funciona uma única vez e eles não serão mostrados de novo."
     >
+      <RecoveryCodesList codes={codes} email={email} />
+      <Checkbox
+        className="mt-5"
+        checked={saved}
+        onChange={setSaved}
+        label="Guardei os códigos em um lugar seguro"
+        description="Sem eles e sem o celular, só um administrador consegue liberar o seu acesso."
+      />
+      <Button
+        variant="primary"
+        size="lg"
+        block
+        iconRight={ArrowRight}
+        className="mt-5"
+        disabled={!saved}
+        loading={busy}
+        onClick={async () => {
+          setBusy(true)
+          try {
+            await onContinue()
+          } finally {
+            setBusy(false)
+          }
+        }}
+      >
+        Continuar para o painel
+      </Button>
+    </AuthCard>
+  )
+}
+
+/** Lista dos códigos de recuperação com "Copiar" e "Baixar .txt" (cadastro no login e "Ativar 2FA" do menu). */
+export function RecoveryCodesList({ codes, email }: { codes: string[]; email: string }) {
+  return (
+    <>
       {/* um código por linha: XXXXX-XXXXX-XXXXX-XXXXX não cabe em duas colunas */}
       <ol className="grid gap-1.5 rounded-xl border border-line bg-surface-2 p-3" aria-label="Códigos de recuperação">
         {codes.map((c, i) => (
@@ -257,32 +308,6 @@ export function RecoveryCodes({ codes, email, onContinue }: { codes: string[]; e
           Baixar .txt
         </Button>
       </div>
-      <Checkbox
-        className="mt-5"
-        checked={saved}
-        onChange={setSaved}
-        label="Guardei os códigos em um lugar seguro"
-        description="Sem eles e sem o celular, só um administrador consegue liberar o seu acesso."
-      />
-      <Button
-        variant="primary"
-        size="lg"
-        block
-        iconRight={ArrowRight}
-        className="mt-5"
-        disabled={!saved}
-        loading={busy}
-        onClick={async () => {
-          setBusy(true)
-          try {
-            await onContinue()
-          } finally {
-            setBusy(false)
-          }
-        }}
-      >
-        Continuar para o painel
-      </Button>
-    </AuthCard>
+    </>
   )
 }

@@ -147,13 +147,22 @@ export default function Seo() {
             <CardHeader icon={ImageIcon} title="Imagens" description="Logotipo e ícone usados pelo Google; imagem que aparece ao compartilhar o link." />
             <CardBody className="space-y-5">
               <div className="grid gap-5 sm:grid-cols-2">
-                <ImageUpload label="Logotipo" value={safeImageSrc(v.logo)} onChange={(x) => form.set('logo', x)} disabled={form.readOnly} hint="Quadrado, mínimo 112×112 px." previewClassName="h-32" />
+                <ImageUpload
+                  label="Logotipo"
+                  value={safeImageSrc(v.logo)}
+                  onChange={(x) => form.set('logo', x)}
+                  disabled={form.readOnly}
+                  hint="Quadrado, mínimo 112×112 px."
+                  minSquare={112}
+                  previewClassName="h-32"
+                />
                 <ImageUpload
                   label="Ícone do navegador"
                   value={safeImageSrc(v.favicon)}
                   onChange={(x) => form.set('favicon', x)}
                   disabled={form.readOnly}
                   hint="PNG quadrado, 48×48 px ou maior."
+                  minSquare={48}
                   previewClassName="h-32"
                 />
               </div>

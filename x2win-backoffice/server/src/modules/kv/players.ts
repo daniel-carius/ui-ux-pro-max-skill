@@ -9,6 +9,8 @@
 //  - status segue as regras de jogo responsável (player-status.ts): autoexclusão
 //    não muda pelo painel, pausa pedida pelo jogador só termina no prazo, e cada
 //    permissão só faz as transições dela → 403 transicao_nao_permitida;
+//  - conta de uma rede banida (seguranca.bloqueios) não sai do bloqueio enquanto o
+//    banimento da rede valer → 409 rede_banida (desfazer em Anti-fraude › Bloqueios);
 //  - jogador autoexcluído não recebe moedas;
 //  - qualquer outro campo alterado → 403 campo_nao_permitido (details.fields);
 //  - nada gravado = lista vazia: a gravação pela tela nunca cria a base (o painel
@@ -32,6 +34,7 @@ import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { writeAudit } from '../../services/audit'
 import { auditEntity, auditSummary, genericHandler } from './generic'
 import { deepEqual, hasOwn, isPlainObject, MISSING, setOwn, type JsonObject } from './json'
+import { bannedNetworks } from './payout-guards'
 import { applyPauseRules, checkTransition, PAUSES_KEY, PLAYER_STATUSES, PLAYERS_KEY, STATUS_HISTORY_KEY, toPauseStore } from './player-status'
 import { restoreMasked, writePolicy } from './redact'
 import { assertVersion, loadRow, saveRow, storedValue } from './store'
@@ -213,6 +216,23 @@ export const kvHandlers: KvHandlers = {
             const to = c.after.status as (typeof PLAYER_STATUSES)[number]
             checkTransition(c.id, c.before.status, to, auth.perms)
             if (applyPauseRules(c.id, c.before.status, to, pauses, history, actor, now)) pausesChanged = true
+          }
+          // anti-fraude: conta de uma rede banida não sai do bloqueio sozinha. Antes a ficha dizia "volta a sacar
+          // normalmente" e a aprovação do saque continuava recusada (payoutHold confere a rede). Desfazer o
+          // banimento da rede (Anti-fraude › Bloqueios) remove o bloqueio antes de devolver os status.
+          const unblocked = statusChanges.filter((c) => c.before.status === 'bloqueado' && c.after.status !== 'bloqueado')
+          if (unblocked.length) {
+            const nets = await bannedNetworks(t, app.cipher)
+            for (const c of unblocked) {
+              const net = nets.get(c.id)
+              if (!net) continue
+              throw new AppError(
+                409,
+                'rede_banida',
+                `Jogador ${c.id}: a conta faz parte da rede ${net}, banida pelo anti-fraude, e os saques dela continuam recusados. Para liberar, desfaça o banimento da rede em Anti-fraude › Bloqueios.`,
+                { id: c.id, network: net },
+              )
+            }
           }
           if (pausesChanged) await saveRow(t, app.cipher, PAUSES_KEY, pauses, false, pausesRow, auth.user.id)
         }

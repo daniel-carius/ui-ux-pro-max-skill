@@ -22,6 +22,7 @@ import {
   Badge,
   Button,
   Card,
+  NoDataSource,
   CardBody,
   CardHeader,
   EmptyState,
@@ -258,9 +259,11 @@ export default function ModoAtaque() {
       <PageHeader
         actions={
           <>
-            <Button icon={RefreshCw} onClick={refresh} loading={refreshing} aria-label="Atualizar tráfego">
-              <span className="hidden sm:inline">Atualizar</span>
-            </Button>
+            {!API && (
+              <Button icon={RefreshCw} onClick={refresh} loading={refreshing} aria-label="Atualizar tráfego">
+                <span className="hidden sm:inline">Atualizar</span>
+              </Button>
+            )}
             {attack.active ? (
               <Button variant="success" icon={Power} onClick={turnOff} disabled={!canEdit} title={!canEdit ? 'Seu cargo não altera o modo de ataque' : undefined}>
                 Desligar modo de ataque
@@ -340,7 +343,19 @@ export default function ModoAtaque() {
           </section>
         )}
 
-        {/* Tráfego */}
+        {/* Tráfego. Modo API: o painel ainda não recebe o tráfego do site; nada gerado no navegador aparece como real
+            (antes a série simulada mostrava "6x acima do normal" e sugeria ligar o modo, que fecha cadastros). */}
+        {API ? (
+          <Card>
+            <CardHeader icon={Activity} title="Tráfego do site" />
+            <CardBody>
+              <NoDataSource title="Tráfego do site ainda sem fonte de dados">
+                Requisições por minuto, picos e o que o anti-robô barrou vêm do servidor do site público (ou do CDN), que ainda não está conectado
+                a este painel. Decida ligar o modo de ataque pelos alertas da sua infraestrutura (CDN, monitoramento, gateway).
+              </NoDataSource>
+            </CardBody>
+          </Card>
+        ) : (
         <Card>
           <CardHeader
             icon={Activity}
@@ -382,6 +397,7 @@ export default function ModoAtaque() {
             )}
           </CardBody>
         </Card>
+        )}
 
         {/* Operação */}
         <Card>

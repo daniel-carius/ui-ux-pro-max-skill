@@ -1,7 +1,8 @@
-import { forwardRef, useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react'
+import { forwardRef, useId, useState, type ChangeEvent, type InputHTMLAttributes, type KeyboardEvent, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { formatDecimalInput, parseDecimalInput } from '@/lib/format'
 
 export interface FieldProps {
   label?: ReactNode
@@ -126,8 +127,45 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select
 })
 
 /**
- * Campo de valor em reais. Trabalha com número (value) e aceita vírgula.
+ * Texto de um campo numérico controlado por número. O campo vazio vale 0 para a tela, mas continua vazio na
+ * tela (antes o 0 voltava ao apagar, e digitar 350 em seguida mostrava "0350"). Um valor novo vindo de fora
+ * (formulário limpo, valor corrigido pela tela) substitui o que foi digitado.
+ * O campo é de texto com vírgula decimal (parseDecimalInput): "12,5" vale 12,5 em qualquer navegador; uma tecla
+ * que não forma número é recusada. As setas ↑/↓ somam ou tiram `step`, como no campo numérico do navegador.
+ */
+function useNumberText(
+  value: number,
+  onValueChange: (v: number) => void,
+  { blankWhenZero = false, min, max, step = 1 }: { blankWhenZero?: boolean; min?: number; max?: number; step?: number } = {},
+) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const allowNegative = min === undefined || min < 0
+  const parse = (t: string) => parseDecimalInput(t, allowNegative)
+  const shown =
+    draft !== null && Object.is(parse(draft), value) ? draft : !Number.isFinite(value) || (blankWhenZero && value === 0) ? '' : formatDecimalInput(value)
+  const onChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const n = parse(e.target.value)
+    if (n === null) return
+    setDraft(e.target.value)
+    onValueChange(n)
+  }
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+    e.preventDefault()
+    const base = Number.isFinite(value) ? value : 0
+    let next = Number((base + (e.key === 'ArrowUp' ? step : -step)).toFixed(10))
+    if (min !== undefined) next = Math.max(min, next)
+    if (max !== undefined) next = Math.min(max, next)
+    setDraft(null)
+    onValueChange(next)
+  }
+  return { value: shown, onChange, onKeyDown }
+}
+
+/**
+ * Campo de valor em reais. Trabalha com número (value) e aceita vírgula decimal ("1.500,50").
  *   <MoneyInput value={rules.min} onValueChange={(v) => set('min', v)} />
+ * `blankWhenZero`: 0 aparece como campo vazio (com o placeholder), para valores que a pessoa ainda vai digitar.
  */
 export function MoneyInput({
   value,
@@ -140,6 +178,7 @@ export function MoneyInput({
   placeholder,
   className,
   ariaLabel,
+  blankWhenZero,
 }: {
   value: number
   onValueChange: (v: number) => void
@@ -151,21 +190,23 @@ export function MoneyInput({
   placeholder?: string
   className?: string
   ariaLabel?: string
+  blankWhenZero?: boolean
 }) {
+  const text = useNumberText(value, onValueChange, { blankWhenZero, min, step })
   return (
     <Input
       id={id}
       aria-label={ariaLabel}
       prefix="R$"
-      type="number"
+      type="text"
       inputMode="decimal"
-      min={min}
-      step={step}
+      autoComplete="off"
       disabled={disabled}
       invalid={invalid}
       placeholder={placeholder}
-      value={Number.isFinite(value) ? value : ''}
-      onChange={(e) => onValueChange(e.target.value === '' ? 0 : Number(e.target.value))}
+      value={text.value}
+      onChange={text.onChange}
+      onKeyDown={text.onKeyDown}
       className={cn('tnum', className)}
     />
   )
@@ -197,20 +238,20 @@ export function NumberInput({
   className?: string
   ariaLabel?: string
 }) {
+  const text = useNumberText(value, onValueChange, { min, max, step })
   return (
     <Input
       id={id}
       aria-label={ariaLabel}
-      type="number"
+      type="text"
       inputMode="decimal"
-      min={min}
-      max={max}
-      step={step}
+      autoComplete="off"
       disabled={disabled}
       invalid={invalid}
       suffix={suffix}
-      value={Number.isFinite(value) ? value : ''}
-      onChange={(e) => onValueChange(e.target.value === '' ? 0 : Number(e.target.value))}
+      value={text.value}
+      onChange={text.onChange}
+      onKeyDown={text.onKeyDown}
       className={cn('tnum', className)}
     />
   )

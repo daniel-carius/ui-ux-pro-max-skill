@@ -44,6 +44,12 @@ export function playerStatsForPeriod(players: Player[], period: RankPeriod): Pla
     const rng = createRng(hash(p.id) + days * 7919)
     const base = Math.min(1, days / lifeDays)
     const share = Math.min(1, Math.max(0.02, base * rng.float(0.55, 1.5, 3)))
+    // período que cobre a conta inteira (cadastro dentro da janela): os números são os da ficha, sem sorteio
+    // (antes "Apostado" batia com a ficha e "Ganho" saía sorteado: R$ 356.407,65 no ranking × R$ 299.502,23 na ficha)
+    if (base >= 1 || share >= 1) {
+      out.push({ playerId: p.id, wagered: p.totalBet, bets: p.betsCount, won: p.totalWon, biggestWin: Math.min(p.biggestWin, p.totalWon) })
+      continue
+    }
     const wagered = round2(p.totalBet * share)
     const bets = Math.max(1, Math.round(p.betsCount * share))
     const rtp = p.totalBet ? p.totalWon / p.totalBet : 0

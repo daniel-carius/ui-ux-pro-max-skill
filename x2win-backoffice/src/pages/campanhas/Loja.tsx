@@ -619,7 +619,7 @@ function Purchases({
       ),
     },
     { id: 'price', header: 'Preço', align: 'right', sortValue: (p) => p.price, csv: (p) => p.price, cell: (p) => <CoinAmount value={p.price} size={13} /> },
-    { id: 'value', header: 'Valor do prêmio', align: 'right', sortValue: (p) => p.valueBrl, csv: (p) => p.valueBrl.toFixed(2), cell: (p) => <span className="tnum">{brl(p.valueBrl)}</span> },
+    { id: 'value', money: true, header: 'Valor do prêmio', align: 'right', sortValue: (p) => p.valueBrl, csv: (p) => p.valueBrl.toFixed(2), cell: (p) => <span className="tnum">{brl(p.valueBrl)}</span> },
     {
       id: 'status',
       header: 'Status',

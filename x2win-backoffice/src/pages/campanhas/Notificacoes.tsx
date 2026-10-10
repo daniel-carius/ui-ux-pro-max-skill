@@ -15,6 +15,7 @@ import {
   FormGrid,
   Input,
   KpiCard,
+  NO_SOURCE_HINT,
   PageHeader,
   Switch,
   Textarea,
@@ -24,6 +25,7 @@ import {
   type Tone,
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
+import { isApiMode } from '@/lib/api'
 import { dateTime, num, pct, relative } from '@/lib/format'
 import { useCollection, useDb } from '@/lib/store'
 import { createRng, uid } from '@/lib/random'
@@ -45,6 +47,12 @@ import {
 import { AudiencePicker, CharCounter, IconBubble, LinkChip, NOTIF_ICONS, NOTIF_ICON_MAP, RateBar, ScheduleField, SiteHeaderMock, TableFrame, useAudienceEstimate } from './_shared-c3'
 
 const KEY = 'campanhas.notificacoes'
+/**
+ * Modo API: leituras e cliques só existem quando o site os informa; nesta versão nada informa. Antes a tela
+ * inventava leituras (crescendo em 6 horas) para as enviadas, com o servidor guardando reads 0 e clicks 0.
+ */
+const API = isApiMode()
+const NO_READS_HINT = `leituras e cliques: ${NO_SOURCE_HINT}`
 
 interface Draft {
   title: string
@@ -78,11 +86,14 @@ function hash(s: string) {
   return h
 }
 
-/** Leituras: as do histórico, ou simuladas (crescem nas primeiras 6 horas) para as enviadas agora. */
+/**
+ * Leituras: as do histórico, ou simuladas (crescem nas primeiras 6 horas) para as enviadas agora. Modo API: só as
+ * gravadas no servidor, nunca simuladas (a tela mostra "—" enquanto o site não informa).
+ */
 function readsOf(n: BellNotification, now: number) {
   const st = effectiveStatus(n.status, n.sendAt, now)
   if (st !== 'enviada') return { reads: 0, clicks: 0 }
-  if (n.reads > 0) return { reads: n.reads, clicks: n.clicks }
+  if (n.reads > 0 || API) return { reads: n.reads, clicks: n.clicks }
   const rng = createRng(hash(n.id))
   const ramp = Math.max(0, Math.min(1, (now - new Date(n.sendAt).getTime()) / (6 * HOUR)))
   const reads = Math.round(n.recipients * rng.float(0.3, 0.6, 3) * ramp)
@@ -187,7 +198,11 @@ export default function Notificacoes() {
     history.add(item)
     audit('enviar', 'Notificação', `"${item.title}" ${isLater ? `agendada para ${dateTime(when)}` : 'enviada'} · ${audienceLabel} · ${num(item.recipients)} jogadores`)
     toast.success(isLater ? 'Notificação agendada' : 'Notificação enviada', {
-      description: isLater ? `Sai em ${dateTime(when)} para ${num(item.recipients)} jogadores.` : `${num(item.recipients)} jogadores já veem no sino.`,
+      description: isLater
+        ? `Sai em ${dateTime(when)} para ${num(item.recipients)} jogadores.`
+        : API
+          ? `Gravada para ${num(item.recipients)} jogadores. Leituras e cliques aparecem aqui quando o site informar (ainda não nesta versão).`
+          : `${num(item.recipients)} jogadores já veem no sino.`,
     })
     setDraft({ ...EMPTY, schedule: { mode: 'agora', at: defaultScheduleAt() } })
     setTouched(false)
@@ -254,8 +269,15 @@ export default function Notificacoes() {
       id: 'reads',
       header: 'Lidos',
       sortValue: (r) => (r.recipients ? r.reads / r.recipients : 0),
-      csv: (r) => r.reads,
-      cell: (r) => (r.status === 'enviada' ? <RateBar value={r.reads} total={r.recipients} tone="success" /> : <span className="text-xs text-fg-3">—</span>),
+      csv: (r) => (API ? '' : r.reads),
+      cell: (r) =>
+        r.status === 'enviada' && !API ? (
+          <RateBar value={r.reads} total={r.recipients} tone="success" />
+        ) : (
+          <span className="text-xs text-fg-3" title={API && r.status === 'enviada' ? NO_READS_HINT : undefined}>
+            —
+          </span>
+        ),
     },
     {
       id: 'clicks',
@@ -263,7 +285,8 @@ export default function Notificacoes() {
       align: 'right',
       defaultHidden: false,
       sortValue: (r) => r.clicks,
-      cell: (r) => (r.cta && r.status === 'enviada' ? <span className="text-[13px] tnum">{num(r.clicks)}</span> : <span className="text-xs text-fg-3">—</span>),
+      csv: (r) => (API || !r.cta ? '' : r.clicks),
+      cell: (r) => (r.cta && r.status === 'enviada' && !API ? <span className="text-[13px] tnum">{num(r.clicks)}</span> : <span className="text-xs text-fg-3">—</span>),
     },
     {
       id: 'sendAt',
@@ -305,17 +328,17 @@ export default function Notificacoes() {
           <KpiCard
             label="Taxa de leitura"
             icon={Eye}
-            tone="success"
-            value={pct(sentTotal ? readTotal / sentTotal : 0)}
-            hint={`${num(readTotal)} lidas`}
+            tone={API ? 'neutral' : 'success'}
+            value={API ? '—' : pct(sentTotal ? readTotal / sentTotal : 0)}
+            hint={API ? NO_SOURCE_HINT : `${num(readTotal)} lidas`}
             formula="Notificações abertas no sino ÷ notificações entregues, nos últimos 30 dias."
           />
           <KpiCard
             label="Cliques no botão"
             icon={MousePointerClick}
-            tone="info"
-            value={pct(ctaReads ? ctaClicks / ctaReads : 0)}
-            hint={`${num(ctaClicks)} cliques de quem leu`}
+            tone={API ? 'neutral' : 'info'}
+            value={API ? '—' : pct(ctaReads ? ctaClicks / ctaReads : 0)}
+            hint={API ? NO_SOURCE_HINT : `${num(ctaClicks)} cliques de quem leu`}
             formula="Cliques no botão ÷ leituras, só nas notificações com botão."
           />
           <KpiCard
@@ -496,8 +519,16 @@ export default function Notificacoes() {
           <div className="space-y-6">
             <div className="grid grid-cols-3 gap-3">
               <Stat label="Enviados" value={num(open.recipients)} />
-              <Stat label="Lidos" value={open.status === 'enviada' ? pct(open.recipients ? open.reads / open.recipients : 0, 0) : '—'} sub={open.status === 'enviada' ? num(open.reads) : undefined} />
-              <Stat label="Cliques" value={open.cta && open.status === 'enviada' ? num(open.clicks) : '—'} sub={open.cta && open.reads ? `${pct(open.clicks / open.reads, 0)} de quem leu` : undefined} />
+              <Stat
+                label="Lidos"
+                value={open.status === 'enviada' && !API ? pct(open.recipients ? open.reads / open.recipients : 0, 0) : '—'}
+                sub={open.status === 'enviada' ? (API ? NO_SOURCE_HINT : num(open.reads)) : undefined}
+              />
+              <Stat
+                label="Cliques"
+                value={open.cta && open.status === 'enviada' && !API ? num(open.clicks) : '—'}
+                sub={open.cta && open.reads && !API ? `${pct(open.clicks / open.reads, 0)} de quem leu` : undefined}
+              />
             </div>
             <section>
               <h3 className="mb-3 text-sm font-semibold text-fg">Conteúdo</h3>

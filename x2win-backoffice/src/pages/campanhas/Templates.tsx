@@ -47,7 +47,7 @@ import {
 import type { WebhookTestResponse } from '@shared/api'
 import { cn } from '@/lib/cn'
 import { ApiError, api, isApiMode } from '@/lib/api'
-import { dateTime, num, relative } from '@/lib/format'
+import { dateTime, num, plural, relative } from '@/lib/format'
 import { uid } from '@/lib/random'
 import { patchCache, refreshKey, useCollection } from '@/lib/store'
 import { useWebhookDestinations, useWebhookExecutions } from '@/data/hooks'
@@ -75,7 +75,7 @@ import {
   type TemplateTest,
   type WebhookTemplate,
 } from '@/domain/campanhas-templates'
-import { exampleSignature, maskUrlTokens, simulateDelivery } from '@/domain/campanhas-webhooks'
+import { destinationReceives, exampleSignature, maskUrlTokens, simulateDelivery } from '@/domain/campanhas-webhooks'
 import { BlockTitle, CodeBlock } from './_shared-c1'
 
 const CATEGORY_ICON: Record<TemplateCategory, LucideIcon> = {
@@ -107,6 +107,22 @@ type Row = WebhookTemplate & { def: TemplateEventDef }
 type StatusFilter = 'todos' | 'ativos' | 'inativos'
 
 const isWebhookEvent = (k: string): k is WebhookEvent => k in WEBHOOK_EVENT_LABEL
+
+/**
+ * O que o template faz no envio (modo API). O servidor envia só os eventos de saque e de primeiro depósito, sempre
+ * com o envelope padrão { id, event, createdAt, data }; o template desligado faz o servidor não enviar o evento.
+ * O corpo editado fica guardado como modelo e ainda não muda o que sai. Demonstração: tudo é simulado na tela.
+ */
+function activeEffect(event: string, on: boolean): string {
+  if (!API) return on ? 'O evento é enviado com este corpo.' : 'O evento acontece, mas nada é enviado.'
+  if (!isWebhookEvent(event)) return 'Nesta versão o servidor não envia este evento (só os de saque e primeiro depósito).'
+  return on
+    ? 'O servidor envia o evento aos destinos HTTP ativos, com o envelope padrão.'
+    : 'O evento acontece, mas o servidor não envia nada aos destinos HTTP.'
+}
+
+/** Nota do corpo no modo API: o servidor ainda não aplica o template. */
+const API_BODY_NOTE = 'Nesta versão o servidor envia o envelope padrão { id, event, createdAt, data }: o corpo editado aqui fica guardado como modelo e ainda não muda o que sai.'
 
 /**
  * Modo API: o teste para destinos ativos é enviado de verdade pelo servidor
@@ -150,12 +166,15 @@ export default function Templates() {
     [templates.items],
   )
   const destFor = (event: string) => (isWebhookEvent(event) ? destinations.filter((d) => d.event === event) : [])
+  // destinos que recebem: ativos e (modo API) fora dos hosts de demonstração, como em Webhooks
+  const receivingFor = (event: string) => destFor(event).filter((d) => destinationReceives(d, API))
 
   const active = rows.filter((r) => r.active).length
+  const inactive = rows.length - active
   const weekAgo = Date.now() - 7 * 86_400_000
   const testedWeek = rows.filter((r) => r.lastTest && new Date(r.lastTest.at).getTime() >= weekAgo).length
   const failedTests = rows.filter((r) => r.lastTest && !r.lastTest.ok)
-  const withHttp = rows.filter((r) => destFor(r.event).some((d) => d.active)).length
+  const withHttp = rows.filter((r) => receivingFor(r.event).length > 0).length
 
   const filtered = rows
     .filter((r) => filter === 'todos' || (filter === 'ativos' ? r.active : !r.active))
@@ -166,7 +185,7 @@ export default function Templates() {
     templates.update(r.id, { active: on, updatedAt: new Date().toISOString(), updatedBy: user.name })
     audit(on ? 'ligar' : 'desligar', `Template ${r.def.label}`, on ? 'Template ativado' : 'Template desativado: o evento deixa de ser enviado')
     toast.success(on ? 'Template ativado' : 'Template desativado', {
-      description: on ? 'O evento volta a ser enviado.' : 'O evento acontece, mas nada é enviado.',
+      description: API ? activeEffect(r.event, on) : on ? 'O evento volta a ser enviado.' : 'O evento acontece, mas nada é enviado.',
       action: { label: 'Desfazer', onClick: () => templates.update(r.id, { active: !on }) },
     })
   }
@@ -242,9 +261,19 @@ export default function Templates() {
 
   /** Teste simulado: envia o corpo com dados de exemplo aos destinos ativos (ou à caixa de teste). */
   const runTest = (r: Row, body: string): Promise<TestRun | null> => {
-    const active = destFor(r.event).filter((d) => d.active)
-    // sem destino ativo o teste vai para a caixa de inspeção (simulada, não grava execução)
+    // modo API: destino de demonstração não recebe teste (o servidor recusa); só os que recebem
+    const active = API ? receivingFor(r.event) : destFor(r.event).filter((d) => d.active)
     if (API && active.length) return runServerTest(r, active)
+    // modo API sem destino ativo: nada é enviado (não há caixa de teste no servidor); antes o painel simulava uma
+    // entrega "HTTP 200", gravava como teste bem-sucedido e auditava como enviado
+    if (API) {
+      toast.warning('Nada foi enviado', {
+        description: `O evento ${r.def.label} não tem destino ativo em Webhooks. Cadastre ou ative um destino para este evento e teste de novo.`,
+        duration: 7000,
+      })
+      return Promise.resolve(null)
+    }
+    // demonstração sem destino ativo: o teste vai para a caixa de inspeção (simulada, não grava execução)
     return new Promise((resolve) => {
       setTimeout(() => {
         const rendered = renderTemplate(body, sampleValues(r.def)) ?? '{}'
@@ -262,6 +291,8 @@ export default function Templates() {
               httpStatus: res.httpStatus,
               durationMs: res.durationMs,
               payload: JSON.stringify({ test: true, ...JSON.parse(rendered) }),
+              // teste marcado como no envio de teste de Webhooks: Estatísticas não conta como execução real
+              test: true,
             })
           }
           return { url: d.url, ok: res.status === 'sucesso', httpStatus: res.httpStatus, durationMs: res.durationMs, message: res.message }
@@ -334,12 +365,11 @@ export default function Templates() {
     {
       id: 'destinations',
       header: 'Destinos HTTP',
-      sortValue: (r) => destFor(r.event).filter((d) => d.active).length,
-      csv: (r) => destFor(r.event).filter((d) => d.active).length,
+      sortValue: (r) => receivingFor(r.event).length,
+      csv: (r) => receivingFor(r.event).length,
       cell: (r) => {
-        const list = destFor(r.event)
         if (!isWebhookEvent(r.event)) return <span className="text-xs text-fg-3">Só por Jornadas</span>
-        const on = list.filter((d) => d.active).length
+        const on = receivingFor(r.event).length
         return <Badge tone={on ? 'info' : 'neutral'} icon={Webhook}>{on ? `${on} ${on === 1 ? 'destino' : 'destinos'}` : 'Nenhum'}</Badge>
       },
     },
@@ -401,8 +431,15 @@ export default function Templates() {
 
       <section aria-label="Resumo dos templates" className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="Templates" icon={Braces} value={num(rows.length)} hint="um por tipo de evento" />
-        <KpiCard label="Ativos" icon={Power} tone="success" value={num(active)} hint={`${num(rows.length - active)} inativos`} onClick={() => setFilter(filter === 'ativos' ? 'todos' : 'ativos')} active={filter === 'ativos'} />
-        <KpiCard label="Com destino HTTP" icon={Webhook} tone="info" value={num(withHttp)} hint="eventos de saque e primeiro depósito" formula={<>Templates cujo evento tem pelo menos um destino ativo em Campanhas › Webhooks. Os demais eventos alimentam Jornadas e integrações internas.</>} />
+        <KpiCard label="Ativos" icon={Power} tone="success" value={num(active)} hint={plural(inactive, 'inativo', 'inativos')} onClick={() => setFilter(filter === 'ativos' ? 'todos' : 'ativos')} active={filter === 'ativos'} />
+        <KpiCard
+          label="Com destino HTTP"
+          icon={Webhook}
+          tone="info"
+          value={num(withHttp)}
+          hint="eventos de saque e primeiro depósito"
+          formula={<>Templates cujo evento tem pelo menos um destino ativo em Campanhas › Webhooks (destinos de demonstração não contam: não recebem eventos). Os demais eventos alimentam Jornadas e integrações internas.</>}
+        />
         <KpiCard
           label="Testes"
           icon={FlaskConical}
@@ -470,11 +507,18 @@ export default function Templates() {
         empty={{ title: 'Nenhum template neste filtro', description: 'Troque o status ou a categoria.', icon: Braces }}
       />
 
+      {API && (
+        <Alert tone="info" className="mb-5" title="O que o servidor faz com os templates">
+          Desligar um template faz o servidor não enviar o evento aos destinos HTTP. {API_BODY_NOTE} Só os eventos de saque e de primeiro depósito
+          saem do servidor nesta versão.
+        </Alert>
+      )}
+
       {editing && (
         <TemplateEditor
           key={editing.id}
           row={editing}
-          destinations={destFor(editing.event)}
+          destinations={API ? destFor(editing.event).filter((d) => destinationReceives(d, API)) : destFor(editing.event)}
           canEdit={canEdit}
           canTestServer={canTestServer}
           onClose={() => setEditingId(null)}
@@ -483,7 +527,16 @@ export default function Templates() {
             const changedActive = on !== editing.active
             templates.update(editing.id, { body, active: on, updatedAt: new Date().toISOString(), updatedBy: user.name })
             audit('editar', `Template ${editing.def.label}`, changedActive ? `Corpo atualizado e template ${on ? 'ativado' : 'desativado'}` : 'Corpo do template atualizado')
-            toast.success('Template salvo', { description: 'Os próximos envios já usam o corpo novo.' })
+            // modo API: o servidor só usa o liga/desliga; o corpo fica guardado como modelo
+            // evento que o servidor não envia: diz só isso (o "ainda envia o envelope padrão" contradizia a frase)
+            toast.success('Template salvo', {
+              description: API
+                ? isWebhookEvent(editing.event)
+                  ? `${activeEffect(editing.event, on)} O corpo fica guardado como modelo (o servidor ainda envia o envelope padrão).`
+                  : `${activeEffect(editing.event, on)} O corpo fica guardado como modelo.`
+                : 'Os próximos envios já usam o corpo novo.',
+              duration: API ? 7000 : undefined,
+            })
             setEditingId(null)
           }}
         />
@@ -527,6 +580,8 @@ function TemplateEditor({
   const activeDests = destinations.filter((d) => d.active)
   // modo API: com destino ativo, o teste usa a rota de teste dos webhooks (exige editar webhooks)
   const testBlocked = API && activeDests.length > 0 && !canTestServer
+  // modo API sem destino ativo: não há para onde enviar (o servidor não tem caixa de teste)
+  const noDestApi = API && activeDests.length === 0
   const signature = useMemo(() => exampleSignature(activeDests[0]?.secret ?? 'DEMO-hmac-exemplo', 1760020320), [activeDests])
   // modo API: o teste do servidor não usa este template; sai como webhook.teste, com o evento do destino em data
   const serverTestBody = useMemo(() => (API && activeDests[0] ? JSON.stringify(webhookTestBody(activeDests[0], new Date().toISOString(), 'evt_…'), null, 2) : null), [activeDests])
@@ -604,7 +659,7 @@ function TemplateEditor({
               { label: 'Categoria', value: row.def.category },
               {
                 label: 'Destinos HTTP',
-                value: isWebhookEvent(row.event) ? (activeDests.length ? `${activeDests.length} ativo(s)` : 'Nenhum ativo') : 'Usado por Jornadas',
+                value: isWebhookEvent(row.event) ? (activeDests.length ? plural(activeDests.length, 'ativo', 'ativos') : 'Nenhum ativo') : 'Usado por Jornadas',
               },
             ]}
           />
@@ -613,7 +668,7 @@ function TemplateEditor({
         <FormFieldset readOnly={!canEdit}>
           <Switch
             label="Template ativo"
-            description={active ? 'O evento é enviado com este corpo.' : 'O evento acontece, mas nada é enviado.'}
+            description={activeEffect(row.event, active)}
             checked={active}
             onChange={async (on) => {
               if (!on && !(await confirmProtectedOff(row))) return
@@ -648,8 +703,9 @@ function TemplateEditor({
             {unused.length > 0 && check.ok && <p className="mt-2 text-xs text-fg-3">{unused.length} {unused.length === 1 ? 'variável disponível não está' : 'variáveis disponíveis não estão'} no corpo. Tudo bem: só vai o que você usar.</p>}
           </section>
 
+          {API && <Alert tone="info">{API_BODY_NOTE}</Alert>}
           <Field
-            label="Corpo do envio (JSON)"
+            label={API ? 'Corpo do template (JSON, guardado como modelo)' : 'Corpo do envio (JSON)'}
             htmlFor="tp-body"
             labelAside={
               <span className="flex gap-1">
@@ -705,7 +761,7 @@ function TemplateEditor({
         </FormFieldset>
 
         <section>
-          <BlockTitle icon={Send}>Prévia com dados de exemplo</BlockTitle>
+          <BlockTitle icon={Send}>{API ? 'Prévia do modelo com dados de exemplo' : 'Prévia com dados de exemplo'}</BlockTitle>
           <p className="mb-2 font-mono text-[11.5px] leading-5 text-fg-3">
             POST · Content-Type: application/json
             <br />
@@ -728,8 +784,18 @@ function TemplateEditor({
                 icon={Send}
                 onClick={test}
                 loading={testing}
-                disabled={!check.ok || !canEdit || testBlocked}
-                title={!check.ok ? 'Corrija o JSON para testar' : testBlocked ? 'O teste sai pelos destinos de webhook: exige editar webhooks' : undefined}
+                disabled={!check.ok || !canEdit || testBlocked || noDestApi}
+                title={
+                  !check.ok
+                    ? 'Corrija o JSON para testar'
+                    : !canEdit
+                      ? 'Seu cargo não edita templates'
+                      : testBlocked
+                        ? 'O teste sai pelos destinos de webhook: exige editar webhooks'
+                        : noDestApi
+                          ? 'Este evento não tem destino ativo em Webhooks: não há para onde enviar'
+                          : undefined
+                }
               >
                 Enviar teste
               </Button>
@@ -739,10 +805,15 @@ function TemplateEditor({
           </BlockTitle>
           <p className="text-[13px] text-fg-3">
             {activeDests.length
-              ? API
+              ? testBlocked
+                ? // o motivo fica visível (o title do botão não aparece no toque nem numa olhada rápida)
+                  `O teste sai pelos destinos de webhook (${activeDests.length} ${activeDests.length === 1 ? 'ativo' : 'ativos'} para este evento): só quem edita webhooks pode enviar. Peça a quem tem essa permissão ou use "Testar agora" em Webhooks.`
+                : API
                 ? `Envia um POST de teste assinado, pelo servidor, para ${activeDests.length} ${activeDests.length === 1 ? 'destino ativo' : 'destinos ativos'}. O corpo não é a prévia acima: é o evento ${WEBHOOK_TEST_EVENT} (com "test": true e o evento do destino em data.destinationEvent).`
                 : `Envia a prévia acima (com "test": true) para ${activeDests.length} ${activeDests.length === 1 ? 'destino ativo' : 'destinos ativos'}. Usa o corpo da tela, mesmo sem salvar.`
-              : 'Este evento não tem destino ativo: o teste vai para a caixa de inspeção da X2Win e não sai para fora.'}
+              : API
+                ? 'Este evento não tem destino ativo em Webhooks: não há para onde enviar o teste. Cadastre ou ative um destino para este evento.'
+                : 'Este evento não tem destino ativo: o teste vai para a caixa de inspeção da X2Win e não sai para fora (demonstração).'}
           </p>
           {serverTestBody && (
             <>

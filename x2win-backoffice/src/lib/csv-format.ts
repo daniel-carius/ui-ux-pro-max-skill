@@ -23,13 +23,20 @@ export function csvCell(v: unknown): string {
   if (v == null) return ''
   let s: string
   if (typeof v === 'number') {
-    s = v.toLocaleString('pt-BR')
+    // fração com duas casas (valores em reais: "827,10", não "827,1"; "189.496,67", não "189.496,666"); inteiro como está
+    s = Number.isInteger(v) ? v.toLocaleString('pt-BR') : v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   } else {
     s = String(v)
     if (FORMULA_START.test(s) && !PLAIN_NUMBER.test(s)) s = `'${s}`
   }
   if (/[";\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
   return s
+}
+
+/** Valor em reais no CSV sempre com duas casas, também quando é inteiro ("-5,00"). */
+export function csvMoney(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return ''
+  return v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 export function toCsv<T>(rows: T[], columns: CsvColumn<T>[]): string {

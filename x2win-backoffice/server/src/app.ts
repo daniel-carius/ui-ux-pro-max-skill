@@ -63,10 +63,14 @@ export async function buildApp({ config, db, logger = false }: BuildOptions): Pr
   app.decorate('cipher', createCipher(config.ENCRYPTION_KEY))
   app.decorateRequest('auth', null)
   app.decorateRequest('clientIp', '')
+  app.decorateRequest('sessionEnded', null)
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof AppError) {
-      const body: ErrorBody = { error: { code: err.code, message: err.message, details: err.details } }
+      // sem sessão porque a do cookie terminou: diz o motivo (o painel explica à pessoa por que saiu)
+      const details =
+        err.code === 'nao_autenticado' && req.sessionEnded && err.details === undefined ? { reason: req.sessionEnded } : err.details
+      const body: ErrorBody = { error: { code: err.code, message: err.message, details } }
       return reply.status(err.status).send(body)
     }
     if (err instanceof ZodError) {

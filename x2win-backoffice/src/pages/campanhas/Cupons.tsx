@@ -443,7 +443,7 @@ function CouponTable({
       },
     },
     { id: 'audience', header: 'Público', sortValue: (c) => c.audience, csv: (c) => AUDIENCE_LABEL[c.audience], cell: (c) => <span className="text-[13px] text-fg-2">{AUDIENCE_SHORT[c.audience]}</span> },
-    { id: 'minDeposit', header: 'Depósito mín.', align: 'right', sortValue: (c) => c.minDeposit, cell: (c) => (c.minDeposit ? <span className="tnum">{brl(c.minDeposit)}</span> : <span className="text-xs text-fg-3">sem depósito</span>) },
+    { id: 'minDeposit', money: true, header: 'Depósito mín.', align: 'right', sortValue: (c) => c.minDeposit, cell: (c) => (c.minDeposit ? <span className="tnum">{brl(c.minDeposit)}</span> : <span className="text-xs text-fg-3">sem depósito</span>) },
     {
       id: 'status',
       header: 'Status',
@@ -557,9 +557,9 @@ function Redemptions({
     { id: 'at', header: 'Data', sortValue: (r) => r.at, csv: (r) => dateTime(r.at), cell: (r) => <span className="whitespace-nowrap text-[13px] text-fg-2">{dateTime(r.at)}</span> },
     { id: 'player', header: 'Jogador', minWidth: 200, sortValue: (r) => r.playerName, csv: (r) => `${r.playerName} (${r.playerId})`, cell: (r) => <PersonCell name={r.playerName} sub={r.playerEmail ? maskEmail(r.playerEmail) : `ID ${r.playerId}`} /> },
     { id: 'code', header: 'Cupom', sortValue: (r) => r.code, cell: (r) => <Mono className="font-semibold text-fg">{r.code}</Mono> },
-    { id: 'deposit', header: 'Depósito', align: 'right', sortValue: (r) => r.deposit, cell: (r) => (r.deposit ? <span className="tnum">{brl(r.deposit)}</span> : <span className="text-xs text-fg-3">sem depósito</span>) },
+    { id: 'deposit', money: true, header: 'Depósito', align: 'right', sortValue: (r) => r.deposit, cell: (r) => (r.deposit ? <span className="tnum">{brl(r.deposit)}</span> : <span className="text-xs text-fg-3">sem depósito</span>) },
     { id: 'reward', header: 'Recompensa', minWidth: 220, sortValue: (r) => r.reward, cell: (r) => <span className="text-[13px] text-fg-2">{r.reward}</span>, wrap: true },
-    { id: 'cost', header: 'Custo', align: 'right', sortValue: (r) => r.cost, csv: (r) => r.cost.toFixed(2), cell: (r) => <span className="font-semibold tnum">{brl(r.cost)}</span> },
+    { id: 'cost', money: true, header: 'Custo', align: 'right', sortValue: (r) => r.cost, csv: (r) => r.cost.toFixed(2), cell: (r) => <span className="font-semibold tnum">{brl(r.cost)}</span> },
   ]
   const rows = couponFilter ? redemptions.filter((r) => r.couponId === couponFilter) : redemptions
 

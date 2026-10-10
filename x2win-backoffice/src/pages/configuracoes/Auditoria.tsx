@@ -29,6 +29,7 @@ import {
 } from '@/components/ui'
 import { dateShort, dateTime, num, pct, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { DEMO_STAFF_ID } from '@/data/demo'
 import { ApiError, apiDownload, isApiMode } from '@/lib/api'
 import { refreshKey } from '@/lib/store'
 import { DAY, dayKey, startOfDay } from '@/data/now'
@@ -37,6 +38,7 @@ import { AUDIT_SOURCE_LABEL, isPanelReported } from '@shared/audit'
 import { KEYS, SESSION_IP, audit, useAudit, usePageAccess, useRoles, useTeam } from '@/domain/session'
 import { SENSITIVE_ACTIONS } from '@/domain/config2-access'
 import { RoleBadge } from './_shared-g'
+import { SYSTEM_ACTOR_FILTER } from '@shared/audit'
 
 const ACTION_TONE: Partial<Record<AuditAction, Tone>> = {
   login: 'neutral',
@@ -76,6 +78,11 @@ function exportQuery(range: DateRange, person: string, action: string) {
   return q.toString()
 }
 
+/** Primeiro nome para os botões da ficha; rótulo com parênteses ("Equipe (demonstração)") fica inteiro. */
+function firstName(name: string) {
+  return name.includes('(') ? name : name.split(' ')[0]
+}
+
 export default function Auditoria() {
   const { can } = usePageAccess()
   const [entries] = useAudit()
@@ -97,9 +104,12 @@ export default function Auditoria() {
   }
 
   const inPeriod = useMemo(() => entries.filter((e) => inRange(e.at, range)), [entries, range])
-  const rows = useMemo(() => inPeriod.filter((e) => (!person || e.actorId === person) && (!action || e.action === action)), [inPeriod, person, action])
+  // "sistema": ações automáticas do servidor (sem pessoa, actorId vazio)
+  const matchesPerson = (e: AuditEntry) => !person || (person === SYSTEM_ACTOR_FILTER ? !e.actorId : e.actorId === person)
+  const rows = useMemo(() => inPeriod.filter((e) => matchesPerson(e) && (!action || e.action === action)), [inPeriod, person, action]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const actors = new Set(inPeriod.map((e) => e.actorId))
+  // pessoas: sem as ações automáticas (id vazio, "Sistema") e sem o autor genérico da demonstração
+  const actors = new Set(inPeriod.map((e) => e.actorId).filter((id) => id && id !== DEMO_STAFF_ID))
   const exports = inPeriod.filter((e) => e.action === 'exportar')
   const sensitive = inPeriod.filter(isSensitive)
   // resumos só com registros do servidor (ou da demonstração): os relatados pelo painel não foram verificados
@@ -115,7 +125,10 @@ export default function Auditoria() {
     for (const m of team) byId.set(m.id, `${m.name} (${m.email})`)
     // quem agiu e não está na lista da equipe (ou a equipe não é legível): nome do registro
     for (const e of entries) if (e.actorId && !byId.has(e.actorId)) byId.set(e.actorId, e.actorName)
-    return [...byId.entries()].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'))
+    const list = [...byId.entries()].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'))
+    // ações automáticas do servidor (modo de ataque desligado no prazo, subida da API...)
+    if (entries.some((e) => !e.actorId)) list.push({ value: SYSTEM_ACTOR_FILTER, label: 'Sistema (ações automáticas)' })
+    return list
   }, [team, entries])
 
   const chart = useMemo(() => {
@@ -205,11 +218,13 @@ export default function Auditoria() {
       cell: (e) => <PersonCell name={e.actorName} sub={roleOf(e.actorId)?.name ?? '—'} />,
     },
     // mesmas colunas do CSV do servidor (escondidas por padrão): identificam quem fez sem depender do nome
-    { id: 'actorId', header: 'ID de quem fez', defaultHidden: true, sortValue: (e) => e.actorId, csv: (e) => e.actorId, cell: (e) => <Mono>{e.actorId || '—'}</Mono> },
+    // id e e-mail de quem fez vão sempre no CSV (como no do servidor), mesmo escondidos na tela
+    { id: 'actorId', header: 'ID de quem fez', defaultHidden: true, exportAlways: true, sortValue: (e) => e.actorId, csv: (e) => e.actorId, cell: (e) => <Mono>{e.actorId || '—'}</Mono> },
     {
       id: 'actorEmail',
       header: 'E-mail de quem fez',
       defaultHidden: true,
+      exportAlways: true,
       sortValue: (e) => emailOf(e.actorId),
       csv: (e) => emailOf(e.actorId),
       cell: (e) => <span className="text-[13px] text-fg-2">{emailOf(e.actorId) || '—'}</span>,
@@ -288,7 +303,7 @@ export default function Auditoria() {
             tone="info"
             value={num(actors.size)}
             hint={`de ${num(team.filter((m) => m.status !== 'convidado').length)} na equipe`}
-            formula={<>Pessoas com pelo menos uma ação registrada no período.</>}
+            formula={<>Pessoas da equipe com pelo menos uma ação registrada no período. Ações automáticas do servidor e o autor genérico dos dados de demonstração não contam.</>}
           />
           <KpiCard
             label="Exportações"
@@ -442,7 +457,7 @@ export default function Auditoria() {
           nearby={entries.filter((x) => x.actorId === open.actorId && x.id !== open.id && Math.abs(new Date(x.at).getTime() - new Date(open.at).getTime()) < 6 * 3_600_000).slice(0, 8)}
           onClose={() => setOpenId(null)}
           onFilterPerson={() => {
-            setParam('pessoa', open.actorId)
+            setParam('pessoa', open.actorId || SYSTEM_ACTOR_FILTER)
             setOpenId(null)
           }}
           onFilterAction={() => {
@@ -499,7 +514,7 @@ function EntryDrawer({
       footer={
         <>
           <Button size="sm" onClick={onFilterPerson}>
-            Ver só {e.actorName.split(' ')[0]}
+            {e.actorId ? `Ver só ${firstName(e.actorName)}` : `Ver só ${e.actorName === 'Sistema' ? 'ações automáticas' : e.actorName}`}
           </Button>
           <Button size="sm" onClick={onFilterAction}>
             Ver só "{AUDIT_ACTION_LABEL[e.action]}"
@@ -521,7 +536,15 @@ function EntryDrawer({
           <h3 className="mb-3 text-sm font-semibold text-fg">Quem e onde</h3>
           <div className="mb-4 flex flex-wrap items-center gap-2">
             <PersonCell name={e.actorName} sub={email || undefined} />
-            <RoleBadge role={role} />
+            {/* linha sem pessoa (ação automática do servidor): não tem cargo, nem "Cargo removido" */}
+            {/* autor genérico da demonstração: não é uma pessoa da equipe, então não tem cargo (nem "Cargo removido") */}
+            {e.actorId === DEMO_STAFF_ID ? (
+              <Badge>Demonstração</Badge>
+            ) : e.actorId ? (
+              <RoleBadge role={role} />
+            ) : e.actorName === 'Sistema' ? (
+              <Badge>Ação automática do servidor</Badge>
+            ) : null}
           </div>
           <DescriptionList
             items={[
@@ -551,7 +574,7 @@ function EntryDrawer({
           </Alert>
         )}
         <section>
-          <h3 className="mb-3 text-sm font-semibold text-fg">Outras ações de {e.actorName.split(' ')[0]} (até 6 h antes ou depois)</h3>
+          <h3 className="mb-3 text-sm font-semibold text-fg">Outras ações de {firstName(e.actorName)} (até 6 h antes ou depois)</h3>
           {nearby.length ? (
             <ol className="space-y-2">
               {nearby.map((x) => (

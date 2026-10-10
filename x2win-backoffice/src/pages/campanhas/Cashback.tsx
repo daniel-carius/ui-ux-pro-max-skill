@@ -30,6 +30,8 @@ import {
   FormGrid,
   Input,
   KpiCard,
+  NO_SOURCE_HINT,
+  NoDataSource,
   MoneyInput,
   NumberInput,
   PageHeader,
@@ -132,10 +134,10 @@ export default function Cashback() {
             label="Pago no último ciclo"
             icon={HandCoins}
             tone="success"
-            value={brl(lastTotal)}
-            delta={prevTotal ? (lastTotal - prevTotal) / prevTotal : null}
+            value={API ? '—' : brl(lastTotal)}
+            delta={!API && prevTotal ? (lastTotal - prevTotal) / prevTotal : null}
             goodWhenUp={false}
-            hint={`em ${last.label} · ${num(last.players)} jogadores`}
+            hint={API ? NO_SOURCE_HINT : `em ${last.label} · ${num(last.players)} jogadores`}
             formula="Cashback + rakeback creditados no último ciclo semanal. A variação compara com o ciclo anterior."
           />
           <KpiCard
@@ -177,9 +179,9 @@ export default function Cashback() {
           <KpiCard
             label="Custo sobre o GGR"
             icon={TrendingDown}
-            tone={lastTotal / ggrWeek > 0.12 ? 'danger' : 'warning'}
-            value={pct(ggrWeek ? lastTotal / ggrWeek : 0)}
-            hint={`GGR da semana: ${brlCompact(ggrWeek)}`}
+            tone={!API && lastTotal / ggrWeek > 0.12 ? 'danger' : 'warning'}
+            value={API ? '—' : pct(ggrWeek ? lastTotal / ggrWeek : 0)}
+            hint={API ? NO_SOURCE_HINT : `GGR da semana: ${brlCompact(ggrWeek)}`}
             formula="(Cashback + rakeback do último ciclo) ÷ GGR dos últimos 7 dias. Acima de 12% merece revisão de percentuais e teto."
           />
         </section>
@@ -195,9 +197,14 @@ export default function Cashback() {
             icon={Receipt}
             title="Pago por ciclo"
             description="Últimos 8 créditos semanais"
-            actions={<Badge tone="neutral">{`Total: ${brl(cycles.reduce((s, c) => s + c.cashback + c.rakeback, 0))}`}</Badge>}
+            actions={API ? undefined : <Badge tone="neutral">{`Total: ${brl(cycles.reduce((s, c) => s + c.cashback + c.rakeback, 0))}`}</Badge>}
           />
           <CardBody>
+            {API ? (
+              <NoDataSource compact title="Sem fonte de dados nesta versão">
+                Os créditos de cashback e rakeback de cada ciclo vêm do extrato da plataforma de jogo, ainda não conectado a este painel.
+              </NoDataSource>
+            ) : (
             <BarsChart
               ariaLabel="Cashback e rakeback pagos por ciclo"
               data={cycles.map((c) => ({ label: c.label, cashback: c.cashback, rakeback: c.rakeback }))}
@@ -210,6 +217,7 @@ export default function Cashback() {
                 { key: 'rakeback', label: 'Rakeback', slot: 3 },
               ]}
             />
+            )}
           </CardBody>
         </Card>
 

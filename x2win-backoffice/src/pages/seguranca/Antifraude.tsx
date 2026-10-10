@@ -46,11 +46,13 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, date, dateTime, maskCpf, maskEmail, maskPhone, num, pct, plural, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useCollection } from '@/lib/store'
+import { csvMoney } from '@/lib/csv-format'
+import { dbSetAndWait, useCollection } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { DAY, NOW } from '@/data/now'
 import { useAffiliates, usePlayers } from '@/data/hooks'
 import { KYC_LABEL, PLAYER_STATUS_LABEL, type Affiliate, type Player, type PlayerStatus } from '@/data/players'
+import { isApiMode } from '@/lib/api'
 import { SEGURANCA_KEYS, SIGNAL_SOURCE_LABEL, seedBlocks, seedBonusReceived, seedSignals, type Block, type LinkKind } from '@/data/seguranca'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import {
@@ -121,14 +123,27 @@ function FlagBadges({ flags }: { flags: AccountFlag[] }) {
   )
 }
 
-function useActiveIps() {
+/**
+ * Modo API: sessões abertas no site, bônus recebido e os sinais de identidade (mesmo CPF, telefone, e-mail) vêm da
+ * plataforma de jogo, ainda não conectada. Antes o painel gerava esses números no navegador e eles serviam de base
+ * para banir uma rede; agora a tela mostra "—" e só usa o que vem do servidor (jogadores, IPs, afiliados, bloqueios).
+ */
+const API = isApiMode()
+const NO_SIGNALS: ReturnType<typeof seedSignals> = []
+const NO_BONUS: Record<string, number> = {}
+
+function useActiveIps(): number | null {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
+    if (API) return
     const t = setInterval(() => setNow(Date.now()), 15_000)
     return () => clearInterval(t)
   }, [])
-  return simulateActiveIps(now)
+  return API ? null : simulateActiveIps(now)
 }
+
+/** Bônus recebido (modo API: sem fonte, "—"). */
+const bonusText = (v: number) => (API ? '—' : brl(v))
 
 export default function Antifraude() {
   const [tab, setTab] = useTabParam<Tab>('redes', ['redes', 'ips', 'bloqueios', 'contas'] as const)
@@ -143,8 +158,8 @@ export default function Antifraude() {
   const [openId, setOpenId] = useState<string | null>(null)
   const [blockModal, setBlockModal] = useState(false)
 
-  const signals = seedSignals()
-  const bonus = seedBonusReceived()
+  const signals = API ? NO_SIGNALS : seedSignals()
+  const bonus = API ? NO_BONUS : seedBonusReceived()
   const networks = useMemo(
     () => buildNetworks({ players: players.items, signals, affiliates, bonus, now: NOW.getTime() }),
     [players.items, signals, affiliates, bonus],
@@ -255,8 +270,11 @@ export default function Antifraude() {
       icon: LockOpen,
     })
     if (!ok) return
+    // primeiro o bloqueio sai (e o servidor confirma); só então as contas voltam ao status de antes: enquanto o
+    // banimento da rede vale, o servidor recusa tirar uma conta dela do bloqueio (409 rede_banida)
+    const removed = await dbSetAndWait<Block[]>(SEGURANCA_KEYS.blocks, (prev) => prev.filter((x) => x.id !== b.id), seedBlocks)
+    if (!removed) return
     restore.forEach((id) => players.update(id, { status: b.previousStatuses[id] ?? 'ativo' }))
-    blocks.remove(b.id)
     audit('desbloquear', isNet ? `Bloqueio da rede ${b.value}` : `Bloqueio do IP ${b.value}`, isNet ? `Banimento desfeito: ${restore.length} contas reativadas` : 'IP desbloqueado no site')
     toast.success(isNet ? 'Banimento desfeito' : 'IP desbloqueado')
   }
@@ -289,11 +307,15 @@ export default function Antifraude() {
           label="IPs em uso agora"
           icon={Wifi}
           tone="info"
-          value={num(activeIps)}
+          value={activeIps === null ? '—' : num(activeIps)}
           hint={
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" aria-hidden /> sessões abertas no site agora
-            </span>
+            activeIps === null ? (
+              'sem dados de sessões do site nesta versão'
+            ) : (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" aria-hidden /> sessões abertas no site agora
+              </span>
+            )
           }
           formula={<>IPs distintos com sessão aberta no site agora (atualiza a cada 15 segundos). Um IP com muitas sessões ao mesmo tempo é sinal de robô.</>}
         />
@@ -311,7 +333,7 @@ export default function Antifraude() {
           icon={ShieldAlert}
           tone="warning"
           value={num(high.length)}
-          hint={high.length ? `${num(high.reduce((s, n) => s + n.playerIds.length, 0))} contas · ${brlCompact(high.reduce((s, n) => s + n.totals.bonus, 0))} em bônus` : 'nenhuma rede ativa de risco alto'}
+          hint={high.length ? `${num(high.reduce((s, n) => s + n.playerIds.length, 0))} contas${API ? '' : ` · ${brlCompact(high.reduce((s, n) => s + n.totals.bonus, 0))} em bônus`}` : 'nenhuma rede ativa de risco alto'}
           onClick={() => {
             setTab('redes')
             setRisk('alto')
@@ -451,7 +473,7 @@ function NetworksTab({
       header: 'Depositado / sacado',
       align: 'right',
       sortValue: (n) => n.totals.deposited,
-      csv: (n) => `${n.totals.deposited} / ${n.totals.withdrawn}`,
+      csv: (n) => `${csvMoney(n.totals.deposited)} / ${csvMoney(n.totals.withdrawn)}`,
       cell: (n) => (
         <div className="text-right tnum">
           <p className="text-[13px] font-medium text-fg">{brl(n.totals.deposited)}</p>
@@ -462,15 +484,18 @@ function NetworksTab({
     {
       id: 'bonus',
       header: 'Bônus recebido',
+      money: true,
       align: 'right',
       sortValue: (n) => n.totals.bonus,
-      csv: (n) => n.totals.bonus,
+      csv: (n) => (API ? '' : n.totals.bonus),
       cell: (n) => (
         <div className="text-right tnum">
-          <p className="text-[13px] font-medium text-fg">{brl(n.totals.bonus)}</p>
-          <p className={cn('text-xs', n.totals.bonus >= n.totals.deposited * 0.5 ? 'font-semibold text-danger' : 'text-fg-3')}>
-            {n.totals.deposited ? `${pct(n.totals.bonus / n.totals.deposited, 0)} do depósito` : 'sem depósito'}
-          </p>
+          <p className="text-[13px] font-medium text-fg" title={API ? 'sem fonte de dados nesta versão' : undefined}>{bonusText(n.totals.bonus)}</p>
+          {!API && (
+            <p className={cn('text-xs', n.totals.bonus >= n.totals.deposited * 0.5 ? 'font-semibold text-danger' : 'text-fg-3')}>
+              {n.totals.deposited ? `${pct(n.totals.bonus / n.totals.deposited, 0)} do depósito` : 'sem depósito'}
+            </p>
+          )}
         </div>
       ),
     },
@@ -617,7 +642,8 @@ function IpsTab({
           <span className="text-xs text-fg-3">Nenhuma conta</span>
         ),
     },
-    { id: 'local', header: 'Local', sortValue: (r) => r.city, cell: (r) => <span className="text-[13px] text-fg-2">{r.city}</span> },
+    // cidade do cadastro da primeira conta do IP (não é geolocalização do IP)
+    { id: 'local', header: 'Cidade da conta', sortValue: (r) => r.city, cell: (r) => <span className="text-[13px] text-fg-2" title="Cidade do cadastro da conta, não a localização do IP">{r.city}</span> },
     { id: 'seen', header: 'Último acesso', sortValue: (r) => r.lastSeen, csv: (r) => dateTime(r.lastSeen), cell: (r) => <span className="whitespace-nowrap text-[13px] text-fg-2">{relative(r.lastSeen)}</span> },
     {
       id: 'rede',
@@ -650,7 +676,7 @@ function IpsTab({
       id: 'acao',
       header: 'Ação',
       pinned: true,
-      csv: () => '',
+      csv: false,
       cell: (r) => (
         <span onClick={(e) => e.stopPropagation()}>
           {r.blocked ? (
@@ -770,7 +796,7 @@ function BlocksTab({
       id: 'acao',
       header: 'Ação',
       pinned: true,
-      csv: () => '',
+      csv: false,
       cell: (b) => (
         <span className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
           {b.kind === 'rede' && netIds.has(b.value) && <IconButton icon={Eye} label={`Ver rede ${b.value}`} size="sm" onClick={() => onOpen(b.value)} />}
@@ -926,8 +952,8 @@ function AccountsTab({
         </div>
       ),
     },
-    { id: 'dep', header: 'Depositado', align: 'right', sortValue: (r) => r.p.totalDeposited, csv: (r) => r.p.totalDeposited, cell: (r) => <span className="text-[13px] font-medium tnum">{brl(r.p.totalDeposited)}</span> },
-    { id: 'bonus', header: 'Bônus recebido', align: 'right', sortValue: (r) => bonus[r.p.id] ?? 0, csv: (r) => bonus[r.p.id] ?? 0, cell: (r) => <span className="text-[13px] tnum">{brl(bonus[r.p.id] ?? 0)}</span> },
+    { id: 'dep', money: true, header: 'Depositado', align: 'right', sortValue: (r) => r.p.totalDeposited, csv: (r) => r.p.totalDeposited, cell: (r) => <span className="text-[13px] font-medium tnum">{brl(r.p.totalDeposited)}</span> },
+    { id: 'bonus', money: true, header: 'Bônus recebido', align: 'right', sortValue: (r) => bonus[r.p.id] ?? 0, csv: (r) => (API ? '' : bonus[r.p.id] ?? 0), cell: (r) => <span className="text-[13px] tnum">{bonusText(bonus[r.p.id] ?? 0)}</span> },
     { id: 'kyc', header: 'KYC', defaultHidden: true, sortValue: (r) => r.p.kyc, csv: (r) => KYC_LABEL[r.p.kyc], cell: (r) => <Badge tone={r.p.kyc === 'verificado' ? 'success' : r.p.kyc === 'reprovado' ? 'danger' : 'neutral'}>{KYC_LABEL[r.p.kyc]}</Badge> },
     { id: 'sinais', header: 'Sinais', minWidth: 240, wrap: true, sortValue: (r) => r.flags.filter((f) => f.tone !== 'neutral').length, csv: (r) => r.flags.map((f) => f.label).join('; '), cell: (r) => <FlagBadges flags={r.flags} /> },
     {
@@ -1097,7 +1123,7 @@ function NetworkDrawer({
             ['Depositado', brl(n.totals.deposited)],
             ['Sacado', brl(n.totals.withdrawn)],
             ['Apostado', brlCompact(n.totals.bet)],
-            ['Bônus recebido', brl(n.totals.bonus)],
+            ['Bônus recebido', bonusText(n.totals.bonus)],
           ].map(([k, v]) => (
             <div key={k} className="rounded-xl border border-line p-3">
               <p className="text-xs text-fg-3">{k}</p>
@@ -1167,7 +1193,7 @@ function NetworkDrawer({
                       <Stat label="Depósitos" value={brl(m.totalDeposited)} sub={plural(m.depositsCount, 'depósito', 'depósitos')} />
                       <Stat label="Saques" value={brl(m.totalWithdrawn)} sub={m.totalDeposited ? `${pct(m.totalWithdrawn / m.totalDeposited, 0)} do depositado` : '—'} danger={m.totalDeposited > 0 && m.totalWithdrawn >= m.totalDeposited * 0.8} />
                       <Stat label="Apostado" value={brlCompact(m.totalBet)} sub={plural(m.betsCount, 'aposta', 'apostas')} />
-                      <Stat label="Bônus recebido" value={brl(bonus[m.id] ?? 0)} sub={`saldo ${brl(m.balanceReal)}`} danger={(bonus[m.id] ?? 0) > 0 && (bonus[m.id] ?? 0) >= Math.max(50, m.totalDeposited)} />
+                      <Stat label="Bônus recebido" value={bonusText(bonus[m.id] ?? 0)} sub={`saldo ${brl(m.balanceReal)}`} danger={(bonus[m.id] ?? 0) > 0 && (bonus[m.id] ?? 0) >= Math.max(50, m.totalDeposited)} />
                     </div>
                     <DescriptionList
                       className="mt-3 border-t border-line pt-3"

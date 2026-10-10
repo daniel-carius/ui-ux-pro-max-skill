@@ -8,7 +8,7 @@ import { Badge, Button, DescriptionList, Input, Mono, toast, type Tone } from '@
 import type { Affiliate, AffiliateType } from '@/data/players'
 import { PAYOUT_METHOD_LABEL, type PayoutMethod } from '@/data/afiliados'
 import { maskAffiliatePixKey, revealAffiliateContact, type AffiliateContactDetails } from '@/domain/afiliados'
-import { maskEmail } from '@/lib/format'
+import { formatDecimalInput, maskEmail, parseDecimalInput } from '@/lib/format'
 import { cn } from '@/lib/cn'
 
 export const TYPE_META: Record<AffiliateType, { label: string; icon: LucideIcon; tone: Tone; slot: SeriesSlot; description: string }> = {
@@ -85,20 +85,38 @@ export function OptionalMoneyInput({
   invalid?: boolean
   disabled?: boolean
 }) {
+  // campo de texto com vírgula decimal ("1.500,50"): o campo numérico do navegador descartava a vírgula
+  const [draft, setDraft] = useState<string | null>(null)
+  const shown =
+    draft !== null && (draft.trim() === '' ? value === null : Object.is(parseDecimalInput(draft), value))
+      ? draft
+      : value === null || !Number.isFinite(value)
+        ? ''
+        : formatDecimalInput(value)
   return (
     <div className="relative">
       <Input
         id={id}
         prefix="R$"
-        type="number"
+        type="text"
         inputMode="decimal"
-        min={0}
-        step={0.01}
+        autoComplete="off"
         disabled={disabled}
         invalid={invalid}
         placeholder={emptyLabel}
-        value={value === null || !Number.isFinite(value) ? '' : value}
-        onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
+        value={shown}
+        onChange={(e) => {
+          const t = e.target.value
+          if (t.trim() === '') {
+            setDraft('')
+            onChange(null)
+            return
+          }
+          const n = parseDecimalInput(t)
+          if (n === null) return
+          setDraft(t)
+          onChange(n)
+        }}
         className="tnum"
       />
       {value !== null && !disabled && (

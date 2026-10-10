@@ -61,16 +61,17 @@ import {
   toast,
   type Tone,
 } from '@/components/ui'
-import { brl, cpf as fmtCpf, date, dateTime, maskCpf, maskEmail, maskPhone, num, pct, phone as fmtPhone, plural, relative } from '@/lib/format'
+import { brl, cpf as fmtCpf, date, dateTime, isValidDate, maskCpf, maskEmail, maskPhone, num, pct, phone as fmtPhone, plural, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { findKvRule } from '@shared/kv-registry'
 import { isApiMode } from '@/lib/api'
-import { dbGet, dbSetAndWait, refreshKey, useCollection } from '@/lib/store'
+import { dbGet, dbSetAndWait, refreshKey, useCollection, useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { DAY } from '@/data/now'
 import { DATA_KEYS, useAffiliates, usePlayers, useTransactions } from '@/data/hooks'
 import { KYC_LABEL, PLAYER_STATUS_LABEL, type KycStatus, type Player, type PlayerOrigin, type PlayerRole, type PlayerStatus } from '@/data/players'
 import { TRANSACTION_TYPE_LABEL, type Transaction, type TransactionType } from '@/data/finance'
+import { SEGURANCA_KEYS, seedBlocks, type Block } from '@/data/seguranca'
 import { audit, useSession } from '@/domain/session'
 import {
   GERAL_KEYS,
@@ -84,6 +85,7 @@ import {
   buildManualTx,
   isPlayerRequestedPause,
   manualAdjustPreview,
+  manualCreditsLast24h,
   playerGgr,
   playerRtp,
   sameIpAccounts,
@@ -92,6 +94,7 @@ import {
   walletBalance,
   walletPatch,
   type AnnotatedTransaction,
+  type BannedNetworkAccount,
   type ManualAdjustInput,
   type StatusAction,
   type StatusActionOption,
@@ -196,6 +199,7 @@ export function SignedAmount({ value, className }: { value: number; className?: 
 // ---------- Ficha do jogador ----------
 
 const EMPTY_HISTORY: StatusEvent[] = []
+const EMPTY_NET_BANS: BannedNetworkAccount[] = []
 
 const STATUS_ACTION_ICON: Record<StatusAction, LucideIcon> = {
   bloquear: Ban,
@@ -334,9 +338,10 @@ const TILE_TONE: Record<'success' | 'primary' | 'gold', string> = {
 
 function BalanceTile({ icon: Icon, label, value, tone }: { icon: LucideIcon; label: string; value: string; tone: keyof typeof TILE_TONE }) {
   return (
-    <div className="min-w-0 rounded-xl border border-line bg-surface-2 p-3">
+    <div className="min-w-0 rounded-xl border border-line bg-surface-2 p-2.5 sm:p-3">
       <div className="flex items-center gap-1.5">
-        <span className={cn('flex h-6 w-6 shrink-0 items-center justify-center rounded-md', TILE_TONE[tone])}>
+        {/* no celular (3 colunas estreitas) o ícone sai para o rótulo caber ("Saldo real" ficava "Saldo r…") */}
+        <span className={cn('hidden h-6 w-6 shrink-0 items-center justify-center rounded-md min-[440px]:flex', TILE_TONE[tone])}>
           <Icon size={13} aria-hidden />
         </span>
         <span className="truncate text-xs text-fg-3">{label}</span>
@@ -369,6 +374,14 @@ function Stat({ label, value, sub, tone }: { label: string; value: ReactNode; su
       {sub && <p className="truncate text-[11.5px] text-fg-3">{sub}</p>}
     </div>
   )
+}
+
+/** Concordância com "conta" (feminino): "Conta reativada", não "Conta ativo". */
+const ACCOUNT_STATUS_TOAST: Record<PlayerStatus, string> = {
+  ativo: 'Conta reativada',
+  bloqueado: 'Conta bloqueada',
+  autoexcluido: 'Conta autoexcluída',
+  pausa: 'Conta em pausa',
 }
 
 function SummaryTab({ p, players, canReveal, canEdit }: { p: Player; players: Player[]; canReveal: boolean; canEdit: boolean }) {
@@ -451,7 +464,11 @@ function SummaryTab({ p, players, canReveal, canEdit }: { p: Player; players: Pl
             { label: 'E-mail', value: <span className="break-all">{revealed ? p.email : maskEmailShort(p.email)}</span> },
             { label: 'Celular', value: <Mono className="text-fg">{revealed ? fmtPhone(p.phone) : maskPhone(p.phone)}</Mono> },
             { label: 'CPF', value: <Mono className="text-fg">{revealed ? fmtCpf(p.cpf) : maskCpf(p.cpf)}</Mono> },
-            { label: 'Nascimento', value: `${date(p.birthDate)} · ${ageFrom(p.birthDate)} anos` },
+            {
+              label: 'Nascimento',
+              // quem não vê dados pessoais recebe a data mascarada pelo servidor ("•••000Z")
+              value: isValidDate(p.birthDate) ? `${date(p.birthDate)} · ${ageFrom(p.birthDate)} anos` : <span className="text-fg-3">Mascarada (LGPD)</span>,
+            },
             { label: 'Código de indicação', value: <Mono className="text-fg">{p.refCode}</Mono> },
             { label: 'Indicado por', value: referrer ? `${referrer.name} (${referrer.code})` : '—' },
           ]}
@@ -519,13 +536,32 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
   const players = usePlayers()
   const txs = useTransactions()
   const history = useCollection<StatusEvent>(GERAL_KEYS.statusHistory, EMPTY_HISTORY)
-  const { user, can } = useSession()
+  // bloqueios do anti-fraude (modo API: só para quem lê o Anti-fraude; sem leitura, lista vazia)
+  const [blocks] = useDb<Block[]>(SEGURANCA_KEYS.blocks, seedBlocks)
+  // modo API, sem leitura do Anti-fraude (Suporte): o servidor diz só a rede e a data do banimento da conta
+  const [netBanView] = useDb<BannedNetworkAccount[]>(GERAL_KEYS.bannedNetworks, EMPTY_NET_BANS)
+  const { user, can, canView } = useSession()
   const mine = history.items.filter((h) => h.playerId === p.id)
   const lastPause = mine.find((h) => h.action === 'pausar') ?? null
   const lastBlock = mine.find((h) => h.action === 'bloquear') ?? null
+  // conta bloqueada pelo banimento de uma rede: só sai do bloqueio desfazendo o banimento (o servidor recusa
+  // o desbloqueio pela ficha com 409 rede_banida, e a aprovação de saque da conta segue recusada)
+  const fullBan = blocks.find((b) => b.kind === 'rede' && b.accounts.includes(p.id)) ?? null
+  const viewBan = !fullBan && isApiMode() ? (netBanView.find((b) => b.playerId === p.id) ?? null) : null
+  const netBan =
+    p.status !== 'bloqueado'
+      ? null
+      : fullBan
+        ? { network: fullBan.value, detail: `Banida em ${dateTime(fullBan.createdAt)} por ${fullBan.createdBy}. Motivo: ${fullBan.reason}. ` }
+        : viewBan
+          ? { network: viewBan.network, detail: viewBan.bannedAt ? `Banida em ${dateTime(viewBan.bannedAt)}. ` : '' }
+          : null
+  const netBanReason = netBan ? `A conta faz parte da rede ${netBan.network}, banida pelo anti-fraude: desfaça o banimento em Anti-fraude › Bloqueios.` : undefined
   // mesma tabela de transições do servidor (shared/players.ts), com as permissões da pessoa
   const statusPerms = new Set(['usuarios.editar', 'antifraude.banir'].filter((perm) => can(perm)))
-  const actions = statusActions(p.status, lastPause, Date.now(), statusPerms, lastBlock)
+  const actions = statusActions(p.status, lastPause, Date.now(), statusPerms, lastBlock).map((a) =>
+    a.action === 'desbloquear' && netBan ? { ...a, allowed: false, reason: netBanReason } : a,
+  )
   const [busy, setBusy] = useState(false)
 
   const changeStatus = async (opt: StatusActionOption, pauseDays?: number) => {
@@ -570,14 +606,15 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
       history.add(event)
     }
     audit(action === 'bloquear' ? 'bloquear' : 'editar', `Jogador #${p.id}`, `${STATUS_ACTION_LABEL[action]}${until ? ` até ${dateTime(until)}` : ''}. Motivo: ${r.value}`)
-    toast.success(`Conta ${PLAYER_STATUS_LABEL[next].toLowerCase()}`, { description: `${p.nickname} · registrado na auditoria.` })
+    toast.success(ACCOUNT_STATUS_TOAST[next], { description: `${p.nickname} · registrado na auditoria.` })
   }
 
   // ajuste manual
   const blank: ManualAdjustInput = { kind: 'credito', wallet: 'real', amount: 0, reason: '', note: '' }
   const [adj, setAdj] = useState<ManualAdjustInput>(blank)
   const [touched, setTouched] = useState(false)
-  const errors = validateManualAdjust(adj, p)
+  const credited24h = useMemo(() => manualCreditsLast24h(txs.items, p.id), [txs.items, p.id])
+  const errors = validateManualAdjust(adj, p, credited24h)
   const hasErrors = Object.keys(errors).length > 0
   const preview = manualAdjustPreview(adj, p)
   const show = (k: keyof typeof errors) => (touched || (k === 'amount' && adj.amount > 0) || k === 'kind' ? errors[k] : undefined)
@@ -682,8 +719,23 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
               Autoexclusão é decisão do jogador e não pode ser desfeita pelo painel. O jogador não recebe creditações nem comunicações.
             </Alert>
           )}
+          {netBan && (
+            <Alert tone="danger" className="mt-3" title={`Bloqueada pelo banimento da rede ${netBan.network}`}>
+              {netBan.detail}
+              Enquanto o banimento valer, a conta não é desbloqueada por aqui e os saques dela são recusados na aprovação. Para liberar, desfaça o
+              banimento da rede em{' '}
+              {canView('antifraude') ? (
+                <Link to="/seguranca/antifraude?aba=bloqueios" className="link">
+                  Anti-fraude › Bloqueios
+                </Link>
+              ) : (
+                'Anti-fraude › Bloqueios'
+              )}
+              .
+            </Alert>
+          )}
           {!canEdit && p.status !== 'autoexcluido' && <p className="mt-3 text-xs text-fg-3">Seu cargo pode ver, mas não alterar o status da conta.</p>}
-          {canEdit && actions.some((a) => !a.allowed && a.reason) && (
+          {canEdit && !netBan && actions.some((a) => !a.allowed && a.reason) && (
             <p className="mt-3 text-xs text-fg-3">{actions.find((a) => !a.allowed)?.reason}</p>
           )}
         </div>
@@ -729,8 +781,8 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
           </div>
           {errors.kind && <p className="text-xs font-medium text-danger">{errors.kind}</p>}
           <FormGrid>
-            <Field label="Valor" htmlFor="adj-amount" required error={show('amount')} hint={`Até ${brl(MANUAL_ADJUST_LIMIT)} por lançamento.`}>
-              <MoneyInput id="adj-amount" value={adj.amount} onValueChange={(amount) => setAdj((a) => ({ ...a, amount }))} invalid={!!show('amount')} />
+            <Field label="Valor" htmlFor="adj-amount" required error={show('amount')} hint={`Até ${brl(MANUAL_ADJUST_LIMIT)} por lançamento e ${brl(MANUAL_ADJUST_LIMIT)} em créditos por jogador em 24 h${credited24h > 0 ? ` (já lançado: ${brl(credited24h)})` : ''}.`}>
+              <MoneyInput id="adj-amount" value={adj.amount} onValueChange={(amount) => setAdj((a) => ({ ...a, amount }))} invalid={!!show('amount')} blankWhenZero placeholder="0,00" />
             </Field>
             <Field label="Motivo" htmlFor="adj-reason" required error={show('reason')}>
               <Select id="adj-reason" value={adj.reason} placeholder="Selecione" options={MANUAL_REASONS.map((r) => ({ value: r, label: r }))} onChange={(reason) => setAdj((a) => ({ ...a, reason }))} />

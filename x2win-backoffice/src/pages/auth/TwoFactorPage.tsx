@@ -41,7 +41,7 @@ export function TwoFactorPage({ me }: { me: MeResponse }) {
       await api<LoginResponse>('POST', '/api/auth/2fa/verify', { code: value })
       await reload()
     } catch (e) {
-      setError(describeAuthError(e, 'code'))
+      setError(describeAuthError(e, mode === 'recovery' ? 'recovery' : 'code'))
       if (mode === 'app') setCode('')
       else setTimeout(() => recoveryRef.current?.focus(), 0)
     } finally {

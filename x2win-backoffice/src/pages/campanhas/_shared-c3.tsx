@@ -600,7 +600,15 @@ export function EmailFrame({
       </div>
       <div className="flex items-center gap-2 border-b border-line px-4 py-2 text-[11.5px] text-fg-3">
         <Archive size={12} aria-hidden />
-        De: <span className="font-medium text-fg-2">{fromName}</span> &lt;{fromEmail}&gt;
+        De:{' '}
+        {/* sem e-mail do remetente em Integrações: diz isso, em vez de "X2Win <>" */}
+        {fromEmail.trim() ? (
+          <>
+            <span className="font-medium text-fg-2">{fromName}</span> &lt;{fromEmail}&gt;
+          </>
+        ) : (
+          <span className="text-warning">remetente não definido (Integrações)</span>
+        )}
       </div>
       <div className="bg-surface-2 p-3 sm:p-5">
         <div className="mx-auto max-w-[480px] overflow-hidden rounded-lg border border-line bg-surface">

@@ -10,7 +10,7 @@
 import { z } from 'zod'
 import { canReadKey, canWriteKey } from '@shared/kv-registry'
 import { brl } from '@shared/money'
-import { isAdminLevelRole, isGovernedChange, isGovernedRole, isRequire2faLocked, PERMISSION_BY_KEY, PERMISSIONS, type Role } from '@shared/permissions'
+import { isAdminLevelRole, isGoverned2faWeakening, isGovernedChange, isGovernedRole, isRequire2faLocked, PERMISSION_BY_KEY, PERMISSIONS, type Role } from '@shared/permissions'
 import type { Db } from '../../db'
 import { Errors } from '../../errors'
 import { newId } from '../../lib/crypto'
@@ -249,6 +249,14 @@ export const kvHandlers: KvHandlers = {
           for (const r of created) assertGovernedGrant(auth, r.name, null, { permissions: r.permissions, approvalCeiling: r.approvalCeiling })
           for (const c of changes) assertGovernedGrant(auth, c.old.name, c.old, { permissions: c.next.permissions, approvalCeiling: c.incoming.approvalCeiling })
           for (const r of deleted) assertGovernedGrant(auth, r.name, r, null)
+          // 2FA deixado opcional num cargo com governança (aprova saques, jogo responsável, países, administrativo)
+          for (const c of changes) {
+            if (isGoverned2faWeakening(c.old, { permissions: c.next.permissions, require2fa: c.next.require2fa }) && !auth.perms.has(GRANT_PERM)) {
+              throw Errors.forbidden(
+                `Só quem pode conceder cargos deixa o 2FA opcional no cargo ${c.old.name}: ele aprova saques ou altera regras reguladas.`,
+              )
+            }
+          }
 
           // exclusões primeiro: liberam nomes para os cargos novos
           let movedTotal = 0

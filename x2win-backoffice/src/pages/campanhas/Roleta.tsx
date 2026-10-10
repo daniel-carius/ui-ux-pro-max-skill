@@ -234,7 +234,7 @@ export default function Roleta() {
         </Badge>
       ),
     },
-    { id: 'cost', header: 'Custo do prêmio', align: 'right', sortValue: (s) => spinCost(s, coin), csv: (s) => spinCost(s, coin).toFixed(2), cell: (s) => <span className="tnum">{brl(spinCost(s, coin))}</span> },
+    { id: 'cost', money: true, header: 'Custo do prêmio', align: 'right', sortValue: (s) => spinCost(s, coin), csv: (s) => spinCost(s, coin).toFixed(2), cell: (s) => <span className="tnum">{brl(spinCost(s, coin))}</span> },
     {
       id: 'coins',
       header: 'Pagou para girar',

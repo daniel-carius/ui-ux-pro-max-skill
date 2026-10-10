@@ -428,6 +428,8 @@ async function decideOnServer(w: AffiliateWithdrawal, action: 'pay' | 'reject', 
     if (e instanceof ApiError && (e.code === 'ja_decidido' || e.status === 404 || isVersionConflict(e))) refreshKey(AFILIADOS_KEYS.withdrawals).catch(() => {})
     if (isVersionConflict(e)) refreshKey(DATA_KEYS.affiliates).catch(() => {})
     const why = e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor.'
+    // regra que tentar de novo não resolve (teto do cargo, permissão): sem "tente de novo"
+    if (e instanceof ApiError && e.status === 403) return { ok: false, message: `${why} Nada foi pago nem devolvido.` }
     return { ok: false, message: `${why} ${NOT_SAVED}` }
   }
 }

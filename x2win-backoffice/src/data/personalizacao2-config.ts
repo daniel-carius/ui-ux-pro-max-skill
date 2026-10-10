@@ -178,7 +178,8 @@ export function footerDefaults(c: CompanyState): FooterSettings {
     seal18: true,
     sealResponsible: true,
     sealLicense: true,
-    licenseText: `Autorizada pela Secretaria de Prêmios e Apostas do Ministério da Fazenda · ${c.license}`,
+    // sem licença em Empresa e licença: campo vazio (a validação pede o texto), nunca "Fazenda · " com nada depois
+    licenseText: c.license.trim() ? `Autorizada pela Secretaria de Prêmios e Apostas do Ministério da Fazenda · ${c.license.trim()}` : '',
   }
 }
 
@@ -268,7 +269,10 @@ export function footerErrors(v: FooterSettings) {
     const err = contactError(def.key, v[def.key])
     if (err) e[def.key] = err
   }
-  if (v.sealLicense && !v.licenseText.trim()) e.licenseText = 'O selo de licença precisa do texto da autorização.'
+  const lic = v.licenseText.trim()
+  if (v.sealLicense && !lic) e.licenseText = 'O selo de licença precisa do texto da autorização, com o número (cadastre em Empresa e licença e use "Usar dados da empresa").'
+  // texto que termina num separador ("… Fazenda · "): falta o número da autorização
+  else if (/[·•|:;,–—-]$/.test(lic)) e.licenseText = `O texto termina em "${lic.slice(-1)}" sem nada depois: complete com o número da autorização ou tire o separador.`
   return e
 }
 

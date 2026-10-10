@@ -130,7 +130,7 @@ export default function Usuarios() {
       cell: (p) => <Badge tone={KYC_TONE[p.kyc]}>{KYC_LABEL[p.kyc]}</Badge>,
     },
     {
-      id: 'balance',
+      id: 'balance', money: true,
       header: 'Saldo',
       align: 'right',
       sortValue: (p) => playerBalance(p),
@@ -155,7 +155,7 @@ export default function Usuarios() {
       ),
     },
     {
-      id: 'totalDeposited',
+      id: 'totalDeposited', money: true,
       header: 'Total depositado',
       align: 'right',
       sortValue: (p) => p.totalDeposited,

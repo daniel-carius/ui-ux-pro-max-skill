@@ -24,6 +24,8 @@ import { date, num } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { useCollection } from '@/lib/store'
 import { COUNTRIES, COUNTRY_BY_CODE, PLATFORM_BLOCKED, blockedHits30d, seedBlockedCountries, type BlockedCountry } from '@/data/config1-paises'
+import { isApiMode } from '@/lib/api'
+import { NO_SOURCE_HINT } from '@/components/ui'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { BLOCKED_COUNTRIES_KEY, BLOCK_EFFECTS, HOME_COUNTRY, blockSource, canBlockCountry } from '@/domain/config1-paises'
 import { BrowserFrame, CheckRow, IsoBadge } from './_shared-f'
@@ -36,6 +38,8 @@ const EFFECT_ICON: Record<(typeof BLOCK_EFFECTS)[number]['id'], LucideIcon> = {
   saque: ArrowUpFromLine,
 }
 
+/** Modo API: acessos barrados vêm do site público, ainda não conectado (a contagem é só da demonstração). */
+const HAS_HITS = !isApiMode()
 const PLATFORM_CODES = PLATFORM_BLOCKED.map((p) => p.code)
 const countryName = (code: string) => COUNTRY_BY_CODE.get(code)?.name ?? code
 
@@ -117,7 +121,18 @@ export default function Paises() {
         <KpiCard label="Países bloqueados" icon={Earth} tone="danger" value={num(PLATFORM_CODES.length + customCodes.length)} hint="regra da plataforma + operação" />
         <KpiCard label="Regra da plataforma" icon={Lock} tone="neutral" value={num(PLATFORM_CODES.length)} hint="fixos, não podem ser removidos" />
         <KpiCard label="Adicionados pela operação" icon={ShieldBan} tone="warning" value={num(customCodes.length)} hint="podem ser removidos aqui" />
-        <KpiCard label="Acessos barrados" icon={Ban} tone="info" value={num(totalHits)} hint="nos últimos 30 dias" formula="Tentativas de abrir o site a partir de um país bloqueado, identificadas pelo IP. Simulado nesta demonstração." />
+        <KpiCard
+          label="Acessos barrados"
+          icon={Ban}
+          tone="info"
+          value={HAS_HITS ? num(totalHits) : '—'}
+          hint={HAS_HITS ? 'nos últimos 30 dias (demonstração)' : NO_SOURCE_HINT}
+          formula={
+            HAS_HITS
+              ? 'Tentativas de abrir o site a partir de um país bloqueado, identificadas pelo IP. Simulado nesta demonstração.'
+              : 'Tentativas de abrir o site a partir de um país bloqueado, identificadas pelo IP. Vêm do site público, ainda não conectado a este painel.'
+          }
+        />
       </section>
 
       <Card className="mb-5">
@@ -171,9 +186,9 @@ export default function Paises() {
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-[13px] font-medium text-fg">{countryName(p.code)}</p>
                         <p className="truncate text-xs text-fg-3">{p.reason}</p>
-                        <p className="mt-0.5 text-[11px] text-fg-3 tnum sm:hidden">{num(blockedHits30d(p.code))} barrados em 30 dias</p>
+                        {HAS_HITS && <p className="mt-0.5 text-[11px] text-fg-3 tnum sm:hidden">{num(blockedHits30d(p.code))} barrados em 30 dias</p>}
                       </div>
-                      <span className="hidden shrink-0 text-xs text-fg-3 tnum sm:inline">{num(blockedHits30d(p.code))} barrados</span>
+                      {HAS_HITS && <span className="hidden shrink-0 text-xs text-fg-3 tnum sm:inline">{num(blockedHits30d(p.code))} barrados</span>}
                       <Badge tone="neutral" icon={Lock} className="shrink-0">
                         <span className="hidden sm:inline">regra da plataforma</span>
                         <span className="sm:hidden">fixo</span>
@@ -200,10 +215,10 @@ export default function Paises() {
                         <p className="truncate text-xs text-fg-3">{b.reason}</p>
                         <p className="mt-0.5 truncate text-[11px] text-fg-3">
                           {b.createdBy}, {date(b.createdAt)}
-                          <span className="sm:hidden"> · {num(blockedHits30d(b.code))} barrados</span>
+                          {HAS_HITS && <span className="sm:hidden"> · {num(blockedHits30d(b.code))} barrados</span>}
                         </p>
                       </div>
-                      <span className="hidden shrink-0 text-xs text-fg-3 tnum sm:inline">{num(blockedHits30d(b.code))} barrados</span>
+                      {HAS_HITS && <span className="hidden shrink-0 text-xs text-fg-3 tnum sm:inline">{num(blockedHits30d(b.code))} barrados</span>}
                       <IconButton icon={Unlock} label={`Desbloquear ${countryName(b.code)}`} variant="danger" size="sm" disabled={!canEdit} title={noEdit} onClick={() => unblock(b)} />
                     </li>
                   ))}

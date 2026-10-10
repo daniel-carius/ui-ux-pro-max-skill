@@ -55,33 +55,45 @@ function toDate(d: DateInput): Date {
   return d instanceof Date ? d : new Date(d)
 }
 
+/**
+ * Data utilizável? Falso para valor vazio, texto que não é data e máscara do servidor
+ * (ex.: data de nascimento "•••000Z" para quem não vê dados pessoais). Intl.DateTimeFormat
+ * lança RangeError com data inválida: toda formatação abaixo passa por aqui e mostra "—".
+ */
+export function isValidDate(d: DateInput | null | undefined): boolean {
+  if (d == null || d === '') return false
+  return !Number.isNaN(toDate(d).getTime())
+}
+
 /** 09/10/2026 */
 export function date(d: DateInput | null | undefined): string {
-  if (d == null) return '—'
-  return dateFmt.format(toDate(d))
+  if (!isValidDate(d)) return '—'
+  return dateFmt.format(toDate(d!))
 }
 
 /** 09/10 */
 export function dateShort(d: DateInput): string {
+  if (!isValidDate(d)) return '—'
   return dateShortFmt.format(toDate(d))
 }
 
 /** 14:32 */
 export function time(d: DateInput): string {
+  if (!isValidDate(d)) return '—'
   return timeFmt.format(toDate(d))
 }
 
 /** 09/10/2026 14:32 */
 export function dateTime(d: DateInput | null | undefined): string {
-  if (d == null) return '—'
-  const dt = toDate(d)
+  if (!isValidDate(d)) return '—'
+  const dt = toDate(d!)
   return `${dateFmt.format(dt)} ${timeFmt.format(dt)}`
 }
 
 /** "há 5 min", "há 3 h", "há 2 dias" */
 export function relative(d: DateInput | null | undefined, now: Date = new Date()): string {
-  if (d == null) return '—'
-  const diff = (now.getTime() - toDate(d).getTime()) / 1000
+  if (!isValidDate(d)) return '—'
+  const diff = (now.getTime() - toDate(d!).getTime()) / 1000
   if (diff < 0) return 'agora'
   if (diff < 60) return 'agora'
   if (diff < 3600) return `há ${Math.floor(diff / 60)} min`
@@ -109,6 +121,37 @@ export function parseBRNumber(input: string): number {
   const clean = input.replace(/[^\d,.-]/g, '')
   if (clean.includes(',')) return Number(clean.replace(/\./g, '').replace(',', '.'))
   return Number(clean)
+}
+
+/**
+ * Lê o texto de um campo numérico do jeito brasileiro (o campo é texto: o <input type="number"> do navegador
+ * descarta a vírgula sem aviso e "12,5" virava 125).
+ *  - vírgula é o separador decimal: "12,5" → 12.5; "1.500,50" e "1500,50" → 1500.5;
+ *  - sem vírgula, ponto seguido de grupos de 3 dígitos é milhar ("1.500" → 1500) e os demais são decimais
+ *    ("12.5" → 12.5, como um número colado de outro sistema);
+ *  - vazio, "-" e "," valem 0 (a pessoa ainda está digitando).
+ * null: o texto não é um número (a tecla é recusada e o campo fica como estava).
+ */
+export function parseDecimalInput(raw: string, allowNegative = false): number | null {
+  let t = raw.replace(/\s/g, '')
+  let sign = 1
+  if (allowNegative && t.startsWith('-')) {
+    sign = -1
+    t = t.slice(1)
+  }
+  if (t.includes(',')) {
+    if (!/^(\d{1,3}(\.\d{3})+|\d*),\d*$/.test(t)) return null
+    t = t.replace(/\./g, '').replace(',', '.')
+  } else if (/^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, '')
+  else if (!/^\d*\.?\d*$/.test(t)) return null
+  if (t === '' || t === '.') return 0
+  const n = Number(t)
+  return Number.isFinite(n) ? sign * n : null
+}
+
+/** Número no campo de texto, com vírgula decimal e sem milhar ("1500,5"). */
+export function formatDecimalInput(n: number): string {
+  return Number.isFinite(n) ? String(n).replace('.', ',') : ''
 }
 
 /** Esconde o meio de um CPF: 123.***.***-09 */
@@ -166,9 +209,22 @@ export function phone(value: string): string {
   return value
 }
 
+/** Chave PIX revelada no formato do tipo: CPF 123.456.789-09, celular (11) 90724-3561; e-mail e aleatória como vieram. */
+export function pixKey(type: string, key: string): string {
+  if (type === 'CPF') return cpf(key)
+  if (type === 'Celular') return phone(key.replace(/^\+?55(?=\d{10,11}$)/, ''))
+  return key
+}
+
 /** Iniciais para avatar */
 export function initials(name: string): string {
-  const parts = name.trim().split(/\s+/)
+  // só palavras (sem parênteses e pontuação na frente): "Equipe (demonstração)" vira "ED", não "E("
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .map((w) => w.replace(/^[^\p{L}\p{N}]+/u, ''))
+    .filter(Boolean)
+  if (!parts.length) return '?'
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }

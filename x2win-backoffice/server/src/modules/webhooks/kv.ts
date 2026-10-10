@@ -55,6 +55,12 @@ export interface ExecutionRow {
   duration_ms: number | null
   payload: string
   test: boolean
+  /** X-X2W-Delivery enviado (o mesmo em todas as tentativas da fila); null em linhas antigas */
+  delivery_id?: string | null
+  /** número da tentativa (1 a WEBHOOK_MAX_ATTEMPTS); null em linhas antigas */
+  attempt?: number | null
+  /** X-X2W-Timestamp assinado (segundos Unix); null sem envio (bloqueado antes) ou linha antiga */
+  signed_at?: string | number | null
 }
 
 /** Endereço completo do destino (lança se a cifra não abrir). */
@@ -90,6 +96,10 @@ export function toPanelExecution(r: ExecutionRow) {
     durationMs: r.duration_ms ?? 0,
     payload: r.payload,
     test: r.test,
+    // o que o destino recebeu (só quando registrado: linhas antigas não têm)
+    ...(r.delivery_id ? { deliveryId: r.delivery_id } : {}),
+    ...(r.attempt ? { attempt: Number(r.attempt) } : {}),
+    ...(r.signed_at != null ? { timestamp: Number(r.signed_at) } : {}),
   }
 }
 

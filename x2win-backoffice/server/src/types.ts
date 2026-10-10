@@ -1,4 +1,5 @@
 // Tipos de contexto compartilhados pelos módulos do servidor.
+import type { SessionEndReason } from '@shared/api'
 import type { Role } from '@shared/permissions'
 import type { Config } from './config'
 import type { Db } from './db'
@@ -36,5 +37,7 @@ declare module 'fastify' {
     auth: AuthContext | null
     /** IP real do cliente (considera TRUST_PROXY) */
     clientIp: string
+    /** cookie de uma sessão que terminou: o motivo (null sem cookie, com sessão válida ou sem motivo) */
+    sessionEnded: SessionEndReason | null
   }
 }

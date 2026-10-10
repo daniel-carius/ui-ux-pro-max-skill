@@ -91,12 +91,12 @@ export default function Rankings() {
   const winners = ranked.filter((r) => r.won > r.wagered).length
 
   const extraCols: Column<Row>[] = [
-    { id: 'wagered', header: 'Apostado', align: 'right', sortValue: (r) => r.wagered, cell: (r) => brl(r.wagered) },
+    { id: 'wagered', money: true, header: 'Apostado', align: 'right', sortValue: (r) => r.wagered, cell: (r) => brl(r.wagered) },
     { id: 'bets', header: 'Apostas', align: 'right', sortValue: (r) => r.bets, cell: (r) => num(r.bets) },
-    { id: 'won', header: 'Ganho', align: 'right', sortValue: (r) => r.won, cell: (r) => brl(r.won) },
-    { id: 'biggestWin', header: 'Maior ganho', align: 'right', sortValue: (r) => r.biggestWin, cell: (r) => brl(r.biggestWin) },
+    { id: 'won', money: true, header: 'Ganho', align: 'right', sortValue: (r) => r.won, cell: (r) => brl(r.won) },
+    { id: 'biggestWin', money: true, header: 'Maior ganho', align: 'right', sortValue: (r) => r.biggestWin, cell: (r) => brl(r.biggestWin) },
     {
-      id: 'result',
+      id: 'result', money: true,
       header: 'Resultado do jogador',
       label: 'Resultado do jogador',
       align: 'right',
@@ -134,6 +134,8 @@ export default function Rankings() {
       id: 'metric',
       header: meta.metric,
       label: meta.metric,
+      // valor em reais: no CSV sempre com duas casas ("254,00", não "254")
+      money: meta.format === 'brl',
       pinned: true,
       minWidth: 180,
       sortValue: (r) => r.value,

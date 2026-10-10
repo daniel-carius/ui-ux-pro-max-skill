@@ -379,7 +379,13 @@ describe('segurança do login e do 2FA', () => {
       const ok = await api(app, 'POST', '/api/auth/2fa/verify', { cookie: cookieFrom(la)!, body: { code: a.codes[0].toLowerCase() }, ip: freshIp() })
       expect(ok.statusCode, ok.body).toBe(200)
       const la2 = await login(app, a.u.email, a.u.password)
-      expectError(await api(app, 'POST', '/api/auth/2fa/verify', { cookie: cookieFrom(la2)!, body: { code: a.codes[0] }, ip: freshIp() }), 401, 'credenciais_invalidas')
+      const reused = await api(app, 'POST', '/api/auth/2fa/verify', { cookie: cookieFrom(la2)!, body: { code: a.codes[0] }, ip: freshIp() })
+      expectError(reused, 401, 'credenciais_invalidas')
+      // r1: código de recuperação usado mostrava a mensagem do aplicativo autenticador
+      expect(reused.json().error.message).toMatch(/Código de recuperação inválido ou já usado/)
+      expect(reused.json().error.details).toEqual({ kind: 'recuperacao' })
+      const app6 = await api(app, 'POST', '/api/auth/2fa/verify', { cookie: cookieFrom(la2)!, body: { code: '000000' }, ip: freshIp() })
+      expect(app6.json().error.message).toMatch(/aplicativo autenticador/)
     })
 
     it('hash vazado no formato antigo (sha256 de 40 bits) não vira segundo fator', async () => {

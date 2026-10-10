@@ -273,6 +273,32 @@ describe('kv: conteúdo do site público (ponta a ponta, Marketing oficial)', ()
     }
     expect((await put(app, mkt, 'personalizacao.rodape', { companyName: 'X2Win', termsUrl: 'javascript:alert(1)', telegram: '' })).statusCode).toBe(400)
     expect((await put(app, mkt, 'personalizacao.rodape', { companyName: 'X2Win', termsUrl: 'https://x2win.bet.br/termos', telegram: 'javascript:alert(1)' })).statusCode).toBe(400)
+    // r1: WhatsApp, telefone e e-mail do rodapé eram conferidos só pelo painel
+    const footer = { companyName: 'X2Win', termsUrl: 'https://x2win.bet.br/termos', telegram: '' }
+    // r3: texto da licença com o separador e sem o número ("… Fazenda · ") ia para o site
+    for (const bad of [
+      { whatsapp: 'javascript:alert(1)' },
+      { whatsapp: '(11) 4002-8922' },
+      { phone: '123' },
+      { phone: 'tel:11987654321' },
+      { email: 'nao-e-email' },
+      { licenseText: 'Autorizada pela Secretaria de Prêmios e Apostas do Ministério da Fazenda · ' },
+    ]) {
+      const r = await put(app, mkt, 'personalizacao.rodape', { ...footer, ...bad })
+      expect(r.statusCode, JSON.stringify(bad)).toBe(400)
+    }
+    for (const ok of [
+      { whatsapp: '(11) 94002-8922' },
+      { whatsapp: '+55 11 94002-8922' },
+      { phone: '(11) 4002-8922' },
+      { email: 'suporte@x2win.bet.br' },
+      { whatsapp: '', phone: '', email: '' },
+      { licenseText: 'Autorizada pela Secretaria de Prêmios e Apostas do Ministério da Fazenda · Portaria SPA/MF nº 1.234/2024' },
+    ]) {
+      const cur = (await get(app, mkt, 'personalizacao.rodape')).json() as { version: number; stored: boolean }
+      const r = await put(app, mkt, 'personalizacao.rodape', { ...footer, ...ok }, cur.stored ? cur.version : undefined)
+      expect(r.statusCode, `${JSON.stringify(ok)} ${r.body}`).toBe(200)
+    }
     expect((await put(app, mkt, 'personalizacao.seo', { canonicalUrl: 'https://x2win.bet.br/?utm=1', title: 'X2Win' })).statusCode).toBe(400)
     expect((await put(app, mkt, 'personalizacao.seo', { canonicalUrl: 'https://x2win.bet.br', title: '<script>alert(1)</script>' })).statusCode).toBe(400)
     expect((await put(app, mkt, 'personalizacao.sportsbook', { mode: 'escuro', font: "Roboto;}body{background:url(//evil.example)}", useSiteColors: true })).statusCode).toBe(400)

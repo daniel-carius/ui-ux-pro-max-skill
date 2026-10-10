@@ -7,7 +7,7 @@ import { SECURITY } from '../config'
 import { AppError, Errors } from '../errors'
 import { sha256 } from '../lib/crypto'
 import { rowToRole, type RoleRow } from '../services/roles-repo'
-import { revokeSession } from '../services/sessions'
+import { revokeSession, sessionEndReason } from '../services/sessions'
 import type { AuthContext, SessionStage } from '../types'
 import fp from './fp'
 
@@ -70,6 +70,7 @@ export default fp(async function session(app: FastifyInstance) {
 
   app.addHook('onRequest', async (req) => {
     req.auth = null
+    req.sessionEnded = null
     const token = req.cookies[SECURITY.sessionCookie]
     if (!token || token.length > 200) return
     const id = sha256(token)
@@ -85,10 +86,15 @@ export default fp(async function session(app: FastifyInstance) {
         where s.id = $1 and s.revoked_at is null and s.expires_at > now()`,
       [id],
     )
-    if (!row || row.status !== 'ativo') return
+    if (!row || row.status !== 'ativo') {
+      // cookie de uma sessão que já não vale: o motivo vai no 401 (details.reason) e em GET /api/auth/session
+      req.sessionEnded = await sessionEndReason(app.db, id)
+      return
+    }
     // inatividade: sessão ativa parada além do tempo configurado cai
     if (row.stage === 'active' && Date.now() - new Date(row.last_seen_at).getTime() > row.timeout * 60_000) {
-      await revokeSession(app.db, id)
+      await revokeSession(app.db, id, 'inatividade')
+      req.sessionEnded = 'inatividade'
       return
     }
     const role = rowToRole(row.role)
@@ -98,7 +104,10 @@ export default fp(async function session(app: FastifyInstance) {
     // rebaixada cadastraria o autenticador sem a senha, então um cookie roubado ficaria com o fator.
     // No próximo login (senha conferida de novo) a pessoa cai no cadastro do 2FA.
     if (row.stage === 'active' && !row.totp_enabled && (role.require2fa || row.enforce_all)) {
-      await revokeSession(app.db, id)
+      // o motivo diz de onde veio a exigência: o cargo, ou "2FA de todos" em Segurança do painel
+      const reason = role.require2fa ? '2fa_exigido' : '2fa_exigido_todos'
+      await revokeSession(app.db, id, reason)
+      req.sessionEnded = reason
       return
     }
     const ctx: AuthContext = {

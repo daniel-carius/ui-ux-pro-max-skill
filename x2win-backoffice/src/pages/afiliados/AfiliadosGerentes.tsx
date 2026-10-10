@@ -169,7 +169,7 @@ export default function AfiliadosGerentes() {
       ),
     },
     {
-      id: 'balance',
+      id: 'balance', money: true,
       header: 'Saldo',
       align: 'right',
       sortValue: (r) => r.manager.balance,
