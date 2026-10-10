@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
   Activity,
@@ -43,18 +43,20 @@ import {
   Modal,
   Mono,
   PageHeader,
+  PageLink,
   Segmented,
   Select,
   Switch,
   Tooltip,
   confirm,
   toast,
+  usePathAccess,
   type Column,
 } from '@/components/ui'
 import { WEBHOOK_MAX_ATTEMPTS, type WebhookTestResponse } from '@shared/api'
 import { cn } from '@/lib/cn'
 import { ApiError, api, isApiMode, isVersionConflict } from '@/lib/api'
-import { dateTime, maskSecret, num, pct, plural, relative } from '@/lib/format'
+import { dateTime, maskSecret, num, pct, plural, relative, time } from '@/lib/format'
 import { uid } from '@/lib/random'
 import { dbSetAndWait, dbSetAndWaitResult, patchCache, refreshKey, useDb } from '@/lib/store'
 import { TEMPLATE_KEY, seedTemplates } from '@/data/campanhas-templates'
@@ -75,6 +77,7 @@ import {
 import {
   attemptLabel,
   deliveryStats,
+  deliverySubject,
   destinationReceives,
   exampleSignature,
   findTokenSegments,
@@ -91,6 +94,7 @@ import {
   maskUrlTokens,
   MIN_SECRET_LENGTH,
   needsNewSecret,
+  retryingAttempts,
   simulateDelivery,
   validateWebhookUrl,
   webhookSecretError,
@@ -194,6 +198,7 @@ function demoHostError(f: FormState, url: string) {
 export default function Webhooks() {
   const { canEdit } = usePageAccess()
   const navigate = useNavigate()
+  const statsPage = usePathAccess()('/campanhas/estatisticas')
   const dests = useWebhookDestinations()
   const execs = useWebhookExecutions()
   const [form, setForm] = useState<FormState | null>(null)
@@ -207,6 +212,8 @@ export default function Webhooks() {
   const shownExecs = useMemo(() => execs.items.filter((e) => !isDemoExecution(e, API)), [execs.items])
   // entregas de verdade: sem testes e sem registros de demonstração (a mesma conta de Estatísticas)
   const stats = useMemo(() => deliveryStats(shownExecs.filter((e) => isRealDelivery(e, API)), since30), [shownExecs, since30])
+  // entregas cuja última tentativa falhou e que o servidor ainda vai tentar de novo (id da tentativa → próxima)
+  const retrying = useMemo(() => retryingAttempts(shownExecs), [shownExecs])
   // template do evento desligado (Campanhas › Templates): o evento acontece, mas nenhum aviso sai (mesma regra do servidor)
   const [templates] = useDb<WebhookTemplate[]>(TEMPLATE_KEY, seedTemplates)
   const offEvents = new Set(templates.filter((t) => t.active === false).map((t) => t.event))
@@ -398,7 +405,7 @@ export default function Webhooks() {
         payload: JSON.stringify(webhookTestBody(d, now)),
         test: true,
       })
-      audit('testar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `POST de teste para ${auditUrl(d.url)}: HTTP ${res.httpStatus} em ${res.durationMs} ms`)
+      audit('testar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `POST de teste para ${auditUrl(d.url)}: ${httpLabel(res.httpStatus)} em ${res.durationMs} ms`)
       if (res.status === 'sucesso') toast.success('Teste entregue', { description: `HTTP ${res.httpStatus} em ${num(res.durationMs)} ms. Enviado como ${WEBHOOK_TEST_EVENT}.` })
       else toast.error('O teste falhou', { description: res.message })
       setTesting(null)
@@ -439,29 +446,41 @@ export default function Webhooks() {
           icon={Activity}
           tone="info"
           value={num(stats.total)}
-          hint={`${plural(stats.failed, 'falha', 'falhas')}${stats.attempts > stats.total ? ` · ${plural(stats.attempts, 'tentativa', 'tentativas')}` : ''}`}
+          hint={`${plural(stats.failed, 'falha', 'falhas')}${stats.retrying ? ` · ${num(stats.retrying)} em nova tentativa` : ''}${stats.attempts > stats.total ? ` · ${plural(stats.attempts, 'tentativa', 'tentativas')}` : ''}`}
           formula={
             <>
               Eventos reais enviados aos destinos nos últimos 30 dias. Cada entrega conta uma vez, mesmo com novas tentativas (até {WEBHOOK_MAX_ATTEMPTS}, com o
-              mesmo X-X2W-Delivery); Estatísticas mostra cada tentativa. Envios de teste ficam de fora.
+              mesmo X-X2W-Delivery); Estatísticas mostra cada tentativa. Uma entrega que falhou e ainda vai ser tentada de novo fica "em nova tentativa", não
+              como falha. Envios de teste ficam de fora.
             </>
           }
-          onClick={() => navigate('/campanhas/estatisticas')}
+          onClick={statsPage.ok ? () => navigate('/campanhas/estatisticas') : undefined}
         />
         <KpiCard
           label="Taxa de sucesso"
           icon={CheckCircle2}
           tone={stats.rate === null || stats.rate >= 0.98 ? 'success' : stats.rate >= 0.9 ? 'warning' : 'danger'}
           value={stats.rate === null ? '—' : pct(stats.rate)}
-          hint={`respostas 2xx em até ${TIMEOUT_S} s`}
-          formula={<>Entregas que receberam resposta HTTP 2xx em alguma tentativa, divididas pelo total de entregas dos últimos 30 dias. Envios de teste ficam de fora.</>}
+          hint={stats.rate === null && stats.retrying ? 'aguardando as novas tentativas' : `respostas 2xx em até ${TIMEOUT_S} s${stats.retrying ? ` · sem as ${num(stats.retrying)} em nova tentativa` : ''}`}
+          formula={
+            <>
+              Entregas que receberam resposta HTTP 2xx em alguma tentativa, divididas pelas entregas terminadas dos últimos 30 dias. Entregas ainda em nova
+              tentativa só contam quando terminam. Envios de teste ficam de fora.
+            </>
+          }
         />
         <KpiCard
           label="Tempo médio de resposta"
           icon={Gauge}
           tone="neutral"
           value={stats.avgMs === null ? '—' : `${num(stats.avgMs)} ms`}
-          hint={stats.avgMs === null ? 'nenhuma tentativa em 30 dias' : 'do envio à resposta do destino'}
+          hint={stats.avgMs === null ? (stats.attempts ? 'nenhum destino respondeu' : 'nenhuma tentativa em 30 dias') : 'do envio à resposta do destino'}
+          formula={
+            <>
+              Média do tempo entre o envio e a resposta HTTP do destino, nos últimos 30 dias. Tentativas sem resposta (endereço que não resolve, conexão
+              recusada, tempo esgotado) ficam de fora: não houve resposta para medir.
+            </>
+          }
         />
       </section>
 
@@ -507,9 +526,9 @@ export default function Webhooks() {
                 {offEvents.has(ev) && list.length > 0 && (
                   <Alert tone="warning" className="mx-5 mb-4">
                     O template deste evento está desativado em{' '}
-                    <Link to="/campanhas/templates" className="link">
+                    <PageLink to="/campanhas/templates" className="link">
                       Campanhas › Templates
-                    </Link>
+                    </PageLink>
                     : o evento acontece, mas nada é enviado a {list.length === 1 ? 'este destino' : 'estes destinos'}.
                     {ev === 'saque.pago' ? ' Saques aprovados não avisam ninguém: o financeiro paga pelo gateway.' : ''}
                   </Alert>
@@ -575,34 +594,45 @@ export default function Webhooks() {
               icon={Activity}
               title="Entregas recentes"
               actions={
-                <button type="button" className="link text-[13px]" onClick={() => navigate('/campanhas/estatisticas')}>
+                <PageLink to="/campanhas/estatisticas" className="link text-[13px]">
                   Estatísticas
-                </button>
+                </PageLink>
               }
             />
             <ul className="divide-y divide-line border-t border-line">
-              {recent.map((e) => (
-                <li key={e.id} className="flex items-center gap-3 px-5 py-2.5">
-                  {e.status === 'sucesso' ? <CheckCircle2 size={15} className="shrink-0 text-success" aria-label="Sucesso" /> : <XCircle size={15} className="shrink-0 text-danger" aria-label="Falha" />}
-                  <div className="min-w-0 flex-1">
-                    <p className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-fg">
-                      <span className="truncate">{WEBHOOK_EVENT_LABEL[e.event]}</span>
-                      {/* envio de teste: não é um evento real do destino */}
-                      {isTestExecution(e) && <Badge tone="info">Teste</Badge>}
-                    </p>
-                    <p className="truncate font-mono text-[11px] text-fg-3">
-                      {hostOf(e.url)}
-                      {attemptLabel(e) && <span className="font-sans"> · {attemptLabel(e)}</span>}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right">
-                    <p className={cn('text-xs font-semibold tnum', e.status === 'sucesso' ? 'text-fg-2' : 'text-danger')}>
-                      {e.httpStatus || '—'} · {num(e.durationMs)} ms
-                    </p>
-                    <p className="text-[11px] text-fg-3">{relative(e.at)}</p>
-                  </div>
-                </li>
-              ))}
+              {recent.map((e) => {
+                const next = retrying.get(e.id)
+                return (
+                  <li key={e.id} className="flex items-center gap-3 px-5 py-2.5">
+                    {e.status === 'sucesso' ? (
+                      <CheckCircle2 size={15} className="shrink-0 text-success" aria-label="Sucesso" />
+                    ) : next !== undefined ? (
+                      <Clock size={15} className="shrink-0 text-warning" aria-label="Em nova tentativa" />
+                    ) : (
+                      <XCircle size={15} className="shrink-0 text-danger" aria-label="Falha" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-fg">
+                        <span className="truncate">{WEBHOOK_EVENT_LABEL[e.event]}</span>
+                        {/* envio de teste: não é um evento real do destino */}
+                        {isTestExecution(e) && <Badge tone="info">Teste</Badge>}
+                      </p>
+                      <p className="truncate font-mono text-[11px] text-fg-3">
+                        {hostOf(e.url)}
+                        {deliverySubject(e) && <span className="font-sans"> · {deliverySubject(e)}</span>}
+                        {attemptLabel(e) && <span className="font-sans"> · {attemptLabel(e)}</span>}
+                      </p>
+                      {next !== undefined && <p className="text-[11px] text-warning">Em nova tentativa · próxima às {time(next)}</p>}
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <p className={cn('text-xs font-semibold tnum', e.status === 'sucesso' ? 'text-fg-2' : next !== undefined ? 'text-warning' : 'text-danger')}>
+                        {e.httpStatus || '—'} · {num(e.durationMs)} ms
+                      </p>
+                      <p className="text-[11px] text-fg-3">{relative(e.at)}</p>
+                    </div>
+                  </li>
+                )
+              })}
               {!recent.length && <li className="px-5 py-6 text-center text-[13px] text-fg-3">Nenhuma entrega ainda.</li>}
             </ul>
           </Card>
@@ -915,6 +945,8 @@ function DestinationDrawer({
   const list = useMemo(() => execs.filter((e) => e.destinationId === d.id).sort((a, b) => b.at.localeCompare(a.at)), [execs, d.id])
   // entregas de verdade (sem testes), como nos números da tela
   const st = deliveryStats(list.filter((e) => isRealDelivery(e, API)), Date.now() - 30 * 86_400_000)
+  // tentativa mais recente de uma entrega que o servidor ainda vai tentar de novo → horário previsto
+  const retrying = useMemo(() => retryingAttempts(list), [list])
   const tokens = findTokenSegments(d.url)
   // endereço editado com a ficha aberta: esconde de novo
   useEffect(() => setRevealed(null), [d.url])
@@ -970,8 +1002,20 @@ function DestinationDrawer({
           </Badge>
           {/* cada linha é uma tentativa: as da mesma entrega levam o mesmo X-X2W-Delivery */}
           {attemptLabel(e) && <span className="whitespace-nowrap text-xs text-fg-3">{attemptLabel(e)}</span>}
+          {retrying.has(e.id) && (
+            <Badge tone="warning" icon={Clock}>
+              Nova tentativa às {time(retrying.get(e.id)!)}
+            </Badge>
+          )}
         </span>
       ),
+    },
+    {
+      id: 'delivery',
+      header: 'Entrega',
+      sortValue: (e) => deliverySubject(e) ?? '',
+      // o registro a que a entrega se refere (saque, depósito) ou o X-X2W-Delivery: distingue duas entregas do mesmo evento
+      cell: (e) => <Mono className="whitespace-nowrap text-xs">{deliverySubject(e) ?? '—'}</Mono>,
     },
     { id: 'http', header: 'HTTP', align: 'right', sortValue: (e) => e.httpStatus, cell: (e) => e.httpStatus || '—' },
     { id: 'ms', header: 'Tempo', align: 'right', sortValue: (e) => e.durationMs, cell: (e) => `${num(e.durationMs)} ms` },
@@ -1078,8 +1122,12 @@ function DestinationDrawer({
 
         <div className="grid grid-cols-3 gap-2.5">
           <MiniStat label="Entregas (30 dias)" value={num(st.total)} sub={st.attempts > st.total ? `sem os testes · ${plural(st.attempts, 'tentativa', 'tentativas')}` : 'sem os testes'} />
-          <MiniStat label="Sucesso" value={st.rate === null ? '—' : pct(st.rate, 0)} sub={st.failed ? plural(st.failed, 'falha', 'falhas') : undefined} />
-          <MiniStat label="Tempo médio" value={st.avgMs === null ? '—' : `${num(st.avgMs)} ms`} />
+          <MiniStat
+            label="Sucesso"
+            value={st.rate === null ? '—' : pct(st.rate, 0)}
+            sub={[st.failed ? plural(st.failed, 'falha', 'falhas') : '', st.retrying ? `${num(st.retrying)} em nova tentativa` : ''].filter(Boolean).join(' · ') || undefined}
+          />
+          <MiniStat label="Tempo médio" value={st.avgMs === null ? '—' : `${num(st.avgMs)} ms`} sub={st.avgMs === null && st.attempts ? 'nenhuma resposta do destino' : undefined} />
         </div>
 
         <section>

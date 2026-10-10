@@ -1,5 +1,4 @@
 import { useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
 import {
   Ban,
   BadgeCheck,
@@ -39,6 +38,7 @@ import {
   Input,
   KpiCard,
   PageHeader,
+  PageLink,
   RadioCards,
   Switch,
   Textarea,
@@ -389,9 +389,9 @@ export default function Disparos() {
     <>
       <PageHeader
         actions={
-          <Link to="/settings/integracoes" className="inline-flex h-10 items-center gap-2 rounded-lg border border-line-strong/80 bg-surface px-3.5 text-sm font-medium text-fg shadow-sm hover:bg-surface-3/70">
+          <PageLink to="/settings/integracoes" className="inline-flex h-10 items-center gap-2 rounded-lg border border-line-strong/80 bg-surface px-3.5 text-sm font-medium text-fg shadow-sm hover:bg-surface-3/70">
             <Plug size={16} aria-hidden /> Integrações
-          </Link>
+          </PageLink>
         }
       />
       <div className="space-y-5">
@@ -414,9 +414,9 @@ export default function Disparos() {
             icon={Plug}
             title="SMS e RCS dependem de uma conta SendWork"
             action={
-              <Link to="/settings/integracoes" className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-surface px-2.5 text-[13px] font-medium text-fg ring-1 ring-inset ring-line-strong hover:bg-surface-3">
+              <PageLink to="/settings/integracoes" className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-surface px-2.5 text-[13px] font-medium text-fg ring-1 ring-inset ring-line-strong hover:bg-surface-3">
                 <Plug size={14} aria-hidden /> Conectar SendWork
-              </Link>
+              </PageLink>
             }
           >
             Sem essa conta, só o e-mail fica disponível. Conecte a SendWork em Configurações › Integrações para liberar SMS e RCS aqui e nas Jornadas.
@@ -490,9 +490,9 @@ export default function Disparos() {
                           <span className="text-warning">não definido (Integrações)</span>
                         )}{' '}
                         ·{' '}
-                        <Link to="/settings/integracoes" className="link">
+                        <PageLink to="/settings/integracoes" className="link">
                           trocar
-                        </Link>
+                        </PageLink>
                       </p>
                       <Field label="Assunto" htmlFor="dp-subject" required error={err('subject')} labelAside={<CharCounter value={draft.email.subject} max={90} />}>
                         <Input ref={subjectRef} id="dp-subject" value={draft.email.subject} onChange={(e) => setEmail({ subject: e.target.value })} invalid={!!err('subject')} />

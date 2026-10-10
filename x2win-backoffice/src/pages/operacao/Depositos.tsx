@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
   ArrowDownToLine,
@@ -52,6 +52,7 @@ import {
   Mono,
   NumberInput,
   PageHeader,
+  PageLink,
   PersonCell,
   SaveBar,
   Select,
@@ -61,14 +62,17 @@ import {
   Tabs,
   confirm,
   inRange,
+  pathAccessTitle,
   presetRange,
   toast,
+  useDecimalText,
+  usePathAccess,
   useSettingsForm,
   useTabParam,
   type Column,
   type DateRange,
 } from '@/components/ui'
-import { brl, brlCompact, dateTime, formatDecimalInput, num, parseDecimalInput, pct, relative, time } from '@/lib/format'
+import { brl, brlCompact, dateTime, num, pct, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { ApiError, api, isApiMode } from '@/lib/api'
 import { refreshKey, useDb } from '@/lib/store'
@@ -623,6 +627,7 @@ const CAMPAIGN_TONE = { ativa: 'success', pausada: 'warning', encerrada: 'neutra
 function Campaigns({ onGoLimits }: { onGoLimits: () => void }) {
   const { canEdit } = usePageAccess()
   const navigate = useNavigate()
+  const bonusPage = usePathAccess()('/campanhas/bonus-deposito')
   const [limits] = useDb<DepositLimits>(OPERACAO_KEYS.depositLimits, DEFAULT_DEPOSIT_LIMITS)
   const form = useSettingsForm<DepositCampaignsConfig>(OPERACAO_KEYS.depositCampaigns, seedDepositCampaigns, {
     entity: 'Campanhas na tela de depósito',
@@ -657,7 +662,7 @@ function Campaigns({ onGoLimits }: { onGoLimits: () => void }) {
               title="Ofertas na tela de depósito"
               description="Arraste ou use as setas para mudar a ordem. Só campanhas ativas podem aparecer."
               actions={
-                <Button size="sm" variant="outline" icon={Plus} onClick={() => navigate('/campanhas/bonus-deposito')}>
+                <Button size="sm" variant="outline" icon={Plus} onClick={() => navigate('/campanhas/bonus-deposito')} disabled={!bonusPage.ok} title={pathAccessTitle(bonusPage)}>
                   Criar campanha
                 </Button>
               }
@@ -705,9 +710,9 @@ function Campaigns({ onGoLimits }: { onGoLimits: () => void }) {
               />
               <p className="mt-3 text-xs text-fg-3">
                 Campanha pausada ou encerrada não aparece para o jogador. Para criar, editar regras ou reativar, use{' '}
-                <Link to="/campanhas/bonus-deposito" className="link">
+                <PageLink to="/campanhas/bonus-deposito" className="link">
                   Campanhas › Bônus de depósito
-                </Link>
+                </PageLink>
                 .
               </p>
             </CardBody>
@@ -715,7 +720,7 @@ function Campaigns({ onGoLimits }: { onGoLimits: () => void }) {
 
           <SettingsSection title="Exibição" description="Como as ofertas aparecem para o jogador na hora de depositar.">
             <Field label="Máximo de ofertas na tela" htmlFor="c-max" hint="Mais de 3 ofertas costuma confundir e reduzir a conversão.">
-              <NumberInput id="c-max" value={v.maxVisible} min={1} max={5} onValueChange={(n) => form.set('maxVisible', Math.round(n))} suffix="ofertas" invalid={v.maxVisible < 1 || v.maxVisible > 5} />
+              <NumberInput integer id="c-max" value={v.maxVisible} min={1} max={5} onValueChange={(n) => form.set('maxVisible', Math.round(n))} suffix="ofertas" invalid={v.maxVisible < 1 || v.maxVisible > 5} />
             </Field>
             <Switch
               label="Já marcar a primeira oferta"
@@ -854,7 +859,7 @@ function Limits({ onGoCampaigns }: { onGoCampaigns: () => void }) {
         <SettingsSection title="PIX e gateway" description="Quem gera a cobrança e por quanto tempo o código vale.">
           <FormGrid>
             <Field label="Expiração do PIX" htmlFor="l-exp" error={e.pixExpirationMin} hint="Prazo curto reduz PIX pago fora do prazo; longo demais deixa cobranças abertas.">
-              <NumberInput id="l-exp" value={v.pixExpirationMin} min={5} max={1440} onValueChange={(n) => form.set('pixExpirationMin', Math.round(n))} suffix="min" invalid={!!e.pixExpirationMin} />
+              <NumberInput integer id="l-exp" value={v.pixExpirationMin} min={5} max={1440} onValueChange={(n) => form.set('pixExpirationMin', Math.round(n))} suffix="min" invalid={!!e.pixExpirationMin} />
             </Field>
             <Field label="Gateway principal" htmlFor="l-gw">
               <Select id="l-gw" value={v.mainGateway} onChange={(x) => form.set('mainGateway', x)} options={GATEWAY_NAMES.map((g) => ({ value: g, label: g }))} />
@@ -870,9 +875,9 @@ function Limits({ onGoCampaigns }: { onGoCampaigns: () => void }) {
           </FormGrid>
           <p className="text-xs text-fg-3">
             Contas e credenciais de cada gateway ficam em{' '}
-            <Link to="/settings/gateways" className="link">
+            <PageLink to="/settings/gateways" className="link">
               Configurações › Gateways
-            </Link>
+            </PageLink>
             .
           </p>
           <Switch
@@ -932,9 +937,8 @@ function DepositPhonePreview({ limits, campaigns }: { limits: DepositLimits; cam
   const initialAmount = limits.defaultAmount || 0
   const initialChoice = campaigns.preselectFirst && shown[0] ? shown[0].id : 'none'
   const [amount, setAmount] = useState(initialAmount)
-  // texto digitado (vírgula decimal): o campo numérico do navegador descartava a vírgula ("12,5" virava 125)
-  const [amountDraft, setAmountDraft] = useState<string | null>(null)
-  const amountText = amountDraft !== null && parseDecimalInput(amountDraft) === amount ? amountDraft : amount ? formatDecimalInput(amount) : ''
+  // texto pt-BR ("1.500,50"), o mesmo de MoneyInput: o campo numérico do navegador descartava a vírgula
+  const amountText = useDecimalText(amount, (v) => setAmount(v ?? 0), { blankWhenZero: true, min: 0, minDecimals: 2, step: 0.01 })
   const [choice, setChoice] = useState(initialChoice)
   useEffect(() => setAmount(initialAmount), [initialAmount])
   useEffect(() => setChoice(initialChoice), [initialChoice])
@@ -973,20 +977,22 @@ function DepositPhonePreview({ limits, campaigns }: { limits: DepositLimits; cam
                   inputMode="decimal"
                   autoComplete="off"
                   aria-label="Valor do depósito na prévia"
-                  value={amountText}
+                  value={amountText.value}
                   placeholder="0,00"
-                  onChange={(ev) => {
-                    const n = parseDecimalInput(ev.target.value)
-                    if (n === null) return
-                    setAmountDraft(ev.target.value)
-                    setAmount(n)
-                  }}
+                  onChange={amountText.onChange}
+                  onBlur={amountText.onBlur}
+                  onKeyDown={amountText.onKeyDown}
                   className="w-full min-w-0 bg-transparent font-display text-2xl font-bold text-fg outline-none placeholder:text-fg-3 tnum"
                 />
               </div>
               <p className={cn('mt-1 text-[10.5px]', outOfRange ? 'font-semibold text-danger' : 'text-fg-3')}>
                 Mín. {brl(limits.min)} · máx. {brl(limits.max)} · até {brlCompact(limits.dailyLimit)} por dia
               </p>
+              {amountText.message && (
+                <p className="mt-1 text-[10.5px] font-semibold text-danger" role="alert">
+                  {amountText.message}
+                </p>
+              )}
             </div>
 
             {limits.quickAmounts.length > 0 && (

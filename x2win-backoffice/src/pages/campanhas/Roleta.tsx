@@ -234,12 +234,15 @@ export default function Roleta() {
         </Badge>
       ),
     },
-    { id: 'cost', money: true, header: 'Custo do prêmio', align: 'right', sortValue: (s) => spinCost(s, coin), csv: (s) => spinCost(s, coin).toFixed(2), cell: (s) => <span className="tnum">{brl(spinCost(s, coin))}</span> },
+    { id: 'cost', money: true, header: 'Custo do prêmio', label: 'Custo do prêmio (R$)', align: 'right', sortValue: (s) => spinCost(s, coin), csv: (s) => spinCost(s, coin).toFixed(2), cell: (s) => <span className="tnum">{brl(spinCost(s, coin))}</span> },
     {
       id: 'coins',
       header: 'Pagou para girar',
+      // CSV com a unidade no cabeçalho, como as colunas em R$: "Pagou para girar (EVC)" com 500, ou 0 no giro grátis
+      label: `Pagou para girar (${coin.symbol})`,
       align: 'right',
       sortValue: (s) => s.costCoins,
+      csv: (s) => s.costCoins,
       cell: (s) => (s.costCoins ? <CoinAmount value={s.costCoins} size={13} /> : <span className="text-xs text-fg-3">Grátis</span>),
     },
   ]
@@ -804,7 +807,7 @@ function WheelDrawer({
               </Field>
               <FormGrid>
                 <Field label="Giros por dia" htmlFor="w-spins" error={show ? errs.spinsPerDay : null} hint="Por jogador. Renova à 00:00.">
-                  <NumberInput id="w-spins" value={w.spinsPerDay} min={1} max={50} suffix="giros" invalid={show && !!errs.spinsPerDay} onValueChange={(n) => setW({ ...w, spinsPerDay: Math.round(n) })} />
+                  <NumberInput integer id="w-spins" value={w.spinsPerDay} min={1} max={50} suffix="giros" invalid={show && !!errs.spinsPerDay} onValueChange={(n) => setW({ ...w, spinsPerDay: Math.round(n) })} />
                 </Field>
                 <Field
                   label="Custo em moedas"
@@ -812,7 +815,7 @@ function WheelDrawer({
                   error={show ? errs.costCoins : null}
                   hint={w.costCoins ? `≈ ${brl(w.costCoins * coin.refValue)} por giro.` : 'Grátis: 0 moedas.'}
                 >
-                  <NumberInput id="w-cost" value={w.costCoins} min={0} suffix={coin.symbol} invalid={show && !!errs.costCoins} onValueChange={(n) => setW({ ...w, costCoins: Math.round(n) })} />
+                  <NumberInput integer id="w-cost" value={w.costCoins} min={0} suffix={coin.symbol} invalid={show && !!errs.costCoins} onValueChange={(n) => setW({ ...w, costCoins: Math.round(n) })} />
                 </Field>
               </FormGrid>
               <Switch
@@ -873,7 +876,7 @@ function WheelDrawer({
               const err = show ? errs.prize[p.id] : undefined
               return (
                 <li key={p.id} className={cn('rounded-xl border p-2.5', err ? 'border-danger/50 bg-danger/[0.03]' : 'border-line')}>
-                  <div className="grid grid-cols-[40px_minmax(0,1fr)_32px] items-center gap-2 sm:grid-cols-[40px_minmax(0,1fr)_140px_110px_96px_32px]">
+                  <div className="grid grid-cols-[40px_minmax(0,1fr)_32px] items-start gap-2 sm:grid-cols-[40px_minmax(0,1fr)_140px_110px_96px_32px]">
                     <SlotPicker value={p.slot} onChange={(s) => setPrize(p.id, { slot: s })} label={`Cor do prêmio ${i + 1}`} />
                     <Input aria-label={`Rótulo do prêmio ${i + 1}`} value={p.label} maxLength={24} invalid={!!err && !p.label.trim()} onChange={(e) => setPrize(p.id, { label: e.target.value })} />
                     <IconButton
@@ -881,7 +884,7 @@ function WheelDrawer({
                       label={`Remover prêmio ${i + 1}`}
                       size="sm"
                       variant="danger"
-                      className="sm:order-last"
+                      className="mt-1 sm:order-last"
                       disabled={w.prizes.length <= 2}
                       onClick={() => setW((x) => ({ ...x, prizes: x.prizes.filter((y) => y.id !== p.id) }))}
                     />
@@ -900,6 +903,7 @@ function WheelDrawer({
                         <MoneyInput value={p.value} onValueChange={(n) => setPrize(p.id, { value: n })} invalid={!!err && !(p.value > 0)} />
                       ) : (
                         <NumberInput
+                          integer
                           value={p.value}
                           min={0}
                           disabled={p.kind === 'nada'}

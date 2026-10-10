@@ -28,6 +28,7 @@ import {
   KpiCard,
   Mono,
   PageHeader,
+  PageLink,
   PersonCell,
   SaveBar,
   Select,
@@ -93,6 +94,17 @@ const TIMEOUTS = [
   { value: '480', label: '8 horas' },
   { value: '720', label: '12 horas' },
 ]
+
+/**
+ * Quem usou o IP, pelo nome completo; nomes iguais (sem maiúsculas, acentos e espaços extras) levam o e-mail,
+ * para quem vai remover o IP saber exatamente quem depende dele.
+ */
+function peopleLabel(people: { name: string; email: string }[]) {
+  const key = (n: string) => n.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim()
+  const count = new Map<string, number>()
+  for (const m of people) count.set(key(m.name), (count.get(key(m.name)) ?? 0) + 1)
+  return people.map((m) => ((count.get(key(m.name)) ?? 0) > 1 ? `${m.name} (${m.email})` : m.name)).join(', ')
+}
 
 export default function SegurancaPainel() {
   const { canEdit, can } = usePageAccess()
@@ -475,8 +487,8 @@ export default function SegurancaPainel() {
                         </p>
                         <p className="mt-0.5 truncate text-xs text-fg-3">
                           {e.label} · por {e.createdBy} {relative(e.createdAt)}
-                          {people.length > 0 && ` · usado por ${people.map((m) => m.name.split(' ')[0]).join(', ')}`}
                         </p>
+                        {people.length > 0 && <p className="mt-0.5 break-words text-xs text-fg-3">Usado por {peopleLabel(people)}</p>}
                       </div>
                       <IconButton icon={Trash2} variant="danger" label={`Remover ${e.value}`} disabled={!canEditList || listSaving} onClick={() => remove(e)} />
                     </li>
@@ -628,9 +640,9 @@ function RecentLogins({ list }: { list: Entry[] }) {
         title="Logins recentes"
         description="Entradas no painel registradas na auditoria, comparadas com a lista atual."
         actions={
-          <a className="link text-[13px]" href="#/settings/auditoria?acao=login">
+          <PageLink className="link text-[13px]" to="/settings/auditoria?acao=login">
             Ver todos na auditoria
-          </a>
+          </PageLink>
         }
       />
       <DataTable

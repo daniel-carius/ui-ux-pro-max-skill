@@ -3,6 +3,7 @@
 import { canChangeStatus, isPlayerRequestedReason } from '@shared/players'
 import type { Player, PlayerStatus } from '@/data/players'
 import type { Transaction, TransactionType } from '@/data/finance'
+import type { Block } from '@/data/seguranca'
 import { cpf as fmtCpf } from '@/lib/format'
 
 export const GERAL_KEYS = {
@@ -17,6 +18,21 @@ export interface BannedNetworkAccount {
   playerId: string
   network: string
   bannedAt: string | null
+}
+
+/**
+ * geral.jogadores.redes-banidas como o servidor monta (buildBannedNetworks em
+ * server/src/modules/kv/player-projections.ts): uma linha por conta, a primeira rede que a contém, só rede e
+ * data (sem motivo, autor nem as outras contas). A demonstração usa no "ver como" um cargo que não lê o
+ * Anti-fraude, para a ficha mostrar o mesmo que esse cargo recebe no servidor.
+ */
+export function bannedNetworkAccounts(blocks: readonly Pick<Block, 'kind' | 'value' | 'accounts' | 'createdAt'>[]): BannedNetworkAccount[] {
+  const out = new Map<string, BannedNetworkAccount>()
+  for (const b of blocks) {
+    if (b.kind !== 'rede' || !Array.isArray(b.accounts)) continue
+    for (const id of b.accounts) if (!out.has(id)) out.set(id, { playerId: id, network: b.value, bannedAt: b.createdAt ?? null })
+  }
+  return [...out.values()]
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -329,6 +345,16 @@ export function canReverse(tx: Transaction, reversed: Set<string>, now = Date.no
   return { ok: true }
 }
 
+/**
+ * O que muda na ficha com o estorno de `tx`: o saldo da carteira volta e, se era aposta, ela deixa de contar no
+ * apostado e no nº de apostas (GGR do jogador, Rankings e ficha sem a aposta devolvida).
+ */
+export function reversalPlayerPatch(p: Player, tx: Transaction, balanceAfter: number): Partial<Player> {
+  const patch = walletPatch(tx.wallet, balanceAfter)
+  if (tx.type !== 'aposta') return patch
+  return { ...patch, totalBet: round2(Math.max(0, p.totalBet - Math.abs(tx.amount))), betsCount: Math.max(0, p.betsCount - 1) }
+}
+
 export function buildReversalTx(tx: Transaction, p: Player | undefined, reason: string, by: string, now = new Date()): AnnotatedTransaction {
   const amount = round2(Math.abs(tx.amount))
   const before = p ? walletBalance(p, tx.wallet) : tx.balanceAfter
@@ -365,7 +391,8 @@ export interface StatementTotals {
   winningsCount: number
 }
 
-export function statementTotals(txs: Transaction[]): StatementTotals {
+/** Totais do extrato; aposta estornada (em `reversed`) não conta, porque o valor voltou ao jogador. */
+export function statementTotals(txs: Transaction[], reversed: ReadonlySet<string> = new Set()): StatementTotals {
   const t: StatementTotals = { deposits: 0, depositsCount: 0, withdrawals: 0, withdrawalsCount: 0, bets: 0, betsCount: 0, winnings: 0, winningsCount: 0 }
   for (const x of txs) {
     if (x.type === 'deposito') {
@@ -375,6 +402,7 @@ export function statementTotals(txs: Transaction[]): StatementTotals {
       t.withdrawals += Math.abs(x.amount)
       t.withdrawalsCount++
     } else if (x.type === 'aposta') {
+      if (reversed.has(x.id)) continue
       t.bets += Math.abs(x.amount)
       t.betsCount++
     } else if (x.type === 'ganho' || x.type === 'free_spin') {

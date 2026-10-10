@@ -8,21 +8,30 @@ export interface WebhookStats {
   failures: number
   /** fração 0..1 (null sem execuções) */
   successRate: number | null
-  /** null sem execuções (nada medido: a tela mostra "—", não "0 ms") */
+  /**
+   * Tempo de resposta: só execuções com resposta HTTP (httpStatus > 0); sem resposta (DNS, conexão, tempo
+   * esgotado) não há o que medir. null sem nenhuma (a tela mostra "—", não "0 ms")
+   */
   avgMs: number | null
   p95Ms: number | null
+  /** execuções com resposta HTTP (base do tempo médio) */
+  responded: number
   byDay: { date: string; sucesso: number; falha: number }[]
-  byEvent: { event: WebhookEvent; total: number; success: number; failures: number; avgMs: number; lastAt: string | null }[]
+  byEvent: { event: WebhookEvent; total: number; success: number; failures: number; avgMs: number | null; lastAt: string | null }[]
 }
 
 export function webhookStats(execs: WebhookExecution[], days: string[]): WebhookStats {
   const total = execs.length
   const success = execs.filter((e) => e.status === 'sucesso').length
-  const durations = execs.map((e) => e.durationMs).sort((a, b) => a - b)
-  const avgMs = total ? Math.round(durations.reduce((s, d) => s + d, 0) / total) : null
-  const p95Ms = total ? durations[Math.min(total - 1, Math.floor(total * 0.95))] : null
+  const durations = execs
+    .filter((e) => e.httpStatus > 0)
+    .map((e) => e.durationMs)
+    .sort((a, b) => a - b)
+  const responded = durations.length
+  const avgMs = responded ? Math.round(durations.reduce((s, d) => s + d, 0) / responded) : null
+  const p95Ms = responded ? durations[Math.min(responded - 1, Math.floor(responded * 0.95))] : null
   const dayMap = new Map(days.map((d) => [d, { date: d, sucesso: 0, falha: 0 }]))
-  const evMap = new Map<WebhookEvent, { event: WebhookEvent; total: number; success: number; failures: number; sumMs: number; lastAt: string | null }>()
+  const evMap = new Map<WebhookEvent, { event: WebhookEvent; total: number; success: number; failures: number; sumMs: number; responded: number; lastAt: string | null }>()
   for (const e of execs) {
     const k = dayKey(new Date(e.at))
     const row = dayMap.get(k)
@@ -30,11 +39,14 @@ export function webhookStats(execs: WebhookExecution[], days: string[]): Webhook
       if (e.status === 'sucesso') row.sucesso++
       else row.falha++
     }
-    const ev = evMap.get(e.event) ?? { event: e.event, total: 0, success: 0, failures: 0, sumMs: 0, lastAt: null }
+    const ev = evMap.get(e.event) ?? { event: e.event, total: 0, success: 0, failures: 0, sumMs: 0, responded: 0, lastAt: null }
     ev.total++
     if (e.status === 'sucesso') ev.success++
     else ev.failures++
-    ev.sumMs += e.durationMs
+    if (e.httpStatus > 0) {
+      ev.sumMs += e.durationMs
+      ev.responded++
+    }
     if (!ev.lastAt || e.at > ev.lastAt) ev.lastAt = e.at
     evMap.set(e.event, ev)
   }
@@ -45,9 +57,10 @@ export function webhookStats(execs: WebhookExecution[], days: string[]): Webhook
     successRate: total ? success / total : null,
     avgMs,
     p95Ms,
+    responded,
     byDay: [...dayMap.values()],
     byEvent: [...evMap.values()]
-      .map(({ sumMs, ...r }) => ({ ...r, avgMs: r.total ? Math.round(sumMs / r.total) : 0 }))
+      .map(({ sumMs, responded: n, ...r }) => ({ ...r, avgMs: n ? Math.round(sumMs / n) : null }))
       .sort((a, b) => b.total - a.total),
   }
 }

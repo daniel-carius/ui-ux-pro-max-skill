@@ -1,5 +1,4 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
 import {
   AlertTriangle,
   BadgeCheck,
@@ -37,6 +36,7 @@ import {
   Mono,
   NoDataSource,
   PageHeader,
+  PageLink,
   Select,
   Tabs,
   confirm,
@@ -348,9 +348,9 @@ function Summary({ range, data }: { range: DateRange; data: Data }) {
               )}
               <Insight tone="info">
                 Taxas consumiram {pct(feeRate)} do GGR. Veja e feche as apurações mensais na aba{' '}
-                <Link to="/dashboard/ggr?aba=apuracoes" className="link">
+                <PageLink to="/dashboard/ggr?aba=apuracoes" className="link">
                   Apurações
-                </Link>
+                </PageLink>
                 .
               </Insight>
             </ul>

@@ -22,8 +22,7 @@ import {
   UsersRound,
   Volleyball,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
-import { Alert, Badge, FormFieldset, KpiCard, PageHeader, SaveBar, Switch, confirm, useSettingsForm } from '@/components/ui'
+import { Alert, Badge, FormFieldset, KpiCard, PageHeader, PageLink, SaveBar, Switch, confirm, useSettingsForm } from '@/components/ui'
 import { BrandMark } from '@/components/layout/Brand'
 import { cn } from '@/lib/cn'
 import { audit } from '@/domain/session'
@@ -211,9 +210,9 @@ function ModuleCard({ m, on, changed, onToggle, readOnly }: { m: SiteModule; on:
       <div className="mt-3 flex items-center justify-between gap-2 border-t border-line pt-2.5 text-xs">
         <span className="text-fg-3">{on ? 'Ao desligar: sai do menu, da home e da página.' : 'Fora do menu, da home e da página.'}</span>
         {m.adminPath && (
-          <Link to={m.adminPath} className="link inline-flex shrink-0 items-center gap-1">
+          <PageLink to={m.adminPath} className="link inline-flex shrink-0 items-center gap-1">
             <Settings2 size={12} aria-hidden /> Configurar
-          </Link>
+          </PageLink>
         )}
       </div>
     </article>

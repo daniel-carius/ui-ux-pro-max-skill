@@ -1,6 +1,6 @@
 // Cupons: código digitado pelo jogador que libera uma recompensa.
 import { brl, num } from '@/lib/format'
-import type { CampaignPlayer } from './campanhas-jogadores'
+import type { CampaignPlayer } from './campanhas-jogador'
 import { AUDIENCE_LABEL, inAudience, rewardCost, rewardText, type Audience, type CoinInfo } from './campanhas2-common'
 
 export type CouponReward = 'bonus_pct' | 'bonus_brl' | 'free_spins' | 'moedas'

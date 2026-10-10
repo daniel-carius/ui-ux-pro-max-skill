@@ -1,10 +1,11 @@
 // Webhooks: destinos HTTP por evento e histórico de execuções.
 // Ações do painel (ex.: aprovar saque) chamam emitWebhook para alimentar
 // as telas de Webhooks e Estatísticas.
-import { createRng, uid } from '@/lib/random'
+import { uid } from '@/lib/random'
 import { dbGet, dbSet } from '@/lib/store'
 import { DAY, NOW, iso } from '@/data/now'
 import { demoRecords } from '@/data/demo'
+import { demoWebhookExecutions } from '@/data/webhooks'
 import { TEMPLATE_KEY, seedTemplates } from '@/data/campanhas-templates'
 import type { WebhookTemplate } from './campanhas-templates'
 
@@ -85,40 +86,12 @@ export function seedWebhookDestinations(): WebhookDestination[] {
   ]
 }
 
-/** Dados de exemplo do evento nas execuções de demonstração (o servidor manda o saque ou o depósito em data). */
-function demoEventData(event: WebhookEvent, rng: ReturnType<typeof createRng>): Record<string, unknown> {
-  const amount = rng.int(20, 1500)
-  if (event === 'deposito.primeiro') return { id: `DP${rng.digits(6)}`, playerId: String(rng.int(100000, 102999)), amount }
-  return { id: `SQ${rng.digits(5)}`, playerId: String(rng.int(100000, 102999)), amount }
-}
-
+/**
+ * Execuções de demonstração: uma por evento dos saques e depósitos de demonstração (os mesmos de Saques e
+ * Depósitos), com o id do saque ou do depósito e o jogador no corpo. O servidor semeia as mesmas (DEMO_DATA).
+ */
 export function seedWebhookExecutions(): WebhookExecution[] {
-  const rng = createRng(134)
-  const dests = seedWebhookDestinations()
-  const out: WebhookExecution[] = []
-  for (let i = 0; i < 134; i++) {
-    const d = rng.weighted([
-      [dests[0], 30],
-      [dests[1], 40],
-      [dests[2], 6],
-      [dests[3], 4],
-      [dests[4], 20],
-    ] as const)
-    const at = new Date(NOW.getTime() - rng.next() * 30 * DAY)
-    out.push({
-      id: `ex${i}`,
-      at: iso(at),
-      event: d.event,
-      destinationId: d.id,
-      url: d.url,
-      status: 'sucesso',
-      httpStatus: 200,
-      durationMs: rng.int(80, 640),
-      // mesmo envelope que o servidor envia (docs/API.md): { id, event, createdAt, data }
-      payload: JSON.stringify({ id: rng.id('evt_', 10), event: d.event, createdAt: iso(at), data: demoEventData(d.event, createRng(1000 + i)) }),
-    })
-  }
-  return out.sort((a, b) => b.at.localeCompare(a.at))
+  return demoWebhookExecutions(seedWebhookDestinations())
 }
 
 /**

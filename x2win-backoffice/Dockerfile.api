@@ -8,6 +8,7 @@ RUN cd server && npm ci
 COPY shared ./shared
 COPY src/data ./src/data
 COPY src/domain/ggr.ts ./src/domain/ggr.ts
+COPY src/domain/campanhas2-moeda.ts ./src/domain/campanhas2-moeda.ts
 COPY src/lib/random.ts ./src/lib/random.ts
 COPY server ./server
 # dist/index.js (API), dist/seed.js e dist/migrate.js: migrações num passo à parte, com o usuário dono das tabelas

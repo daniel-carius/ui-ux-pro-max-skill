@@ -211,18 +211,18 @@ export default function Indicacao() {
                   const err = chestErr.byId[c.id]
                   return (
                     <li key={c.id} className={cn('rounded-xl border p-2.5', err ? 'border-danger/50 bg-danger/[0.03]' : 'border-line')}>
-                      <div className="grid grid-cols-[36px_minmax(0,1fr)_32px] items-center gap-2 md:grid-cols-[36px_150px_150px_minmax(0,1fr)_32px]">
-                        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-gold/15 text-warning dark:text-gold" title={`Baú ${i + 1}`}>
+                      <div className="grid grid-cols-[36px_minmax(0,1fr)_32px] items-start gap-2 md:grid-cols-[36px_150px_150px_minmax(0,1fr)_32px]">
+                        <span className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-lg bg-gold/15 text-warning dark:text-gold" title={`Baú ${i + 1}`}>
                           <Package size={17} aria-hidden />
                           <span className="sr-only">Baú {i + 1}</span>
                         </span>
-                        <NumberInput value={c.referrals} min={1} suffix="indic." ariaLabel={`Indicações para abrir o baú ${i + 1}`} invalid={!!err && err.includes('anterior')} onValueChange={(n) => setChest(c.id, { referrals: Math.round(n) })} />
+                        <NumberInput integer value={c.referrals} min={1} suffix="indic." ariaLabel={`Indicações para abrir o baú ${i + 1}`} invalid={!!err && err.includes('anterior')} onValueChange={(n) => setChest(c.id, { referrals: Math.round(n) })} />
                         <IconButton
                           icon={Trash2}
                           label={`Remover baú ${i + 1}`}
                           size="sm"
                           variant="danger"
-                          className="md:order-last"
+                          className="mt-1 md:order-last"
                           disabled={v.chests.length <= 1}
                           onClick={() => form.set('chests', v.chests.filter((x) => x.id !== c.id))}
                         />
@@ -233,15 +233,15 @@ export default function Indicacao() {
                             onChange={(k) => setChest(c.id, { kind: k as ChestRewardKind, value: k === 'moedas' ? 1000 : k === 'free_spins' ? 20 : c.kind === 'moedas' || c.kind === 'free_spins' ? 10 : c.value })}
                             options={(Object.keys(CHEST_REWARD_LABEL) as ChestRewardKind[]).map((k) => ({ value: k, label: CHEST_REWARD_LABEL[k] }))}
                           />
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-start gap-2">
                             <div className="min-w-0 flex-1">
                               {c.kind === 'bonus_brl' || c.kind === 'dinheiro' ? (
                                 <MoneyInput value={c.value} ariaLabel={`Prêmio do baú ${i + 1}`} onValueChange={(n) => setChest(c.id, { value: n })} invalid={!!err && !(c.value > 0)} />
                               ) : (
-                                <NumberInput value={c.value} min={1} suffix={c.kind === 'moedas' ? coin.symbol : 'giros'} ariaLabel={`Prêmio do baú ${i + 1}`} onValueChange={(n) => setChest(c.id, { value: Math.round(n) })} invalid={!!err && !(c.value > 0)} />
+                                <NumberInput integer value={c.value} min={1} suffix={c.kind === 'moedas' ? coin.symbol : 'giros'} ariaLabel={`Prêmio do baú ${i + 1}`} onValueChange={(n) => setChest(c.id, { value: Math.round(n) })} invalid={!!err && !(c.value > 0)} />
                               )}
                             </div>
-                            <span className="hidden w-20 shrink-0 text-right text-xs text-fg-3 tnum lg:block">≈ {brl(chestCost(c, coin))}</span>
+                            <span className="hidden w-20 shrink-0 text-right text-xs leading-10 text-fg-3 tnum lg:block">≈ {brl(chestCost(c, coin))}</span>
                           </div>
                         </div>
                       </div>
@@ -293,7 +293,7 @@ export default function Indicacao() {
                   <MoneyInput id="ind-wag" value={v.rules.minWager} onValueChange={(n) => form.set('rules', { ...v.rules, minWager: n })} />
                 </Field>
                 <Field label="Prazo para cumprir" htmlFor="ind-win" hint="Dias após o cadastro do indicado.">
-                  <NumberInput id="ind-win" value={v.rules.windowDays} min={1} max={365} suffix="dias" onValueChange={(n) => form.set('rules', { ...v.rules, windowDays: Math.round(n) })} />
+                  <NumberInput integer id="ind-win" value={v.rules.windowDays} min={1} max={365} suffix="dias" onValueChange={(n) => form.set('rules', { ...v.rules, windowDays: Math.round(n) })} />
                 </Field>
               </FormGrid>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -329,7 +329,7 @@ export default function Indicacao() {
                   <NumberInput id="ind-roll" value={v.rollover} min={0} max={100} suffix="x" onValueChange={(n) => form.set('rollover', n)} />
                 </Field>
                 <Field label="Máximo de indicados por jogador" htmlFor="ind-max" hint="0 = sem limite. Indicados acima do limite não contam.">
-                  <NumberInput id="ind-max" value={v.maxReferrals} min={0} suffix="indic." onValueChange={(n) => form.set('maxReferrals', Math.round(n))} />
+                  <NumberInput integer id="ind-max" value={v.maxReferrals} min={0} suffix="indic." onValueChange={(n) => form.set('maxReferrals', Math.round(n))} />
                 </Field>
               </FormGrid>
             </SettingsSection>

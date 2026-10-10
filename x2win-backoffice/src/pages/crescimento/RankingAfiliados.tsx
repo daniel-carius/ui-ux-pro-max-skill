@@ -30,16 +30,29 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, maskEmail, num, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useAffiliates, usePlayers } from '@/data/hooks'
+import { isApiMode } from '@/lib/api'
+import { useAffiliates, useDeposits, usePlayers, useTransactions } from '@/data/hooks'
 import type { AffiliateType } from '@/data/players'
 import { audit } from '@/domain/session'
-import { RANK_METRIC_LABEL, activityShare, rankAffiliates, sortRank, type AffiliateRankRow, type RankMetric } from '@/domain/ranking-afiliados'
+import { RANK_METRIC_LABEL, activityFromRecords, rankAffiliates, sortRank, type AffiliateRankRow, type PeriodActivity, type RankMetric } from '@/domain/ranking-afiliados'
 
 const TYPE_TONE: Record<AffiliateType, Tone> = { Manager: 'primary', Influencer: 'info', Organic: 'success' }
 const TYPE_LABEL: Record<AffiliateType, string> = { Manager: 'Manager', Influencer: 'Influencer', Organic: 'Organic' }
 const SITE = 'x2win.bet.br'
 
 const metricValue = (r: AffiliateRankRow, m: RankMetric) => (m === 'referred' ? num(r.referred) : brl(r[m]))
+
+/**
+ * Depósitos e GGR dos indicados no período pelos registros de Depósitos e Transações (demonstração: os mesmos das
+ * telas). No modo API o ranking não lê esses registros e estima pela atividade de cada indicado (null).
+ */
+const useRecordsActivity: (range: DateRange) => Map<string, PeriodActivity> | null = isApiMode()
+  ? () => null
+  : (range) => {
+      const deposits = useDeposits().items
+      const txs = useTransactions().items
+      return useMemo(() => activityFromRecords(deposits, txs, range), [deposits, txs, range])
+    }
 
 export default function RankingAfiliados() {
   const { items: affiliates } = useAffiliates()
@@ -50,7 +63,9 @@ export default function RankingAfiliados() {
   const [showEmpty, setShowEmpty] = useState(false)
   const [openId, setOpenId] = useState<string | null>(null)
 
-  const all = useMemo(() => rankAffiliates(affiliates, players, range), [affiliates, players, range])
+  const activity = useRecordsActivity(range)
+  const all = useMemo(() => rankAffiliates(affiliates, players, range, activity), [affiliates, players, range, activity])
+  const estimated = !activity
   const ranked = useMemo(() => sortRank(all, metric), [all, metric])
   const rankOf = useMemo(() => new Map(ranked.map((r, i) => [r.id, i + 1])), [ranked])
   const hasResult = (r: AffiliateRankRow) => r.referred > 0 || r.deposited > 0 || r.commission > 0
@@ -121,7 +136,8 @@ export default function RankingAfiliados() {
     { id: 'referred', header: 'Indicados', align: 'right', sortValue: (r) => r.referred, cell: (r) => <span className="font-medium">{num(r.referred)}</span> },
     {
       id: 'depositors',
-      header: 'Depositaram',
+      header: '1º depósito',
+      label: 'Fizeram o 1º depósito',
       align: 'right',
       sortValue: (r) => r.depositors,
       cell: (r) => (
@@ -193,7 +209,13 @@ export default function RankingAfiliados() {
           icon={BadgeDollarSign}
           tone="success"
           value={brlCompact(tot.deposited)}
-          formula={<>Estimativa: o total depositado por cada indicado, na proporção do tempo de atividade dele que cai no período.</>}
+          formula={
+            estimated ? (
+              <>Estimativa: o total depositado por cada indicado, na proporção do tempo de atividade dele que cai no período.</>
+            ) : (
+              <>Soma dos PIX pagos pelos indicados no período, os mesmos de Operação › Depósitos. Conta todo depósito, não só o 1º.</>
+            )
+          }
         />
         <KpiCard
           label="Comissão estimada"
@@ -203,7 +225,7 @@ export default function RankingAfiliados() {
           hint={`CPA ${brlCompact(tot.cpa)} · Rev Share ${brlCompact(tot.rev)}`}
           formula={
             <>
-              CPA = depositantes × valor fixo do afiliado. Rev Share = GGR estimado dos indicados × percentual. GGR negativo não gera Rev Share. Afiliado pausado não gera comissão.
+              CPA = indicados com o 1º depósito no período × valor fixo do afiliado. Rev Share = GGR dos indicados (apostado − ganho{estimated ? ', estimado' : ', do extrato'}) × percentual. GGR negativo não gera Rev Share. Afiliado pausado não gera comissão.
             </>
           }
         />
@@ -295,7 +317,7 @@ export default function RankingAfiliados() {
 
       <p className="mt-3 text-xs text-fg-3">Valores estimados para acompanhamento. O pagamento das comissões é feito em Programa de afiliados › Saques de afiliados.</p>
 
-      {open && <AffiliateDrawer row={open} place={rankOf.get(open.id) ?? 0} metric={metric} range={range} onClose={() => setOpenId(null)} />}
+      {open && <AffiliateDrawer row={open} place={rankOf.get(open.id) ?? 0} metric={metric} range={range} estimated={estimated} onClose={() => setOpenId(null)} />}
     </>
   )
 }
@@ -336,7 +358,7 @@ function PodiumCard({ row: r, place, metric, onOpen, className }: { row: Affilia
             <dd className="text-sm font-semibold text-fg tnum">{num(r.referred)}</dd>
           </div>
           <div className="min-w-0 text-center">
-            <dt className="text-[11px] text-fg-3">Depositaram</dt>
+            <dt className="text-[11px] text-fg-3">1º depósito</dt>
             <dd className="text-sm font-semibold text-fg tnum">{num(r.depositors)}</dd>
           </div>
           <div className="min-w-0 text-center">
@@ -349,13 +371,10 @@ function PodiumCard({ row: r, place, metric, onOpen, className }: { row: Affilia
   )
 }
 
-function AffiliateDrawer({ row: r, place, metric, range, onClose }: { row: AffiliateRankRow; place: number; metric: RankMetric; range: DateRange; onClose: () => void }) {
+function AffiliateDrawer({ row: r, place, metric, range, estimated, onClose }: { row: AffiliateRankRow; place: number; metric: RankMetric; range: DateRange; estimated: boolean; onClose: () => void }) {
   const a = r.affiliate
   const link = `https://${SITE}/?ref=${a.code}`
-  const top = [...r.players]
-    .map((p) => ({ p, dep: p.totalDeposited * activityShare(p, range) }))
-    .sort((x, y) => y.dep - x.dep)
-    .slice(0, 8)
+  const top = [...r.players].sort((x, y) => y.deposited - x.deposited || y.ggr - x.ggr).slice(0, 8)
   return (
     <Drawer
       open
@@ -438,12 +457,12 @@ function AffiliateDrawer({ row: r, place, metric, range, onClose }: { row: Affil
           </h3>
           {top.length ? (
             <ul className="divide-y divide-line">
-              {top.map(({ p, dep }) => (
+              {top.map(({ player: p, deposited }) => (
                 <li key={p.id} className="flex items-center justify-between gap-3 py-2.5">
                   <PersonCell name={p.name} sub={maskEmail(p.email)} />
                   <div className="shrink-0 text-right">
-                    <p className="text-[13px] font-semibold text-fg tnum">{brl(dep)}</p>
-                    <p className="text-[11px] text-fg-3">depositado no período</p>
+                    <p className="text-[13px] font-semibold text-fg tnum">{brl(deposited)}</p>
+                    <p className="text-[11px] text-fg-3">{estimated ? 'depositado no período (estimativa)' : 'depositado no período'}</p>
                   </div>
                 </li>
               ))}

@@ -315,6 +315,7 @@ function CarouselCard({
           </Field>
           <Field label="Quantidade" htmlFor={`${id}-count`} error={countErr} hint={c.kind === 'maiores_vitorias' ? 'Vitórias mostradas, da maior para a menor.' : 'Jogos mostrados no carrossel.'}>
             <NumberInput
+              integer
               id={`${id}-count`}
               value={c.count}
               min={CAROUSEL_LIMITS.minCount}
@@ -533,7 +534,7 @@ function NewCarouselModal({ open, onClose, onCreate, taken }: { open: boolean; o
             <Input id="nc-title" data-autofocus value={title} placeholder="Ex.: Crash para jogar agora" onChange={(e) => setTitle(e.target.value)} invalid={touched && !!titleErr} />
           </Field>
           <Field label="Quantidade" htmlFor="nc-count" error={countErr}>
-            <NumberInput id="nc-count" value={count} min={CAROUSEL_LIMITS.minCount} max={CAROUSEL_LIMITS.maxCount} suffix="jogos" onValueChange={(n) => setCount(Math.round(n))} invalid={!!countErr} />
+            <NumberInput integer id="nc-count" value={count} min={CAROUSEL_LIMITS.minCount} max={CAROUSEL_LIMITS.maxCount} suffix="jogos" onValueChange={(n) => setCount(Math.round(n))} invalid={!!countErr} />
           </Field>
         </FormGrid>
         <Field label="De onde vêm os jogos">

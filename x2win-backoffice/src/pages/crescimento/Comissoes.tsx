@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { Calculator, CheckCircle2, Coins, Info, Percent, RotateCcw, Save, TriangleAlert } from 'lucide-react'
 import {
   Alert,
@@ -15,6 +14,7 @@ import {
   MoneyInput,
   NumberInput,
   PageHeader,
+  PageLink,
   RadioCards,
   Segmented,
   toast,
@@ -135,9 +135,9 @@ export default function Comissoes() {
       <div className="space-y-5">
         <Alert tone="info" title="Regra padrão por tipo de afiliado">
           Cada bloco tem o próprio botão “Salvar” e vale para os afiliados daquele tipo sem contrato próprio. Contratos individuais de gerentes ficam em{' '}
-          <Link to="/system/programa-afiliados/gerentes" className="link">
+          <PageLink to="/system/programa-afiliados/gerentes" className="link">
             Programa de afiliados › Gerentes
-          </Link>
+          </PageLink>
           . A mudança vale a partir do próximo fechamento; o que já foi apurado não muda.
         </Alert>
 
@@ -199,6 +199,7 @@ export default function Comissoes() {
               <FormGrid columns={1}>
                 <Field label="Depositantes no mês (FTD)" htmlFor="sim-dep" hint="Indicados que fizeram o primeiro depósito. Base do CPA.">
                   <NumberInput
+                    integer
                     id="sim-dep"
                     value={sim.depositors}
                     min={0}

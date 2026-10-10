@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
   AlertTriangle,
@@ -49,6 +48,7 @@ import {
   MoneyInput,
   NumberInput,
   PageHeader,
+  PageLink,
   RadioCards,
   Segmented,
   Select,
@@ -331,9 +331,9 @@ export default function Jornadas() {
       {!smsAvailable && (
         <Alert tone="info" className="mb-5" title="Etapas de SMS precisam da SendWork">
           Sem conta SendWork, as jornadas usam e-mail, notificação e bônus.{' '}
-          <Link to="/settings/integracoes" className="link">
+          <PageLink to="/settings/integracoes" className="link">
             Conectar em Integrações
-          </Link>
+          </PageLink>
           .
         </Alert>
       )}
@@ -611,7 +611,7 @@ function JourneyEditor({
         </Field>
         {j.trigger.kind === 'inatividade' && (
           <Field label="Dias sem acessar" htmlFor="jr-days" className="max-w-xs" error={j.trigger.days < 1 || j.trigger.days > 365 ? 'De 1 a 365 dias.' : null}>
-            <NumberInput id="jr-days" value={j.trigger.days} min={1} max={365} suffix="dias" onValueChange={(n) => setJ({ ...j, trigger: { ...j.trigger, days: Math.round(n) } })} />
+            <NumberInput integer id="jr-days" value={j.trigger.days} min={1} max={365} suffix="dias" onValueChange={(n) => setJ({ ...j, trigger: { ...j.trigger, days: Math.round(n) } })} />
           </Field>
         )}
         {j.trigger.kind === 'nivel' && (
@@ -801,9 +801,9 @@ function StepCard({
             {!smsAvailable && (
               <Alert tone="warning" icon={MessageSquare}>
                 SMS precisa de uma conta SendWork.{' '}
-                <Link to="/settings/integracoes" className="link">
+                <PageLink to="/settings/integracoes" className="link">
                   Conectar
-                </Link>{' '}
+                </PageLink>{' '}
                 ou troque esta etapa por notificação.
               </Alert>
             )}
@@ -848,7 +848,7 @@ function StepCard({
         {s.kind === 'esperar' && (
           <div className="flex flex-wrap items-end gap-3">
             <Field label="Esperar" htmlFor={`${id}-h`} className="w-40">
-              <NumberInput id={`${id}-h`} value={s.hours} min={1} suffix="horas" onValueChange={(n) => onChange({ hours: Math.round(n) })} />
+              <NumberInput integer id={`${id}-h`} value={s.hours} min={1} suffix="horas" onValueChange={(n) => onChange({ hours: Math.round(n) })} />
             </Field>
             <div className="flex flex-wrap gap-1.5 pb-1">
               {WAIT_PRESETS.map((h) => (
@@ -869,7 +869,7 @@ function StepCard({
           <>
             <div className="flex flex-wrap items-end gap-3">
               <Field label="Janela" htmlFor={`${id}-h`} className="w-40" hint="Olha os depósitos desde a entrada.">
-                <NumberInput id={`${id}-h`} value={s.hours} min={1} suffix="horas" onValueChange={(n) => onChange({ hours: Math.round(n) })} />
+                <NumberInput integer id={`${id}-h`} value={s.hours} min={1} suffix="horas" onValueChange={(n) => onChange({ hours: Math.round(n) })} />
               </Field>
               <Field label="Segue na jornada quem">
                 <Segmented

@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { Link as RouterLink, useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowDownToLine, BadgeCheck, Copy, ExternalLink, Link2, Lock, Pause, Play, RefreshCw, TriangleAlert, UserPlus, Users } from 'lucide-react'
 import { BarsChart, DonutChart } from '@/components/charts'
 import {
@@ -21,11 +21,13 @@ import {
   KpiCard,
   Mono,
   PageHeader,
+  PageLink,
   PersonCell,
   Select,
   confirm,
   confirmWithInput,
   toast,
+  usePathAccess,
   type Column,
 } from '@/components/ui'
 import { brl, brlCompact, date, dateTime, maskEmail, num, pct, relative } from '@/lib/format'
@@ -71,6 +73,7 @@ export default function Links() {
   const { can } = usePageAccess()
   const { user } = useSession()
   const navigate = useNavigate()
+  const canOpen = usePathAccess()
   const [params, setParams] = useSearchParams()
   const { items: affiliates, update: updateAffiliate } = useAffiliates()
   const { items: players } = usePlayers()
@@ -499,7 +502,7 @@ export default function Links() {
           rowActions={(r) => [
             { label: 'Copiar link', icon: Copy, onSelect: () => copy(r) },
             { label: 'Abrir no site', icon: ExternalLink, onSelect: () => window.open(r.url, '_blank', 'noopener,noreferrer') },
-            { label: 'Ver indicados', icon: Users, onSelect: () => navigate(`/analysis/leads?afiliado=${r.id}`) },
+            { label: 'Ver indicados', icon: Users, onSelect: () => navigate(`/analysis/leads?afiliado=${r.id}`), disabled: !canOpen('/analysis/leads').ok },
             { divider: true },
             r.status === 'pausado'
               ? { label: 'Ativar link', icon: Play, onSelect: () => activate(r), disabled: !canManage }
@@ -648,9 +651,9 @@ function LinkDrawer({ row, onClose, action }: { row: LinkRow; onClose: () => voi
           ) : (
             <p className="rounded-lg bg-surface-2 px-3 py-3 text-[13px] text-fg-3">Ninguém se cadastrou por este link ainda.</p>
           )}
-          <RouterLink to={`/analysis/leads?afiliado=${a.id}`} className="link mt-3 inline-block text-[13px]">
+          <PageLink to={`/analysis/leads?afiliado=${a.id}`} className="link mt-3 inline-block text-[13px]">
             Ver todos os indicados
-          </RouterLink>
+          </PageLink>
         </section>
 
         {row.state && (

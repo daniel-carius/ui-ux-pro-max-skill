@@ -22,6 +22,9 @@ import {
 } from '../src/modules/webhooks/dispatcher'
 import { destinationUrl, kvHandlers, type DestinationRow } from '../src/modules/webhooks/kv'
 import { seedDemo, DEMO_DESTINATIONS } from '../src/modules/webhooks/seed'
+import { seedDeposits, seedWithdrawals } from '@/data/finance'
+import { seedPlayers } from '@/data/players'
+import { seedWebhookEvents } from '@/data/webhooks'
 import { isPrivateHostname, isPrivateIp, webhookTargetProblem, webhookUrlProblem } from '../src/modules/webhooks/url'
 import { api, createTestApp, createUser, loginAs } from './helpers'
 
@@ -628,9 +631,12 @@ describe('kv campanhas.webhooks.execucoes', () => {
 })
 
 describe('seed de demonstração', () => {
-  it('5 destinos com segredo cifrado e 134 execuções de sucesso nos últimos 30 dias; não repete', async () => {
+  it('5 destinos com segredo cifrado e uma execução de sucesso por evento de demonstração dos últimos 30 dias; não repete', async () => {
     const app = await createTestApp()
-    expect(await seedDemo(app)).toMatch(/5 destinos e 134 execuções/)
+    const events = seedWebhookEvents()
+    // cada destino de demonstração recebe um evento: uma execução por evento
+    expect(events.length).toBeGreaterThan(100)
+    expect(await seedDemo(app)).toBe(`5 destinos e ${events.length} execuções de demonstração`)
     const dests = await app.db.query<DestinationRow>('select * from webhook_destinations order by id')
     expect(dests.map((d) => d.id)).toEqual(['wh1', 'wh2', 'wh3', 'wh4', 'wh5'])
     for (const d of dests) {
@@ -646,17 +652,35 @@ describe('seed de demonstração', () => {
     // execuções de demonstração com o token do caminho mascarado
     const leadflow = await app.db.query<{ url: string }>(`select distinct url from webhook_executions where destination_id = 'wh5'`)
     expect(leadflow.map((e) => e.url)).toEqual(['https://api.leadflow.app/v1/ftd/a8c3****'])
-    const ex = await app.db.query<{ status: string; at: string; http_status: number; test: boolean }>('select * from webhook_executions')
-    expect(ex).toHaveLength(134)
+    const ex = await app.db.query<{ status: string; at: string; event: string; destination_id: string; http_status: number; test: boolean; payload: string }>('select * from webhook_executions')
+    expect(ex).toHaveLength(events.length)
     expect(ex.every((e) => e.status === 'sucesso' && e.http_status === 200 && !e.test)).toBe(true)
     const thirtyDays = Date.now() - 30 * 86_400_000 - 60_000
     expect(ex.every((e) => Date.parse(e.at) >= thirtyDays && Date.parse(e.at) <= Date.now() + 1000)).toBe(true)
+    // o corpo aponta para um saque ou depósito de demonstração (o mesmo que DEMO_DATA grava) e para o jogador dele
+    const withdrawals = new Map(seedWithdrawals().map((w) => [w.id, w]))
+    const deposits = new Map(seedDeposits().map((d) => [d.id, d]))
+    const players = new Set(seedPlayers().map((p) => p.id))
+    for (const e of ex) {
+      expect(DEMO_DESTINATIONS.find((d) => d.id === e.destination_id)?.event).toBe(e.event)
+      const body = JSON.parse(e.payload) as { event: string; createdAt: string; data: { id: string; playerId: string; amount: number } }
+      expect(body.event).toBe(e.event)
+      expect(Date.parse(body.createdAt)).toBe(Date.parse(e.at))
+      const rec = e.event === 'deposito.primeiro' ? deposits.get(body.data.id) : withdrawals.get(body.data.id)
+      expect(rec, `${e.event} ${body.data.id}`).toBeTruthy()
+      expect(rec!.playerId).toBe(body.data.playerId)
+      expect(rec!.amount).toBe(body.data.amount)
+      expect(players.has(body.data.playerId)).toBe(true)
+      if (e.event === 'saque.pago') expect(withdrawals.get(body.data.id)!.status).toBe('aprovado')
+      if (e.event === 'saque.rejeitado') expect(withdrawals.get(body.data.id)!.status).toBe('recusado')
+      if (e.event === 'deposito.primeiro') expect(deposits.get(body.data.id)!.isFirst).toBe(true)
+    }
     const admin = await authFor(app, 'superadmin')
     const read = await kvHandlers['webhook-destinations']!.read(kvCtx(app, admin, DEST_KEY))
     expect(read!.version).toBe(1)
     expect((read!.value as { secret: string }[])[0].secret).toBe('••••••••••9a2c')
     expect(await seedDemo(app)).toMatch(/nada a semear/)
-    expect(await app.db.query('select id from webhook_executions')).toHaveLength(134)
+    expect(await app.db.query('select id from webhook_executions')).toHaveLength(events.length)
     await app.close()
   })
 })
@@ -679,7 +703,7 @@ describe('regressão r2-api-mode-seed-fallback-3: destinos de demonstração nã
     { id: 'wh5', event: 'deposito.primeiro', url: 'https://api.leadflow.app/v1/ftd/a8c3f1d92e7b', active: false, secret: 'DEMO-hmac-9e1a3c', createdAt: created },
   ]
   const THIRD_PARTY = /hooks\.x2win-crm\.com|api\.leadflow\.app/
-  const GOOD_SECRET = 'whsec_0123456789abcdef0123456789abcdef'
+  const GOOD_SECRET = 'hmacx_0123456789abcdef0123456789abcdef'
 
   let app: FastifyInstance
   let root: Awaited<ReturnType<typeof loginAs>>

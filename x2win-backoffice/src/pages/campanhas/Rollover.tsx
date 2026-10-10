@@ -44,7 +44,9 @@ import {
   Switch,
   TextLink,
   confirm,
+  pathAccessTitle,
   toast,
+  usePathAccess,
   useSettingsForm,
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
@@ -335,13 +337,14 @@ function StatusBanner({ status, withdrawalPct }: { status: ReturnType<typeof rol
       : `Regra valendo para ${status.effective.map((i) => i.label.toLowerCase()).join(' e ')}`
   const icons = { bonus: Gift, saque: ArrowUpFromLine, indicacao: UsersRound }
   const navigate = useNavigate()
+  const rulesPage = usePathAccess()('/system/saques')
   return (
     <Alert
       tone={tone}
       title={title}
       action={
         status.items[1].on && withdrawalPct === 0 ? (
-          <Button size="sm" onClick={() => navigate('/system/saques?aba=regras')}>
+          <Button size="sm" onClick={() => navigate('/system/saques?aba=regras')} disabled={!rulesPage.ok} title={pathAccessTitle(rulesPage)}>
             Regras de saque
           </Button>
         ) : undefined
@@ -373,8 +376,9 @@ function StatusBanner({ status, withdrawalPct }: { status: ReturnType<typeof rol
 function WeightControl({ id, label, value, onChange, disabled }: { id: string; label: string; value: number; onChange: (n: number) => void; disabled?: boolean }) {
   const preset = WEIGHT_PRESETS.find((p) => p === value)
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex flex-wrap items-start gap-2">
       <Segmented<string>
+        className="mt-[3px]"
         ariaLabel={`Peso de ${label}`}
         size="sm"
         value={preset !== undefined ? String(preset) : 'outro'}

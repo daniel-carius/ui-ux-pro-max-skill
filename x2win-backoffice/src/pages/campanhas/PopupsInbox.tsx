@@ -629,7 +629,7 @@ function PopupEditor({ initial, all, onClose, onSave }: { initial: Popup | null;
 
           <FormGrid>
             <Field label="Prioridade" htmlFor="pp-prio" error={show('priority')} hint="1 a 100. O maior vence.">
-              <NumberInput id="pp-prio" value={d.priority} min={1} max={100} onValueChange={(n) => set('priority', Math.round(n))} invalid={!!show('priority')} />
+              <NumberInput integer id="pp-prio" value={d.priority} min={1} max={100} onValueChange={(n) => set('priority', Math.round(n))} invalid={!!show('priority')} />
             </Field>
             <div className="self-end rounded-lg bg-surface-2 px-3 py-2 text-xs leading-5 text-fg-2" aria-live="polite">
               {competitors.length === 0

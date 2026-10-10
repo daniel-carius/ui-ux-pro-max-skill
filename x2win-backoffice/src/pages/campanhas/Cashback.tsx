@@ -16,7 +16,6 @@ import {
   Users,
   XCircle,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
 import { BarsChart } from '@/components/charts'
 import {
   Alert,
@@ -30,11 +29,12 @@ import {
   FormGrid,
   Input,
   KpiCard,
+  MoneyInput,
   NO_SOURCE_HINT,
   NoDataSource,
-  MoneyInput,
   NumberInput,
   PageHeader,
+  PageLink,
   RadioCards,
   SaveBar,
   Segmented,
@@ -122,9 +122,9 @@ export default function Cashback() {
     <>
       <PageHeader
         actions={
-          <Link to="/campanhas/niveis" className="inline-flex h-10 items-center gap-2 rounded-lg border border-line-strong/80 bg-surface px-3.5 text-sm font-medium text-fg shadow-sm hover:bg-surface-3/70">
+          <PageLink to="/campanhas/niveis" className="inline-flex h-10 items-center gap-2 rounded-lg border border-line-strong/80 bg-surface px-3.5 text-sm font-medium text-fg shadow-sm hover:bg-surface-3/70">
             <BadgePercent size={16} aria-hidden /> Cashback por nível
-          </Link>
+          </PageLink>
         }
       />
 
@@ -276,7 +276,7 @@ export default function Cashback() {
                 )}
                 {cb.period === 'mensal' && (
                   <Field label="Dia do mês" htmlFor="cb-md" error={cb.creditMonthDay < 1 || cb.creditMonthDay > 28 ? 'De 1 a 28.' : null}>
-                    <NumberInput id="cb-md" value={cb.creditMonthDay} min={1} max={28} onValueChange={(n) => setCb({ creditMonthDay: Math.round(n) })} />
+                    <NumberInput integer id="cb-md" value={cb.creditMonthDay} min={1} max={28} onValueChange={(n) => setCb({ creditMonthDay: Math.round(n) })} />
                   </Field>
                 )}
                 <Field label="Hora do crédito" htmlFor="cb-hour" hint="Horário de Brasília.">
@@ -308,7 +308,7 @@ export default function Cashback() {
                 </Field>
                 {cb.claim === 'resgate' && (
                   <Field label="Prazo para resgatar" htmlFor="cb-claim" hint="Depois disso o valor expira." error={cb.claimDays < 1 || cb.claimDays > 30 ? 'De 1 a 30 dias.' : null}>
-                    <NumberInput id="cb-claim" value={cb.claimDays} min={1} max={30} suffix="dias" onValueChange={(n) => setCb({ claimDays: Math.round(n) })} />
+                    <NumberInput integer id="cb-claim" value={cb.claimDays} min={1} max={30} suffix="dias" onValueChange={(n) => setCb({ claimDays: Math.round(n) })} />
                   </Field>
                 )}
               </FormGrid>
@@ -412,9 +412,9 @@ function LevelPctTable({ levels, enabled }: { levels: { id: string; name: string
     <div className="rounded-xl border border-line">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3.5 py-2.5">
         <p className="text-[13px] font-medium text-fg">Percentual por nível</p>
-        <Link to="/campanhas/niveis" className="link text-[13px]">
+        <PageLink to="/campanhas/niveis" className="link text-[13px]">
           Editar em Níveis e XP
-        </Link>
+        </PageLink>
       </div>
       {!enabled && (
         <p className="border-b border-line bg-warning/5 px-3.5 py-2 text-xs text-warning">O programa de níveis está desligado: com ele desligado, ninguém recebe cashback por nível.</p>

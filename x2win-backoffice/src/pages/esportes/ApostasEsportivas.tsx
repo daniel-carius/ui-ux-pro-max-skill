@@ -47,7 +47,7 @@ import {
   type DateRange,
   type Tone,
 } from '@/components/ui'
-import { brl, brlCompact, date, dateTime, mult, num, parseDecimalInput, pct, plural, relative, time } from '@/lib/format'
+import { brl, brlCompact, date, dateTime, mult, num, pct, plural, readDecimalText, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { isApiMode } from '@/lib/api'
 import { dbGet, refreshKey } from '@/lib/store'
@@ -87,6 +87,13 @@ const LEG_TONE: Record<LegResult, Tone> = { ganhou: 'success', perdeu: 'danger',
 
 type TabId = 'abertas' | 'todas'
 
+/** Filtro de valor apostado: aceita a tecla só se o texto ainda forma número ("1.000.000", "R$ 12,50" colado). */
+function acceptStake(t: string, set: (v: string) => void) {
+  if (t.trim() === '') return set('')
+  const r = readDecimalText(t)
+  if (r.ok) set(r.text)
+}
+
 export default function ApostasEsportivas() {
   const bets = useSportsBets()
   const [tab, setTab] = useTabParam<TabId>('abertas', ['abertas', 'todas'] as const)
@@ -111,9 +118,13 @@ export default function ApostasEsportivas() {
   const inPeriod = useMemo(() => bets.items.filter((b) => inRange(b.at, range)), [bets.items, range])
   const providers = useMemo(() => [...new Set(bets.items.map((b) => b.provider))], [bets.items])
 
-  // texto com vírgula decimal ("12,5"); o campo recusa o que não forma número
-  const min = minV.trim() === '' ? null : parseDecimalInput(minV)
-  const max = maxV.trim() === '' ? null : parseDecimalInput(maxV)
+  // texto pt-BR ("12,5", "1.000"); o campo recusa o que não forma número (readDecimalText)
+  const stakeOf = (t: string) => {
+    const r = t.trim() === '' ? null : readDecimalText(t)
+    return r?.ok ? r.value : null
+  }
+  const min = stakeOf(minV)
+  const max = stakeOf(maxV)
   const rangeError = min !== null && max !== null && min > max ? 'O mínimo é maior que o máximo.' : null
   const filtersActive = !!(playerQ.trim() || provider || minV || maxV)
 
@@ -428,14 +439,14 @@ export default function ApostasEsportivas() {
                   <label htmlFor="ae-min" className="sr-only">
                     Valor mínimo
                   </label>
-                  <Input id="ae-min" prefix="R$" type="text" inputMode="decimal" autoComplete="off" placeholder="mín." value={minV} onChange={(e) => parseDecimalInput(e.target.value) !== null && setMinV(e.target.value)} invalid={!!rangeError} className="w-full sm:w-28 [&_input]:h-9" />
+                  <Input id="ae-min" prefix="R$" type="text" inputMode="decimal" autoComplete="off" placeholder="mín." value={minV} onChange={(e) => acceptStake(e.target.value, setMinV)} invalid={!!rangeError} className="w-full sm:w-28 [&_input]:h-9" />
                   <span className="text-fg-3" aria-hidden>
                     –
                   </span>
                   <label htmlFor="ae-max" className="sr-only">
                     Valor máximo
                   </label>
-                  <Input id="ae-max" prefix="R$" type="text" inputMode="decimal" autoComplete="off" placeholder="máx." value={maxV} onChange={(e) => parseDecimalInput(e.target.value) !== null && setMaxV(e.target.value)} invalid={!!rangeError} className="w-full sm:w-28 [&_input]:h-9" />
+                  <Input id="ae-max" prefix="R$" type="text" inputMode="decimal" autoComplete="off" placeholder="máx." value={maxV} onChange={(e) => acceptStake(e.target.value, setMaxV)} invalid={!!rangeError} className="w-full sm:w-28 [&_input]:h-9" />
                 </div>
                 {rangeError && (
                   <span className="text-xs font-medium text-danger" role="alert">

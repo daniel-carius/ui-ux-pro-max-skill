@@ -761,12 +761,12 @@ function CouponDrawer({ initial, isNew, all, coin, onClose, onSave }: { initial:
             )}
             {c.reward === 'free_spins' && (
               <Field label="Quantidade de giros" htmlFor="cp-val" required error={errs.value}>
-                <NumberInput id="cp-val" value={c.value} min={1} suffix="giros" invalid={!!errs.value} onValueChange={(n) => set('value', Math.round(n))} />
+                <NumberInput integer id="cp-val" value={c.value} min={1} suffix="giros" invalid={!!errs.value} onValueChange={(n) => set('value', Math.round(n))} />
               </Field>
             )}
             {c.reward === 'moedas' && (
               <Field label="Moedas" htmlFor="cp-val" required error={errs.value} hint={`≈ ${brl(c.value * coin.refValue)}`}>
-                <NumberInput id="cp-val" value={c.value} min={1} suffix={coin.symbol} invalid={!!errs.value} onValueChange={(n) => set('value', Math.round(n))} />
+                <NumberInput integer id="cp-val" value={c.value} min={1} suffix={coin.symbol} invalid={!!errs.value} onValueChange={(n) => set('value', Math.round(n))} />
               </Field>
             )}
             {(c.reward === 'bonus_pct' || c.reward === 'bonus_brl') && (
@@ -786,10 +786,10 @@ function CouponDrawer({ initial, isNew, all, coin, onClose, onSave }: { initial:
               <MoneyInput id="cp-dep" value={c.minDeposit} invalid={!!errs.minDeposit} onValueChange={(n) => set('minDeposit', n)} />
             </Field>
             <Field label="Usos máximos no total" htmlFor="cp-max" error={errs.maxUses} hint={c.maxUses ? `${num(c.uses)} já usados.` : '0 = ilimitado.'}>
-              <NumberInput id="cp-max" value={c.maxUses} min={0} suffix="usos" invalid={!!errs.maxUses} onValueChange={(n) => set('maxUses', Math.round(n))} />
+              <NumberInput integer id="cp-max" value={c.maxUses} min={0} suffix="usos" invalid={!!errs.maxUses} onValueChange={(n) => set('maxUses', Math.round(n))} />
             </Field>
             <Field label="Usos por jogador" htmlFor="cp-per" error={errs.perPlayer}>
-              <NumberInput id="cp-per" value={c.perPlayer} min={1} suffix="usos" invalid={!!errs.perPlayer} onValueChange={(n) => set('perPlayer', Math.round(n))} />
+              <NumberInput integer id="cp-per" value={c.perPlayer} min={1} suffix="usos" invalid={!!errs.perPlayer} onValueChange={(n) => set('perPlayer', Math.round(n))} />
             </Field>
           </FormGrid>
         </DrawerSection>

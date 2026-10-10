@@ -2,6 +2,7 @@
 // Funções puras: quem pode conceder cargos, quem pode ser desativado,
 // o que é "acesso amplo" (achados 1 e 2), nomes parecidos (achado 9) e
 // consistência da matriz de permissões.
+import { checkMemberName } from '@shared/member-name'
 import { MODULES, PAGES, type ModuleId } from '@/nav'
 import type { AuditAction, TeamMember } from '@/data/team'
 import {
@@ -184,17 +185,14 @@ export function validateTeamEmail(email: string, team: TeamMember[], ignoreId?: 
   return null
 }
 
-/** Nome provisório a partir do e-mail ("ana.paula@x" → "Ana Paula"). */
-/** Nome provisório a partir do e-mail, com a mesma regra do servidor (team/service.ts nameFromEmail). */
-export function nameFromEmail(email: string) {
-  const local = email.split('@')[0] ?? email
-  return local
-    .split(/[._+-]+/)
-    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ''))
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ')
-    .slice(0, 100)
+// Nome montado a partir do e-mail e regra do nome: as mesmas do servidor (shared/member-name.ts).
+export { checkMemberName, inviteNameFromEmail, nameFromEmail } from '@shared/member-name'
+
+/** Problema do nome digitado pela regra do servidor (checkMemberName), ou null. Vazio: null (quem chama decide). */
+export function memberNameProblem(raw: string): string | null {
+  if (!raw.trim()) return null
+  const r = checkMemberName(raw)
+  return 'problem' in r ? r.problem : null
 }
 
 const PASS_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'

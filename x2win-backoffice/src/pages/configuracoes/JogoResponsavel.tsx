@@ -146,6 +146,7 @@ export default function JogoResponsavel() {
                   className="w-40"
                 >
                   <NumberInput
+                    integer
                     id="rg-session"
                     value={v.session.everyMinutes}
                     min={SESSION_MIN}

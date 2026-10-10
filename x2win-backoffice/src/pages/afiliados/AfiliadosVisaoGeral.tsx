@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { CalendarRange, CircleDollarSign, HandCoins, Scale, TrendingUp, UserPlus, Users } from 'lucide-react'
 import { BarsChart, FunnelChart } from '@/components/charts'
 import {
@@ -19,6 +18,7 @@ import {
   KpiCard,
   NoDataSource,
   PageHeader,
+  PageLink,
   PersonCell,
   Segmented,
   inRange,
@@ -141,15 +141,15 @@ function ApiVisaoGeral() {
         title="Desempenho dos afiliados ainda sem fonte de dados"
         action={
           <div className="flex flex-wrap justify-center gap-2">
-            <Link to="/system/programa-afiliados/saques" className="link text-[13px]">
+            <PageLink to="/system/programa-afiliados/saques" className="link text-[13px]">
               Saques de afiliados
-            </Link>
+            </PageLink>
             <span className="text-fg-3" aria-hidden>
               ·
             </span>
-            <Link to="/analysis/leads" className="link text-[13px]">
+            <PageLink to="/analysis/leads" className="link text-[13px]">
               Indicados
-            </Link>
+            </PageLink>
           </div>
         }
       >
@@ -456,9 +456,9 @@ function DemoVisaoGeral() {
                     <p className="font-display text-xl font-bold text-fg tnum">{brl(t.toPay)}</p>
                     <p className="text-xs text-fg-3">{brl(t.paid)} já pagos em saques de afiliados</p>
                   </div>
-                  <Link to="/system/programa-afiliados/saques" className="link shrink-0 text-[13px]">
+                  <PageLink to="/system/programa-afiliados/saques" className="link shrink-0 text-[13px]">
                     Ver saques
-                  </Link>
+                  </PageLink>
                 </div>
               </div>
             </CardBody>
@@ -507,9 +507,9 @@ function ManagerDrawer({ row, range, onClose }: { row: ManagerRow; range: DateRa
         </Badge>
       }
       footer={
-        <Link to="/system/programa-afiliados/gerentes" className="link text-[13px]">
+        <PageLink to="/system/programa-afiliados/gerentes" className="link text-[13px]">
           Abrir em Gerentes
-        </Link>
+        </PageLink>
       }
     >
       <div className="space-y-6">

@@ -29,6 +29,7 @@ import {
   Input,
   KpiCard,
   PageHeader,
+  PageLink,
   Segmented,
   Switch,
   Textarea,
@@ -141,11 +142,11 @@ export default function TemplatesEmail() {
               <strong>
                 {integrations.smtp.fromName.trim() ? `${integrations.smtp.fromName} ` : ''}&lt;{integrations.smtp.fromEmail}&gt;
               </strong>
-              , definido em <a className="link" href="#/settings/integracoes">Integrações</a>.
+              , definido em <PageLink className="link" to="/settings/integracoes">Integrações</PageLink>.
             </>
           ) : (
             <>
-              O remetente ainda não foi definido: informe-o em <a className="link" href="#/settings/integracoes">Integrações</a>.
+              O remetente ainda não foi definido: informe-o em <PageLink className="link" to="/settings/integracoes">Integrações</PageLink>.
             </>
           )}
         </Alert>

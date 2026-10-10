@@ -8,7 +8,7 @@ import type { ReferralRecord } from '@/domain/campanhas2-indicacao'
 import type { Mission } from '@/domain/campanhas2-missoes'
 import type { Tournament, TournamentPrize } from '@/domain/campanhas2-torneios'
 import { DAY, HOUR, NOW, dayKey, daysAgo, iso } from './now'
-import { seedPlayers } from './players'
+import { playersOnlineAt, seedPlayers, type Player } from './players'
 import { demoRecords } from './demo'
 
 const inDays = (n: number) => new Date(NOW.getTime() + n * DAY)
@@ -158,21 +158,38 @@ export function seedWheels(): Wheel[] {
   ]
 }
 
+/** Quem pode girar a roleta em `t`, pelo grupo dela (o mesmo texto de Campanhas › Roleta). */
+function inWheelGroup(w: Wheel, p: Player, t: number) {
+  if (w.group === 'novos') return t - Date.parse(p.createdAt) <= 7 * DAY
+  if (w.group === 'vip') return p.tags.includes('VIP')
+  return true
+}
+
 export function seedWheelSpins(): WheelSpin[] {
   const rng = createRng(5150)
   const players = seedPlayers().filter((p) => p.status === 'ativo')
   const wheels = seedWheels().filter((w) => w.active)
   const out: WheelSpin[] = []
-  for (let i = 0; i < 420; i++) {
+  /** giros por roleta, jogador e dia: no máximo os giros por dia da roleta */
+  const spinsOfDay = new Map<string, number>()
+  for (let i = 0, n = 0; i < 420; i++) {
     const w = rng.weighted([
       [wheels[0], 70],
       [wheels[1], 18],
       [wheels[2], 12],
     ] as const)
     const pz = rng.weighted(w.prizes.map((p) => [p, p.probability] as const))
-    const pl = rng.pick(players)
+    const at = new Date(NOW.getTime() - Math.pow(rng.next(), 1.15) * 30 * DAY)
+    // quem girou estava no site (conta criada antes do giro e último acesso depois), é do grupo da roleta
+    // e ainda tinha giro no dia
+    const key = (p: Player) => `${w.id}|${p.id}|${dayKey(at)}`
+    const t = at.getTime()
+    const pool = players.filter((p) => Date.parse(p.createdAt) <= t && Date.parse(p.lastAccess) >= t && inWheelGroup(w, p, t) && (spinsOfDay.get(key(p)) ?? 0) < w.spinsPerDay)
+    if (!pool.length || t < Date.parse(w.createdAt)) continue
+    const pl = rng.pick(pool)
+    spinsOfDay.set(key(pl), (spinsOfDay.get(key(pl)) ?? 0) + 1)
     out.push({
-      id: `gr${String(90000 + i)}`,
+      id: `gr${String(90000 + n++)}`,
       wheelId: w.id,
       wheelName: w.name,
       playerId: pl.id,
@@ -181,7 +198,7 @@ export function seedWheelSpins(): WheelSpin[] {
       kind: pz.kind,
       value: pz.value,
       costCoins: w.costCoins,
-      at: iso(new Date(NOW.getTime() - Math.pow(rng.next(), 1.15) * 30 * DAY)),
+      at: iso(at),
     })
   }
   return out.sort((a, b) => b.at.localeCompare(a.at))
@@ -212,7 +229,15 @@ export function seedShopPurchases(): ShopPurchase[] {
   const out: ShopPurchase[] = []
   for (let i = 0; i < 360; i++) {
     const it = rng.weighted(weights)
-    const pl = rng.pick(players)
+    const status = rng.weighted([
+      ['entregue', 93],
+      ['pendente', 3],
+      ['estornada', 4],
+    ] as const)
+    // pendentes só nas últimas horas (entrega em processamento)
+    const at = status === 'pendente' ? NOW.getTime() - rng.int(5, 240) * 60_000 : NOW.getTime() - Math.pow(rng.next(), 1.1) * 45 * DAY - rng.int(0, 59) * 60_000
+    // quem comprou estava no site: conta criada antes da compra e último acesso depois
+    const pl = rng.pick(playersOnlineAt(players, at))
     const value = it.kind === 'free_spins' ? it.value * it.extra : it.kind === 'cashback' ? Math.round(rng.float(5, it.extra) * 100) / 100 : it.value
     out.push({
       id: `cp${String(30000 + i)}`,
@@ -224,16 +249,10 @@ export function seedShopPurchases(): ShopPurchase[] {
       playerEmail: pl.email,
       price: it.price,
       valueBrl: value,
-      at: iso(new Date(NOW.getTime() - Math.pow(rng.next(), 1.1) * 45 * DAY - rng.int(0, 59) * 60_000)),
-      status: rng.weighted([
-        ['entregue', 93],
-        ['pendente', 3],
-        ['estornada', 4],
-      ] as const),
+      at: iso(new Date(at)),
+      status,
     })
   }
-  // pendentes só nas últimas horas (entrega em processamento)
-  for (const p of out) if (p.status === 'pendente') p.at = iso(new Date(NOW.getTime() - rng.int(5, 240) * 60_000))
   return out.sort((a, b) => b.at.localeCompare(a.at))
 }
 

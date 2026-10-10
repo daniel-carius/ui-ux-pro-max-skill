@@ -294,7 +294,7 @@ export default function Niveis() {
             </FormGrid>
             <FormGrid>
               <Field label="XP por depósito" htmlFor="xp-dep" hint="Somado a cada depósito pago.">
-                <NumberInput id="xp-dep" value={v.xp.depositXp} min={0} suffix="XP" onValueChange={(n) => setXp({ depositXp: Math.round(n) })} />
+                <NumberInput integer id="xp-dep" value={v.xp.depositXp} min={0} suffix="XP" onValueChange={(n) => setXp({ depositXp: Math.round(n) })} />
               </Field>
               <Field label="Depósito mínimo para ganhar XP" htmlFor="xp-dep-min" hint="Evita depósitos pequenos só para subir de nível.">
                 <MoneyInput id="xp-dep-min" value={v.xp.depositMin} onValueChange={(n) => setXp({ depositMin: n })} />
@@ -445,7 +445,7 @@ function LevelRow({
           <label htmlFor={`${id}-xp`} className={label}>
             XP necessário
           </label>
-          <NumberInput id={`${id}-xp`} value={l.xp} min={0} step={50} suffix="XP" invalid={!!errors?.xp} onValueChange={(n) => onChange({ xp: Math.round(n) })} />
+          <NumberInput integer id={`${id}-xp`} value={l.xp} min={0} step={50} suffix="XP" invalid={!!errors?.xp} onValueChange={(n) => onChange({ xp: Math.round(n) })} />
         </div>
         <div className="min-w-0">
           <label htmlFor={`${id}-cb`} className={label}>
@@ -463,7 +463,7 @@ function LevelRow({
           <label htmlFor={`${id}-spins`} className={label}>
             Giros grátis
           </label>
-          <NumberInput id={`${id}-spins`} value={l.freeSpins} min={0} step={10} suffix="giros" invalid={!!errors?.freeSpins} onValueChange={(n) => onChange({ freeSpins: Math.round(n) })} />
+          <NumberInput integer id={`${id}-spins`} value={l.freeSpins} min={0} step={10} suffix="giros" invalid={!!errors?.freeSpins} onValueChange={(n) => onChange({ freeSpins: Math.round(n) })} />
         </div>
         <div className="flex items-center justify-between gap-2 lg:justify-start">
           <span className="whitespace-nowrap text-xs font-medium text-fg-3 lg:sr-only">Saque prioritário</span>
@@ -630,7 +630,7 @@ function PlayerPreview({ config }: { config: LevelsConfig }) {
         <div className="space-y-4">
           <FormGrid>
             <Field label="XP atual do jogador" htmlFor="sim-xp" hint={`Hoje no nível ${levels[before]?.name ?? '—'}.`}>
-              <NumberInput id="sim-xp" value={startXp} min={0} step={50} suffix="XP" onValueChange={(n) => setStartXp(Math.max(0, Math.round(n)))} />
+              <NumberInput integer id="sim-xp" value={startXp} min={0} step={50} suffix="XP" onValueChange={(n) => setStartXp(Math.max(0, Math.round(n)))} />
             </Field>
             <Field label="Começar de um nível" htmlFor="sim-lvl">
               <Select
@@ -646,7 +646,7 @@ function PlayerPreview({ config }: { config: LevelsConfig }) {
               </Field>
             ))}
             <Field label="Depósitos pagos" htmlFor="sim-dep">
-              <NumberInput id="sim-dep" value={deposits} min={0} onValueChange={(n) => setDeposits(Math.max(0, Math.round(n)))} />
+              <NumberInput integer id="sim-dep" value={deposits} min={0} onValueChange={(n) => setDeposits(Math.max(0, Math.round(n)))} />
             </Field>
             <Field label="Valor de cada depósito" htmlFor="sim-dep-v">
               <MoneyInput id="sim-dep-v" value={depositAmount} onValueChange={setDepositAmount} />

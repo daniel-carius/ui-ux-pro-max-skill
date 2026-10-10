@@ -2,7 +2,7 @@
 // Regras puras: a recriação com servidor deve aplicar as mesmas validações no back-end.
 import { brl, date, mult, num } from '@/lib/format'
 import type { Player } from '@/data/players'
-import type { CampaignPlayer } from './campanhas-jogadores'
+import type { CampaignPlayer } from './campanhas-jogador'
 
 export type PromoType = 'bonus_deposito' | 'free_spins' | 'cashback' | 'cupom' | 'torneio' | 'missao'
 export type PromoStatus = 'rascunho' | 'agendada' | 'ativa' | 'pausada' | 'encerrada'

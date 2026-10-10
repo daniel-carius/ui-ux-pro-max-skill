@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   BadgeCheck,
   Building2,
@@ -32,6 +33,7 @@ import {
   TextLink,
   confirm,
   toast,
+  usePathAccess,
   useSettingsForm,
 } from '@/components/ui'
 import { useDb } from '@/lib/store'
@@ -49,7 +51,23 @@ import {
   type FooterSettings,
   type SocialSettings,
 } from '@/data/personalizacao2-config'
-import { BrowserFrame, CharCount, DeviceToggle, initialDevice, LivePreview, SiteFooter, fmtCnpj, type Device } from './_shared-p2'
+import { BrowserFrame, CharCount, DeviceToggle, initialDevice, LivePreview, SiteFooter, legalLine, type Device } from './_shared-p2'
+
+/** Campos que "Usar dados da empresa" copia de Empresa e licença, com o nome usado nos avisos. */
+const SYNC_FIELDS = [
+  ['companyName', 'nome'],
+  ['description', 'descrição'],
+  ['phone', 'telefone'],
+  ['email', 'e-mail'],
+  ['address', 'endereço'],
+  ['licenseText', 'texto da licença'],
+] as const satisfies readonly (readonly [keyof FooterSettings, string])[]
+
+/** "nome, telefone e e-mail" (com `upper`, a primeira letra maiúscula). */
+function listPt(items: readonly string[], upper = false) {
+  const text = items.length > 1 ? `${items.slice(0, -1).join(', ')} e ${items[items.length - 1]}` : (items[0] ?? '')
+  return upper ? text.charAt(0).toUpperCase() + text.slice(1) : text
+}
 
 const CONTACT_ICON: Record<ContactKey, LucideIcon> = {
   phone: Phone,
@@ -74,18 +92,34 @@ export default function Rodape() {
   const errors = footerErrors(v)
   const shown = visibleContacts(v)
   const missingSeal = !v.seal18 || !v.sealResponsible
+  const legal = legalLine(company)
+  const navigate = useNavigate()
+  const canOpen = usePathAccess()
 
   const syncCompany = async () => {
+    // só copia o que Empresa e licença tem preenchido (campo vazio lá não apaga o do rodapé) e diz o que copiou
+    const d = footerDefaults(company)
+    const fields = SYNC_FIELDS.map(([key, label]) => ({ key, label, value: d[key] })).filter((f) => f.value.trim())
+    const empresa = canOpen('/settings/empresa').ok ? { label: 'Abrir Empresa e licença', onClick: () => navigate('/settings/empresa') } : undefined
+    if (!fields.length) {
+      toast.info('Nada para copiar', { description: 'Empresa e licença ainda está vazia. Preencha os dados da empresa lá primeiro.', action: empresa })
+      return
+    }
+    const changed = fields.filter((f) => v[f.key] !== f.value)
+    if (!changed.length) {
+      toast.info('Nada mudou', { description: 'O rodapé já usa os dados de Empresa e licença.' })
+      return
+    }
+    const kept = SYNC_FIELDS.filter(([key]) => !fields.some((f) => f.key === key)).map(([, label]) => label)
     const ok = await confirm({
       title: 'Usar os dados de Empresa e licença?',
-      description: 'Nome, descrição, telefone, e-mail, endereço e texto da licença voltam a ser os do cadastro da empresa. Os outros canais não mudam.',
+      description: `${listPt(changed.map((f) => f.label), true)} ${changed.length === 1 ? 'volta' : 'voltam'} a ser ${changed.length === 1 ? 'o' : 'os'} do cadastro da empresa.${kept.length ? ` Em branco lá, ${listPt(kept)} não ${kept.length === 1 ? 'muda' : 'mudam'}.` : ''} Os outros canais não mudam.`,
       confirmLabel: 'Usar dados da empresa',
       icon: RefreshCw,
     })
     if (!ok) return
-    const d = footerDefaults(company)
-    form.patch({ companyName: d.companyName, description: d.description, phone: d.phone, email: d.email, address: d.address, licenseText: d.licenseText })
-    toast.info('Dados copiados para o rascunho', { description: 'Confira a prévia e salve para publicar.' })
+    form.patch(Object.fromEntries(changed.map((f) => [f.key, f.value])) as Partial<FooterSettings>)
+    toast.info('Dados copiados para o rascunho', { description: `${listPt(changed.map((f) => f.label), true)}. Confira a prévia e salve para publicar.` })
   }
 
   const frame = (d: Device) => (
@@ -131,7 +165,7 @@ export default function Rodape() {
               </Field>
               <Switch
                 label="Mostrar razão social e CNPJ"
-                description={`${company.legalName} · CNPJ ${fmtCnpj(company.cnpj)}`}
+                description={legal ?? 'Empresa e licença ainda sem razão social e CNPJ: a linha não aparece no site.'}
                 checked={v.showLegalLine}
                 onChange={(on) => form.set('showLegalLine', on)}
               />

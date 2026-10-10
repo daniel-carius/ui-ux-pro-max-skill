@@ -32,6 +32,7 @@ import {
   Mono,
   NumberInput,
   PageHeader,
+  PageLink,
   RadioCards,
   SaveBar,
   SecretField,
@@ -261,19 +262,19 @@ export default function Integracoes() {
 
         {API ? (
           <Alert tone="info" icon={Send} title="Envio de mensagens ainda não ligado">
-            O servidor guarda as credenciais, mas nesta versão não envia e-mail, SMS nem RCS: <a className="link" href="#/campanhas/disparos">Disparos</a>,{' '}
-            <a className="link" href="#/campanhas/jornadas">Jornadas</a> e os templates de e-mail ainda não mandam mensagens. Convites e senhas temporárias
+            O servidor guarda as credenciais, mas nesta versão não envia e-mail, SMS nem RCS: <PageLink className="link" to="/campanhas/disparos">Disparos</PageLink>,{' '}
+            <PageLink className="link" to="/campanhas/jornadas">Jornadas</PageLink> e os templates de e-mail ainda não mandam mensagens. Convites e senhas temporárias
             aparecem na tela para quem os cria.
           </Alert>
         ) : (
         <Alert tone={channels.sms ? 'success' : 'info'} icon={Send}>
           {channels.sms ? (
             <>
-              SendWork conectada: <a className="link" href="#/campanhas/disparos">Disparos</a> e <a className="link" href="#/campanhas/jornadas">Jornadas</a> oferecem e-mail, SMS e RCS.
+              SendWork conectada: <PageLink className="link" to="/campanhas/disparos">Disparos</PageLink> e <PageLink className="link" to="/campanhas/jornadas">Jornadas</PageLink> oferecem e-mail, SMS e RCS.
             </>
           ) : (
             <>
-              <a className="link" href="#/campanhas/disparos">Disparos</a> e <a className="link" href="#/campanhas/jornadas">Jornadas</a> só oferecem SMS e RCS quando a SendWork está conectada. Hoje,
+              <PageLink className="link" to="/campanhas/disparos">Disparos</PageLink> e <PageLink className="link" to="/campanhas/jornadas">Jornadas</PageLink> só oferecem SMS e RCS quando a SendWork está conectada. Hoje,
               só o e-mail está disponível.
             </>
           )}
@@ -379,7 +380,7 @@ export default function Integracoes() {
                 <Input id="smtp-host" value={v.smtp.host} className="font-mono" onChange={(e) => setSmtp({ host: e.target.value })} />
               </Field>
               <Field label="Porta" htmlFor="smtp-port" hint="587 (STARTTLS) ou 465 (SSL)" error={v.smtp.port < 1 || v.smtp.port > 65535 ? 'Porta de 1 a 65535.' : null}>
-                <NumberInput id="smtp-port" value={v.smtp.port} min={1} max={65535} onValueChange={(n) => setSmtp({ port: Math.round(n) })} />
+                <NumberInput integer id="smtp-port" value={v.smtp.port} min={1} max={65535} onValueChange={(n) => setSmtp({ port: Math.round(n) })} />
               </Field>
               <Field label="Usuário" htmlFor="smtp-user">
                 <Input id="smtp-user" value={v.smtp.user} autoComplete="off" onChange={(e) => setSmtp({ user: e.target.value })} />

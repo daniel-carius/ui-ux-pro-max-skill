@@ -42,6 +42,7 @@ import {
   MoneyInput,
   NumberInput,
   PageHeader,
+  PageLink,
   PersonCell,
   Progress,
   RadioCards,
@@ -798,7 +799,7 @@ function CampaignDrawer({
           {c.trigger === 'deposito' && (
             <FormGrid>
               <Field label="Nº do depósito" htmlFor="fs-depn" error={err('depositNumber')} hint={`Libera no ${c.depositNumber}º depósito pago.`}>
-                <NumberInput id="fs-depn" value={c.depositNumber} min={1} max={20} suffix="º dep." onValueChange={(n) => set('depositNumber', Math.round(n))} invalid={!!err('depositNumber')} />
+                <NumberInput integer id="fs-depn" value={c.depositNumber} min={1} max={20} suffix="º dep." onValueChange={(n) => set('depositNumber', Math.round(n))} invalid={!!err('depositNumber')} />
               </Field>
               <Field label="Depósito mínimo" htmlFor="fs-min" error={err('minDeposit')}>
                 <MoneyInput id="fs-min" value={c.minDeposit} onValueChange={(n) => set('minDeposit', n)} invalid={!!err('minDeposit')} />
@@ -821,19 +822,19 @@ function CampaignDrawer({
           </Field>
           <FormGrid>
             <Field label="Quantidade de giros" htmlFor="fs-spins" required error={err('spins')}>
-              <NumberInput id="fs-spins" value={c.spins} min={1} max={1000} suffix="giros" onValueChange={(n) => set('spins', Math.round(n))} invalid={!!err('spins')} />
+              <NumberInput integer id="fs-spins" value={c.spins} min={1} max={1000} suffix="giros" onValueChange={(n) => set('spins', Math.round(n))} invalid={!!err('spins')} />
             </Field>
             <Field label="Valor por giro" htmlFor="fs-value" required error={err('spinValue')}>
               <MoneyInput id="fs-value" value={c.spinValue} step={0.1} onValueChange={(n) => set('spinValue', n)} invalid={!!err('spinValue')} />
             </Field>
             <Field label="Validade" htmlFor="fs-valid" error={err('validityDays')} hint="Dias para usar depois de receber.">
-              <NumberInput id="fs-valid" value={c.validityDays} min={1} max={60} suffix="dias" onValueChange={(n) => set('validityDays', Math.round(n))} invalid={!!err('validityDays')} />
+              <NumberInput integer id="fs-valid" value={c.validityDays} min={1} max={60} suffix="dias" onValueChange={(n) => set('validityDays', Math.round(n))} invalid={!!err('validityDays')} />
             </Field>
             <Field label="Rollover dos ganhos" htmlFor="fs-roll" error={err('winRollover')} hint="O ganho vira bônus e precisa ser apostado N vezes.">
               <NumberInput id="fs-roll" value={c.winRollover} min={0} max={100} step={0.5} suffix="x" onValueChange={(n) => set('winRollover', n)} invalid={!!err('winRollover')} />
             </Field>
             <Field label="Limite por jogador" htmlFor="fs-limit" error={err('maxPerPlayer')}>
-              <NumberInput id="fs-limit" value={c.maxPerPlayer} min={1} suffix="vezes" onValueChange={(n) => set('maxPerPlayer', Math.round(n))} invalid={!!err('maxPerPlayer')} />
+              <NumberInput integer id="fs-limit" value={c.maxPerPlayer} min={1} suffix="vezes" onValueChange={(n) => set('maxPerPlayer', Math.round(n))} invalid={!!err('maxPerPlayer')} />
             </Field>
           </FormGrid>
           <FormGrid>
@@ -862,7 +863,7 @@ function CampaignDrawer({
             <div className="mt-3 border-t border-line pt-3">
               <FormFieldset readOnly={!canEdit}>
                 <Field label="Jogadores estimados" htmlFor="fs-est" error={err('estimatedPlayers')} hint={suggestion?.text}>
-                  <NumberInput id="fs-est" value={c.estimatedPlayers} min={0} suffix="jogadores" onValueChange={(n) => set('estimatedPlayers', Math.round(n))} />
+                  <NumberInput integer id="fs-est" value={c.estimatedPlayers} min={0} suffix="jogadores" onValueChange={(n) => set('estimatedPlayers', Math.round(n))} />
                 </Field>
               </FormFieldset>
               {suggestion && suggestion.count !== c.estimatedPlayers && canEdit && (
@@ -878,13 +879,13 @@ function CampaignDrawer({
           </div>
           <div className="rounded-xl bg-surface-2 p-3 text-xs leading-5 text-fg-2">
             O ganho dos giros entra como <strong className="text-fg">saldo bônus</strong> e segue as regras de{' '}
-            <a href="#/campanhas/saldo-bonus" className="link">
+            <PageLink to="/campanhas/saldo-bonus" className="link">
               Saldo bônus
-            </a>{' '}
+            </PageLink>{' '}
             e{' '}
-            <a href="#/campanhas/rollover" className="link">
+            <PageLink to="/campanhas/rollover" className="link">
               Rollover
-            </a>
+            </PageLink>
             .
           </div>
         </aside>
@@ -975,7 +976,7 @@ function GrantModal({
               />
             </Field>
             <Field label="Giros" htmlFor="gr-spins" required>
-              <NumberInput id="gr-spins" value={spins} min={1} max={1000} suffix="giros" onValueChange={(n) => setSpins(Math.round(n))} />
+              <NumberInput integer id="gr-spins" value={spins} min={1} max={1000} suffix="giros" onValueChange={(n) => setSpins(Math.round(n))} />
             </Field>
           </FormGrid>
         )}

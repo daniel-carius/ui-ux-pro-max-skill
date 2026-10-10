@@ -520,7 +520,7 @@ function ShowcaseDrawer({
               <Input id="vt-name" value={draft.name} maxLength={40} onChange={(e) => set('name', e.target.value)} invalid={!!show('name')} placeholder="Ex.: Top 10 da semana" />
             </Field>
             <Field label="Limite de itens" htmlFor="vt-limit" error={show('limit')} hint={`De ${SHOWCASE_LIMITS.min} a ${SHOWCASE_LIMITS.max} jogos.`}>
-              <NumberInput id="vt-limit" value={draft.limit} onValueChange={(n) => set('limit', Math.round(n))} min={SHOWCASE_LIMITS.min} max={SHOWCASE_LIMITS.max} suffix="jogos" invalid={!!show('limit')} />
+              <NumberInput integer id="vt-limit" value={draft.limit} onValueChange={(n) => set('limit', Math.round(n))} min={SHOWCASE_LIMITS.min} max={SHOWCASE_LIMITS.max} suffix="jogos" invalid={!!show('limit')} />
             </Field>
           </FormGrid>
 

@@ -1,9 +1,6 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { Building2, CirclePause, CirclePlay, Eye, Gamepad2, Network, Pencil, Percent, RefreshCw, Settings2 } from 'lucide-react'
 import {
-  NO_SOURCE_HINT,
-  NoDataSource,
   Alert,
   Badge,
   Button,
@@ -16,8 +13,11 @@ import {
   FormFieldset,
   KpiCard,
   Mono,
+  NO_SOURCE_HINT,
+  NoDataSource,
   NumberInput,
   PageHeader,
+  PageLink,
   Progress,
   Select,
   confirm,
@@ -337,9 +337,9 @@ export default function Provedoras() {
             </h2>
             <p className="text-[13px] text-fg-3">Os agregadores entregam os jogos de cada provedora.</p>
           </div>
-          <Link to="/games/agregadores" className="link inline-flex items-center gap-1 text-[13px]">
+          <PageLink to="/games/agregadores" className="link inline-flex items-center gap-1 text-[13px]">
             <Settings2 size={14} aria-hidden /> Configurar agregadores
-          </Link>
+          </PageLink>
         </div>
         <div className="grid gap-4 lg:grid-cols-5">
           <div className="grid gap-4 sm:grid-cols-2 lg:col-span-2 lg:grid-cols-1">
@@ -574,9 +574,9 @@ function ProviderDrawer({
           <CoverStrip games={games} providerName={() => p.name} badgesOf={badgesOf} max={5} size="sm" className="flex-wrap" empty={<p className="text-[13px] text-fg-3">Nenhum jogo no catálogo.</p>} />
           <p className="mt-2 text-xs text-fg-3">
             Capas, destaque e status de cada jogo ficam em{' '}
-            <Link to="/games/jogos" className="link">
+            <PageLink to="/games/jogos" className="link">
               Jogos
-            </Link>
+            </PageLink>
             .
           </p>
         </section>

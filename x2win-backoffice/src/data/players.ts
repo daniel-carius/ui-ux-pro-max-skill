@@ -1,9 +1,12 @@
 // Jogadores e afiliados. Dados pessoais obviamente fictícios (ver ./demo): e-mail .invalid,
 // CPF com dígito verificador errado, celular (DD) 9 0XXX-XXXX e IP na faixa privada 10.x.
+// Aqui fica o cadastro (apelido único, "Desde", último acesso, KYC e perfil de jogo); totais, saldos, moedas e
+// 1º depósito vêm do livro-razão de cada conta (./ledger), o mesmo do extrato, Depósitos e Saques.
 import { createRng } from '@/lib/random'
 import { demoCpf, demoEmail, demoIp, demoPhone, demoRecords } from './demo'
 import { CITIES, EMAIL_DOMAINS, FIRST_NAMES, LAST_NAMES, NICK_PARTS_A, NICK_PARTS_B, slugify } from './names'
-import { DAY, HOUR, NOW, iso } from './now'
+import { buildLedger, type DemoLedger, type PlayerProfile, type Tier } from './ledger'
+import { DAY, HOUR, MIN, NOW, iso } from './now'
 
 export type PlayerOrigin = 'Orgânico' | 'Afiliado' | 'Indicação' | 'Google Ads' | 'Meta Ads' | 'TikTok Ads' | 'Influenciador'
 export type PlayerRole = 'Jogador' | 'Afiliado' | 'Influenciador' | 'Gerente'
@@ -91,38 +94,65 @@ function genIp(rng: ReturnType<typeof createRng>) {
   return demoIp(`${rng.pick([177, 179, 186, 187, 189, 191, 200, 201])}.${rng.int(1, 254)}.${rng.int(1, 254)}.${rng.int(1, 254)}`)
 }
 
+/** Sorteio que não é mais usado: consumido para os campos gerados depois dele continuarem os mesmos. */
+function unusedDraw(rng: ReturnType<typeof createRng>) {
+  rng.next()
+  return 0
+}
+
 let _players: Player[] | null = null
 let _affiliates: Affiliate[] | null = null
+let _ledger: DemoLedger | null = null
+
+/** Perfil de jogo pela idade da conta: quem aposta alto é conta antiga, com histórico. */
+function pickProfile(rng: ReturnType<typeof createRng>, ageDays: number): PlayerProfile {
+  const depositor = rng.bool(0.8)
+  const tier: Tier =
+    ageDays >= 120
+      ? rng.weighted([['whale', 8], ['high', 15], ['regular', 40], ['casual', 37]] as const)
+      : ageDays >= 30
+        ? rng.weighted([['high', 12], ['regular', 40], ['casual', 48]] as const)
+        : rng.weighted([['regular', 35], ['casual', 65]] as const)
+  return { tier, depositor, sports: depositor && rng.bool(0.4) }
+}
+
+/** KYC pelo perfil: quem deposita alto já mandou documento (sem KYC verificado, só saque pequeno). */
+function pickKyc(rng: ReturnType<typeof createRng>, prof: PlayerProfile): KycStatus {
+  if (!prof.depositor) return rng.weighted([['verificado', 15], ['pendente', 8], ['nao_enviado', 75], ['reprovado', 2]] as const)
+  if (prof.tier === 'whale') return 'verificado'
+  if (prof.tier === 'high') return rng.weighted([['verificado', 92], ['pendente', 8]] as const)
+  if (prof.tier === 'regular') return rng.weighted([['verificado', 70], ['pendente', 12], ['nao_enviado', 15], ['reprovado', 3]] as const)
+  return rng.weighted([['verificado', 52], ['pendente', 13], ['nao_enviado', 32], ['reprovado', 3]] as const)
+}
 
 function build() {
   const rng = createRng(2026)
   const players: Player[] = []
+  const profiles = new Map<string, PlayerProfile>()
   const total = 340
   // IPs compartilhados para alimentar o anti-fraude
   const sharedIps = Array.from({ length: 6 }, () => genIp(rng))
+  // apelido é único na plataforma (o ranking e a busca mostram o apelido)
+  const nicknames = new Set<string>()
+  const uniqueNickname = () => {
+    const base = `${rng.pick(NICK_PARTS_A)}${rng.pick(NICK_PARTS_B)}`
+    let nick = rng.bool(0.4) ? `${base}${rng.int(1, 99)}` : base
+    while (nicknames.has(nick)) nick = `${base}${rng.int(1, 999)}`
+    nicknames.add(nick)
+    return nick
+  }
 
   for (let i = 0; i < total; i++) {
     const first = rng.pick(FIRST_NAMES)
     const last = rng.pick(LAST_NAMES)
     const name = `${first} ${last}`
-    const nickname = `${rng.pick(NICK_PARTS_A)}${rng.pick(NICK_PARTS_B)}${rng.bool(0.4) ? rng.int(1, 99) : ''}`
+    const nickname = uniqueNickname()
     const email = demoEmail(`${slugify(first)}.${slugify(last)}${rng.int(1, 999)}@${rng.pick(EMAIL_DOMAINS)}`)
     const createdDaysAgo = Math.pow(rng.next(), 1.6) * 360
     const createdAt = new Date(NOW.getTime() - createdDaysAgo * DAY - rng.int(0, 23) * HOUR)
-    const lastAccessAgo = Math.min(createdDaysAgo, Math.pow(rng.next(), 2.5) * 60)
-    const depositsCount = rng.weighted([
-      [0, 22],
-      [1, 18],
-      [rng.int(2, 5), 30],
-      [rng.int(6, 20), 20],
-      [rng.int(21, 80), 10],
-    ] as const)
-    const avgDeposit = rng.money(20, 900)
-    const totalDeposited = Math.round(depositsCount * avgDeposit * 100) / 100
-    const totalBet = Math.round(totalDeposited * rng.float(1.6, 9) * 100) / 100
-    const holdPct = rng.float(-0.04, 0.12, 3)
-    const totalWon = Math.max(0, Math.round(totalBet * (1 - holdPct - 0.03) * 100) / 100)
-    const totalWithdrawn = Math.max(0, Math.round((totalDeposited * rng.float(0, 0.9)) * 100) / 100)
+    const ageDays = (NOW.getTime() - createdAt.getTime()) / DAY
+    // último acesso entre o cadastro (a visita do cadastro dura alguns minutos) e agora
+    const lastAccess = Math.min(NOW.getTime(), Math.max(createdAt.getTime() + rng.int(5, 90) * MIN, NOW.getTime() - Math.pow(rng.next(), 2.5) * 60 * DAY))
     const city = rng.pick(CITIES)
     const isAffiliate = i < 34
     const role: PlayerRole = i < 4 ? 'Gerente' : i < 14 ? 'Influenciador' : isAffiliate ? 'Afiliado' : 'Jogador'
@@ -139,15 +169,15 @@ function build() {
         ] as const)
     const age = rng.int(18, 64)
     const birth = new Date(NOW.getFullYear() - age, rng.int(0, 11), rng.int(1, 28))
+    const profile = pickProfile(rng, ageDays)
     const tags: string[] = []
-    if (totalDeposited > 15000) tags.push('VIP')
-    if (createdDaysAgo < 7) tags.push('Novo')
-    if (rng.bool(0.08)) tags.push(rng.pick(TAGS))
-    const firstDepositAt =
-      depositsCount > 0 ? iso(new Date(createdAt.getTime() + rng.int(0, Math.max(1, Math.floor(createdDaysAgo / 4))) * HOUR)) : null
+    if (ageDays < 7) tags.push('Novo')
+    if (rng.bool(0.08)) tags.push(rng.pick(TAGS.filter((t) => t !== 'VIP' && t !== 'Novo')))
+    const id = String(100231 + i * 7)
+    profiles.set(id, profile)
 
     players.push({
-      id: String(100231 + i * 7),
+      id,
       name,
       nickname,
       email,
@@ -162,24 +192,21 @@ function build() {
         ['autoexcluido', 2],
         ['pausa', 3],
       ] as const),
-      kyc: rng.weighted([
-        ['verificado', 55],
-        ['pendente', 12],
-        ['nao_enviado', 30],
-        ['reprovado', 3],
-      ] as const),
-      balanceReal: depositsCount ? rng.money(0, 2500) : 0,
-      balanceBonus: rng.bool(0.3) ? rng.money(5, 400) : 0,
-      coins: rng.int(0, 4800),
-      level: Math.min(30, 1 + Math.floor(Math.sqrt(totalBet / 400))),
-      xp: Math.floor(totalBet / 10),
-      totalDeposited,
-      depositsCount,
-      totalWithdrawn,
-      totalBet: depositsCount ? totalBet : 0,
-      betsCount: depositsCount ? Math.floor(totalBet / rng.float(2, 25)) : 0,
-      totalWon: depositsCount ? totalWon : 0,
-      biggestWin: depositsCount ? rng.money(10, Math.max(50, totalWon / 6)) : 0,
+      kyc: pickKyc(rng, profile),
+      // saldos, totais, nível e 1º depósito: preenchidos pelo livro-razão (./ledger)
+      balanceReal: 0,
+      balanceBonus: 0,
+      // moedas: do livro-razão (ganhas pelas regras da Moeda); o sorteio antigo fica para os campos seguintes não mudarem
+      coins: unusedDraw(rng),
+      level: 1,
+      xp: 0,
+      totalDeposited: 0,
+      depositsCount: 0,
+      totalWithdrawn: 0,
+      totalBet: 0,
+      betsCount: 0,
+      totalWon: 0,
+      biggestWin: 0,
       referrerId: null,
       refCode: `${slugify(first).slice(0, 5)}${rng.int(10, 99)}`,
       city: city[0],
@@ -187,10 +214,13 @@ function build() {
       ip: rng.bool(0.06) ? rng.pick(sharedIps) : genIp(rng),
       tags,
       createdAt: iso(createdAt),
-      lastAccess: iso(new Date(NOW.getTime() - lastAccessAgo * DAY)),
-      firstDepositAt,
+      lastAccess: iso(new Date(lastAccess)),
+      firstDepositAt: null,
     })
   }
+
+  // a história de cada conta: totais, saldos, extrato, depósitos, saques e bilhetes
+  const ledger = buildLedger(players, profiles)
 
   // códigos de indicação únicos
   const seen = new Set<string>()
@@ -231,7 +261,7 @@ function build() {
     }
   }
 
-  return { players, affiliates }
+  return { players, affiliates, ledger }
 }
 
 export function seedPlayers(): Player[] {
@@ -239,8 +269,24 @@ export function seedPlayers(): Player[] {
     const b = build()
     _players = b.players
     _affiliates = b.affiliates
+    _ledger = b.ledger
   }
   return _players
+}
+
+/** Extrato, depósitos, saques, bilhetes e estatísticas por período que saem do mesmo livro-razão dos jogadores. */
+export function demoLedger(): DemoLedger {
+  if (!_ledger) seedPlayers()
+  return _ledger!
+}
+
+/**
+ * Contas que estavam no site em `t` (cadastradas antes e com último acesso depois): para registros de campanha
+ * (giro, compra na loja, giros grátis) nunca caírem antes do "Desde" ou depois do último acesso.
+ */
+export function playersOnlineAt(list: readonly Player[], t: number): Player[] {
+  const on = list.filter((p) => Date.parse(p.createdAt) <= t && Date.parse(p.lastAccess) >= t)
+  return on.length ? on : list.filter((p) => Date.parse(p.createdAt) <= t)
 }
 
 export function seedAffiliates(): Affiliate[] {

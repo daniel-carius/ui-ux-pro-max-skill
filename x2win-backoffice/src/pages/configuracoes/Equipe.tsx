@@ -34,6 +34,7 @@ import {
   Modal,
   Mono,
   PageHeader,
+  PageLink,
   PersonCell,
   Tooltip,
   confirm,
@@ -45,7 +46,7 @@ import {
 import type { CreateMemberResponse, InviteMemberResponse, KvGetResponse, ResetPasswordResponse } from '@shared/api'
 import { AUDIT_SOURCE_LABEL, isPanelReported } from '@shared/audit'
 import { dateTime, num, pct, plural, relative } from '@/lib/format'
-import { ApiError, api, isApiMode, isServerBusy, isVersionConflict } from '@/lib/api'
+import { ApiError, api, isApiMode, isServerBusy } from '@/lib/api'
 import { patchCache, refreshKey, useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { MODULES } from '@/nav'
@@ -61,8 +62,9 @@ import {
   canDeactivate,
   generateTempPassword,
   isAdminLevelRole,
+  inviteNameFromEmail,
   isGovernedRole,
-  nameFromEmail,
+  memberNameProblem,
   normalizeName,
   needs2faSetup,
   riskyMembers,
@@ -134,6 +136,9 @@ function inviteTwoFactorText(role: Role | undefined, enforceAll: boolean) {
     : 'A pessoa cria a própria senha. O 2FA é opcional neste cargo: ela pode ativar pelo menu da conta.'
 }
 
+/** Convite sem nome cujo e-mail não dá um nome válido pela regra do servidor (checkMemberName). */
+const NAME_FROM_EMAIL_INVALID = 'Não dá para montar um nome a partir deste e-mail. Informe o nome da pessoa convidada.'
+
 /** Espera padrão quando o servidor está ocupado e não diz quanto aguardar (ele manda Retry-After: 2). */
 const BUSY_RETRY_SECONDS = 2
 
@@ -156,11 +161,15 @@ function applyMember(member: TeamMember) {
 }
 
 /**
- * Modo API: 409 versao_desatualizada (outra gravação se cruzou com esta, pode vir sem details.version).
- * A tela mostra a mensagem do servidor; aqui a equipe é recarregada para a pessoa tentar de novo.
+ * Modo API: recusa por dado desatualizado na tela. 409 (versao_desatualizada, pode vir sem details.version, ou
+ * outro estado), 404 (a pessoa saiu da lista) e 403 (o cargo dela mudou em outra sessão: "Só quem pode conceder
+ * cargos…" fala do cargo novo). A tela mostra a mensagem do servidor; aqui a equipe (e, no 403, os cargos) é
+ * recarregada para a linha, o menu e o aviso dizerem a mesma coisa.
  */
-function reloadTeamOnConflict(e: unknown) {
-  if (isVersionConflict(e)) refreshKey(KEYS.team).catch(() => {})
+function reloadTeamAfterRefusal(e: unknown) {
+  if (!(e instanceof ApiError)) return
+  if (e.status === 409 || e.status === 404 || e.status === 403) refreshKey(KEYS.team).catch(() => {})
+  if (e.status === 403) refreshKey(KEYS.roles).catch(() => {})
 }
 
 /** Modo API: ação sobre uma pessoa da equipe (o servidor confere as regras e grava a auditoria). */
@@ -213,7 +222,7 @@ export default function Equipe() {
     try {
       await run()
     } catch (e) {
-      reloadTeamOnConflict(e)
+      reloadTeamAfterRefusal(e)
       toast.error(errorTitle, { description: apiMessage(e), duration: 6000 })
     } finally {
       inFlight.current.delete(m.id)
@@ -685,7 +694,7 @@ export default function Equipe() {
 
         {panel.enforce2faForAll && (
           <Alert tone="success" icon={ShieldCheck} title="2FA exigido de toda a equipe">
-            Ligado em <a className="link" href="#/settings/seguranca">Segurança do painel</a>. Quem estiver sem 2FA não continua no painel: cadastra o 2FA ao entrar.
+            Ligado em <PageLink className="link" to="/settings/seguranca">Segurança do painel</PageLink>. Quem estiver sem 2FA não continua no painel: cadastra o 2FA ao entrar.
           </Alert>
         )}
 
@@ -817,15 +826,26 @@ function InviteModal({
   const [serverError, setServerError] = useState<FieldError | null>(null)
   const [created, setCreated] = useState<{ email: string; url: string } | null>(null)
   const emailErr = validateTeamEmail(email, team) ?? (serverError?.field === 'email' ? serverError.message : null)
-  // nome opcional: sem ele, vem do e-mail (o servidor recusa nome que se confunde com o de outra pessoa);
-  // com o campo vazio, a conferência e a mensagem dizem qual nome foi montado
-  const derivedName = !name.trim() && email.includes('@') ? nameFromEmail(email.trim()) : ''
+  // nome opcional: sem ele, vem do e-mail, com a regra do servidor (shared/member-name.ts); o servidor também
+  // recusa nome que se confunde com o de outra pessoa. Com o campo vazio, a conferência e a mensagem dizem qual
+  // nome foi montado ou, se o e-mail não dá um nome válido ("a@…", "12345@…"), que é preciso digitar o nome.
+  const typedName = name.trim()
+  const hasAt = email.includes('@')
+  const derivedName = !typedName && hasAt ? inviteNameFromEmail(email.trim()) : null
+  const needsName = !typedName && hasAt && derivedName === null
   const nameErr =
-    (name.trim()
-      ? name.trim().length < 3
-        ? 'Use pelo menos 3 letras.'
-        : localNameConflict(name, team)
-      : derivedNameConflict(derivedName, team)) ?? (serverError?.field === 'name' ? serverError.message : null)
+    (typedName
+      ? (memberNameProblem(name) ?? localNameConflict(name, team))
+      : needsName
+        ? NAME_FROM_EMAIL_INVALID
+        : derivedNameConflict(derivedName ?? '', team)) ?? (serverError?.field === 'name' ? serverError.message : null)
+  const nameHint = !hasAt
+    ? 'Opcional. Sem ele, usamos o começo do e-mail.'
+    : needsName
+      ? NAME_FROM_EMAIL_INVALID
+      : typedName
+        ? 'Como a pessoa aparece na equipe e na auditoria.'
+        : `Opcional. Sem ele, usamos "${derivedName}".`
   const role = roles.find((r) => r.id === roleId)
   const roleErr = roleError(role, canGrant)
   const close = () => {
@@ -847,7 +867,7 @@ function InviteModal({
       onCreated(m)
       setCreated({ email: m.email, url: res.inviteUrl })
     } catch (e) {
-      reloadTeamOnConflict(e)
+      reloadTeamAfterRefusal(e)
       const err = fieldError(e)
       setServerError(err)
       if (err.field) setTouched(true)
@@ -864,7 +884,7 @@ function InviteModal({
     }
     const m: TeamMember = {
       id: uid('u'),
-      name: name.trim() || nameFromEmail(email.trim()),
+      name: typedName || derivedName || email.trim(),
       email: email.trim().toLowerCase(),
       roleId: role.id,
       status: 'convidado',
@@ -939,7 +959,7 @@ function InviteModal({
               }}
             />
           </Field>
-          <Field label="Nome" htmlFor="inv-name" hint={`Opcional. Sem ele, usamos ${email.includes('@') ? `"${nameFromEmail(email.trim())}"` : 'o começo do e-mail'}.`} error={touched ? nameErr : null}>
+          <Field label="Nome" htmlFor="inv-name" required={needsName} hint={nameHint} error={touched ? nameErr : null}>
             <Input
               id="inv-name"
               value={name}
@@ -983,7 +1003,7 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
   const [submitting, setSubmitting] = useState(false)
   const [serverError, setServerError] = useState<FieldError | null>(null)
   const [busy, setBusy] = useState(false)
-  const nameErr = (name.trim().length < 3 ? 'Informe o nome completo.' : localNameConflict(name, team)) ?? (serverError?.field === 'name' ? serverError.message : null)
+  const nameErr = (!name.trim() ? 'Informe o nome completo.' : (memberNameProblem(name) ?? localNameConflict(name, team))) ?? (serverError?.field === 'name' ? serverError.message : null)
   const emailErr = validateTeamEmail(email, team) ?? (serverError?.field === 'email' ? serverError.message : null)
   const role = roles.find((r) => r.id === roleId)
   const roleErr = roleError(role, canGrant)
@@ -1006,7 +1026,7 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
       // a senha temporária vem do servidor e só aparece agora
       setCreated({ member: m, password: res.temporaryPassword })
     } catch (e) {
-      reloadTeamOnConflict(e)
+      reloadTeamAfterRefusal(e)
       const err = fieldError(e)
       setServerError(err)
       if (err.field) setTouched(true)
@@ -1164,7 +1184,7 @@ function ChangeRoleModal({ member, onClose, roles, team, canGrant }: { member: T
         toast.success('Cargo alterado', { description: `${member.name} agora é ${to.name}. Vale na próxima ação da pessoa no painel.` })
         onClose()
       } catch (e) {
-        reloadTeamOnConflict(e)
+        reloadTeamAfterRefusal(e)
         setServerError(apiMessage(e))
       } finally {
         setSaving(false)
@@ -1226,7 +1246,7 @@ function RenameMemberModal({ member, team, onClose }: { member: TeamMember; team
   const next = name.trim().replace(/\s+/g, ' ')
   const changed = next !== member.name
   const nameErr =
-    (next.length < 3 ? 'Informe o nome completo.' : localNameConflict(next, team, member.id)) ?? (serverError?.field === 'name' ? serverError.message : null)
+    (!next ? 'Informe o nome completo.' : (memberNameProblem(next) ?? localNameConflict(next, team, member.id))) ?? (serverError?.field === 'name' ? serverError.message : null)
   const save = async () => {
     if (!changed || nameErr || saving) return
     if (API) {
@@ -1241,7 +1261,7 @@ function RenameMemberModal({ member, team, onClose }: { member: TeamMember; team
         toast.success('Nome alterado', { description: `${member.name} agora aparece como ${next}.` })
         onClose()
       } catch (e) {
-        reloadTeamOnConflict(e)
+        reloadTeamAfterRefusal(e)
         setServerError(fieldError(e))
       } finally {
         setSaving(false)

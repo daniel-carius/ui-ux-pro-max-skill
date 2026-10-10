@@ -24,7 +24,9 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, num, numCompact, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { usePlayers } from '@/data/hooks'
+import { isApiMode } from '@/lib/api'
+import { usePlayers, useTransactions } from '@/data/hooks'
+import type { Transaction } from '@/data/finance'
 import type { Player } from '@/data/players'
 import { RANK_PERIODS, playerStatsForPeriod, type RankPeriod } from '@/data/geral'
 import { audit } from '@/domain/session'
@@ -32,6 +34,12 @@ import { RANK_CRITERIA, rankPlayers, topShare, type RankCriterion } from '@/doma
 import { PlayerDrawer, PlayerStatusBadge, SignedAmount, TableFrame, maskEmailShort } from './_shared'
 
 const CRITERIA: RankCriterion[] = ['apostou', 'apostas', 'ganhou', 'maior_ganho', 'resultado', 'ggr']
+
+/**
+ * Extrato para somar o período: na demonstração, o mesmo de Transações (estorno feito na sessão já conta); no modo
+ * API o ranking não lê as transações e usa os totais da ficha.
+ */
+const useRankStatement: () => Transaction[] | null = isApiMode() ? () => null : () => useTransactions().items
 const CRITERIA_ICON: Record<RankCriterion, LucideIcon> = {
   apostou: Coins,
   apostas: Dices,
@@ -58,11 +66,12 @@ export default function Rankings() {
   const [onlyPlayers, setOnlyPlayers] = useState(false)
   const [openId, setOpenId] = useState<string | null>(null)
   const { items: players } = usePlayers()
+  const statement = useRankStatement()
   const meta = RANK_CRITERIA[criterion]
   const fmt = (v: number) => (meta.format === 'brl' ? brl(v) : num(v))
 
   const byId = useMemo(() => new Map(players.map((p) => [p.id, p])), [players])
-  const stats = useMemo(() => playerStatsForPeriod(players, period), [players, period])
+  const stats = useMemo(() => playerStatsForPeriod(players, period, statement), [players, period, statement])
   const pool = useMemo(() => (onlyPlayers ? stats.filter((s) => byId.get(s.playerId)?.role === 'Jogador') : stats), [stats, onlyPlayers, byId])
   const ranked: Row[] = useMemo(
     () =>

@@ -335,6 +335,7 @@ export default function Avatares() {
                                     </label>
                                   )}
                                   <NumberInput
+                                    integer
                                     id={`tm-${t.id}`}
                                     value={t.threshold}
                                     min={1}

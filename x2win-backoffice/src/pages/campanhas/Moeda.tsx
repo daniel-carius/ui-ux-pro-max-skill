@@ -237,7 +237,7 @@ export default function Moeda() {
             <FormGrid>
               {v.expires && (
                 <Field label="Validade" htmlFor="m-exp" error={errs.expiryDays}>
-                  <NumberInput id="m-exp" value={v.expiryDays} min={1} suffix="dias" invalid={!!errs.expiryDays} onValueChange={(n) => form.set('expiryDays', Math.round(n))} />
+                  <NumberInput integer id="m-exp" value={v.expiryDays} min={1} suffix="dias" invalid={!!errs.expiryDays} onValueChange={(n) => form.set('expiryDays', Math.round(n))} />
                 </Field>
               )}
               <Field
@@ -246,7 +246,7 @@ export default function Moeda() {
                 error={errs.dailyCap}
                 hint={v.dailyCap > 0 ? `Acima de ${num(v.dailyCap)} ${v.symbol} no dia, o jogador para de ganhar até 00:00.` : 'Sem teto: o jogador ganha sem limite.'}
               >
-                <NumberInput id="m-cap" value={v.dailyCap} min={0} suffix={v.symbol} invalid={!!errs.dailyCap} onValueChange={(n) => form.set('dailyCap', Math.round(n))} />
+                <NumberInput integer id="m-cap" value={v.dailyCap} min={0} suffix={v.symbol} invalid={!!errs.dailyCap} onValueChange={(n) => form.set('dailyCap', Math.round(n))} />
               </Field>
             </FormGrid>
           </SettingsSection>
@@ -288,13 +288,14 @@ export default function Moeda() {
                     const ret = coinReturnRate(r.amount, v.refValue)
                     const on = v.bets.enabled && r.enabled
                     return (
-                      <li key={k} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3.5 py-2.5 sm:grid-cols-[minmax(0,1fr)_120px_96px_44px]">
-                        <label htmlFor={`m-rate-${k}`} className={cn('flex min-w-0 items-center gap-2.5 text-sm', on ? 'text-fg' : 'text-fg-3')}>
+                      <li key={k} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-3.5 py-2.5 sm:grid-cols-[minmax(0,1fr)_120px_96px_44px] sm:items-start">
+                        <label htmlFor={`m-rate-${k}`} className={cn('flex min-w-0 items-center gap-2.5 text-sm sm:h-10', on ? 'text-fg' : 'text-fg-3')}>
                           <Icon size={16} className="shrink-0 text-fg-3" aria-hidden />
                           <span className="truncate">{EARN_CATEGORY_LABEL[k]}</span>
                         </label>
                         <div className="order-3 col-span-2 sm:order-none sm:col-span-1">
                           <NumberInput
+                            integer
                             id={`m-rate-${k}`}
                             value={r.amount}
                             min={0}
@@ -303,8 +304,8 @@ export default function Moeda() {
                             onValueChange={(n) => setRate(k, { amount: Math.round(n) })}
                           />
                         </div>
-                        <span className={cn('order-4 hidden text-right text-[13px] tnum sm:order-none sm:block', on ? 'font-semibold text-fg' : 'text-fg-3')}>{on ? pct(ret, 2) : '—'}</span>
-                        <div className="flex justify-end">
+                        <span className={cn('order-4 hidden text-right text-[13px] tnum sm:order-none sm:block sm:leading-10', on ? 'font-semibold text-fg' : 'text-fg-3')}>{on ? pct(ret, 2) : '—'}</span>
+                        <div className="flex items-center justify-end sm:h-10">
                           <Switch size="sm" ariaLabel={`Ganhar moedas em ${EARN_CATEGORY_LABEL[k]}`} checked={r.enabled} disabled={!v.bets.enabled} onChange={(x) => setRate(k, { enabled: x })} />
                         </div>
                         <span className="order-5 col-span-2 -mt-1 text-xs text-fg-3 sm:hidden">{on ? `Retorno de ${pct(ret, 2)} do apostado` : 'Desligada'}</span>
@@ -323,7 +324,7 @@ export default function Moeda() {
               onToggle={(on) => form.set('deposit', { ...v.deposit, enabled: on })}
             >
               <Field label={`${v.symbol} a cada R$ ${EARN_BASE}`} htmlFor="m-dep" hint={`Depósito de R$ 100 rende ${num(10 * v.deposit.amount)} ${v.symbol}.`}>
-                <NumberInput id="m-dep" value={v.deposit.amount} min={0} suffix={v.symbol} disabled={!v.deposit.enabled} onValueChange={(n) => form.set('deposit', { ...v.deposit, amount: Math.round(n) })} />
+                <NumberInput integer id="m-dep" value={v.deposit.amount} min={0} suffix={v.symbol} disabled={!v.deposit.enabled} onValueChange={(n) => form.set('deposit', { ...v.deposit, amount: Math.round(n) })} />
               </Field>
             </EarnRule>
 
@@ -336,10 +337,10 @@ export default function Moeda() {
             >
               <FormGrid>
                 <Field label="Por dia" htmlFor="m-login">
-                  <NumberInput id="m-login" value={v.dailyLogin.amount} min={0} suffix={v.symbol} disabled={!v.dailyLogin.enabled} onValueChange={(n) => form.set('dailyLogin', { ...v.dailyLogin, amount: Math.round(n) })} />
+                  <NumberInput integer id="m-login" value={v.dailyLogin.amount} min={0} suffix={v.symbol} disabled={!v.dailyLogin.enabled} onValueChange={(n) => form.set('dailyLogin', { ...v.dailyLogin, amount: Math.round(n) })} />
                 </Field>
                 <Field label="Extra no 7º dia seguido" htmlFor="m-streak" hint="0 = sem prêmio de sequência.">
-                  <NumberInput id="m-streak" value={v.dailyLogin.streakBonus} min={0} suffix={v.symbol} disabled={!v.dailyLogin.enabled} onValueChange={(n) => form.set('dailyLogin', { ...v.dailyLogin, streakBonus: Math.round(n) })} />
+                  <NumberInput integer id="m-streak" value={v.dailyLogin.streakBonus} min={0} suffix={v.symbol} disabled={!v.dailyLogin.enabled} onValueChange={(n) => form.set('dailyLogin', { ...v.dailyLogin, streakBonus: Math.round(n) })} />
                 </Field>
               </FormGrid>
             </EarnRule>
@@ -356,7 +357,7 @@ export default function Moeda() {
               onToggle={(on) => form.set('mission', { ...v.mission, enabled: on })}
             >
               <Field label="Por missão" htmlFor="m-mission">
-                <NumberInput id="m-mission" value={v.mission.amount} min={0} suffix={v.symbol} disabled={!v.mission.enabled} onValueChange={(n) => form.set('mission', { ...v.mission, amount: Math.round(n) })} />
+                <NumberInput integer id="m-mission" value={v.mission.amount} min={0} suffix={v.symbol} disabled={!v.mission.enabled} onValueChange={(n) => form.set('mission', { ...v.mission, amount: Math.round(n) })} />
               </Field>
             </EarnRule>
 
@@ -372,7 +373,7 @@ export default function Moeda() {
               onToggle={(on) => form.set('levelUp', { ...v.levelUp, enabled: on })}
             >
               <Field label="Por nível" htmlFor="m-level">
-                <NumberInput id="m-level" value={v.levelUp.amount} min={0} suffix={v.symbol} disabled={!v.levelUp.enabled} onValueChange={(n) => form.set('levelUp', { ...v.levelUp, amount: Math.round(n) })} />
+                <NumberInput integer id="m-level" value={v.levelUp.amount} min={0} suffix={v.symbol} disabled={!v.levelUp.enabled} onValueChange={(n) => form.set('levelUp', { ...v.levelUp, amount: Math.round(n) })} />
               </Field>
             </EarnRule>
           </SettingsSection>
@@ -555,10 +556,10 @@ function Simulator({ cfg }: { cfg: CoinConfig }) {
               <MoneyInput id="sim-dep" value={sim.deposit} onValueChange={(n) => setSim((s) => ({ ...s, deposit: n }))} />
             </Field>
             <Field label="Missões concluídas" htmlFor="sim-mis">
-              <NumberInput id="sim-mis" value={sim.missions} min={0} onValueChange={(n) => setSim((s) => ({ ...s, missions: Math.max(0, Math.round(n)) }))} />
+              <NumberInput integer id="sim-mis" value={sim.missions} min={0} onValueChange={(n) => setSim((s) => ({ ...s, missions: Math.max(0, Math.round(n)) }))} />
             </Field>
             <Field label="Níveis que subiu" htmlFor="sim-lvl">
-              <NumberInput id="sim-lvl" value={sim.levels} min={0} onValueChange={(n) => setSim((s) => ({ ...s, levels: Math.max(0, Math.round(n)) }))} />
+              <NumberInput integer id="sim-lvl" value={sim.levels} min={0} onValueChange={(n) => setSim((s) => ({ ...s, levels: Math.max(0, Math.round(n)) }))} />
             </Field>
           </FormGrid>
           <div className="flex flex-wrap gap-x-6 gap-y-2">

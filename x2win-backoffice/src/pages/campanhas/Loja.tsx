@@ -847,7 +847,7 @@ function ItemDrawer({
             {it.kind === 'free_spins' && (
               <>
                 <Field label="Quantidade de giros" htmlFor="it-val" required error={errs.value}>
-                  <NumberInput id="it-val" value={it.value} min={1} suffix="giros" invalid={!!errs.value} onValueChange={(n) => set('value', Math.round(n))} />
+                  <NumberInput integer id="it-val" value={it.value} min={1} suffix="giros" invalid={!!errs.value} onValueChange={(n) => set('value', Math.round(n))} />
                 </Field>
                 <Field label="Valor de cada giro" htmlFor="it-extra" error={errs.extra} hint={`Total em giros: ${brl(it.value * it.extra)}.`}>
                   <MoneyInput id="it-extra" value={it.extra} invalid={!!errs.extra} onValueChange={(n) => set('extra', n)} />
@@ -878,7 +878,7 @@ function ItemDrawer({
         <DrawerSection title="Preço e estoque" icon={Coins}>
           <FormGrid>
             <Field label="Preço" htmlFor="it-price" required error={errs.price} hint={`≈ ${brl(it.price * coin.refValue)} em moedas.`}>
-              <NumberInput id="it-price" value={it.price} min={1} suffix={coin.symbol} invalid={!!errs.price} onValueChange={(n) => set('price', Math.round(n))} />
+              <NumberInput integer id="it-price" value={it.price} min={1} suffix={coin.symbol} invalid={!!errs.price} onValueChange={(n) => set('price', Math.round(n))} />
             </Field>
             <div className="flex items-end">
               <div className={cn('w-full rounded-xl border p-3 text-[13px]', ratio != null && ratio < 1 ? 'border-warning/30 bg-warning/5' : 'border-line bg-surface-2')}>
@@ -898,12 +898,12 @@ function ItemDrawer({
           <FormGrid>
             {it.stock != null && (
               <Field label="Unidades no estoque" htmlFor="it-stock" error={errs.stock} hint={`${num(it.sold)} já vendidas.`}>
-                <NumberInput id="it-stock" value={it.stock} min={1} suffix="un." invalid={!!errs.stock} onValueChange={(n) => set('stock', Math.round(n))} />
+                <NumberInput integer id="it-stock" value={it.stock} min={1} suffix="un." invalid={!!errs.stock} onValueChange={(n) => set('stock', Math.round(n))} />
               </Field>
             )}
             <Field label="Limite por jogador" htmlFor="it-limit" error={errs.limit} hint="0 = sem limite.">
-              <div className="flex gap-2">
-                <NumberInput id="it-limit" value={it.limitPerPlayer} min={0} invalid={!!errs.limit} onValueChange={(n) => set('limitPerPlayer', Math.round(n))} />
+              <div className="flex items-start gap-2">
+                <NumberInput integer id="it-limit" value={it.limitPerPlayer} min={0} invalid={!!errs.limit} onValueChange={(n) => set('limitPerPlayer', Math.round(n))} />
                 <Select
                   aria-label="Período do limite"
                   className="w-36 shrink-0"

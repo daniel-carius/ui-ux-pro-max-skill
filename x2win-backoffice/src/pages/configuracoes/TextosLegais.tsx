@@ -403,9 +403,8 @@ function LegalPreview({ doc, text, version }: { doc: LegalDoc; text: string; ver
         <p className="font-semibold uppercase tracking-wide">
           {doc.title} · {version}
         </p>
-        <p>
-          {company.legalName} · CNPJ {formatCnpj(company.cnpj)} · {company.license}
-        </p>
+        {/* só o que Empresa e licença tem: sem separador sobrando com o cadastro vazio */}
+        <p>{[company.legalName.trim(), company.cnpj.trim() ? `CNPJ ${formatCnpj(company.cnpj)}` : '', company.license.trim()].filter(Boolean).join(' · ') || 'Empresa e licença ainda sem razão social, CNPJ e licença.'}</p>
       </div>
       <div className="max-h-[640px] overflow-y-auto bg-surface px-5 py-5 sm:px-8">
         <Markdown text={text} />

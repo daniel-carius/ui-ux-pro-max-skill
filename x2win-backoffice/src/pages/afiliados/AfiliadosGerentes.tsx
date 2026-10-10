@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { Crown, Eye, HandCoins, Network, Pause, Pencil, Play, Plus, Save, UserPlus, Users, Wallet, X } from 'lucide-react'
 import {
   Alert,
@@ -15,10 +14,11 @@ import {
   FormGrid,
   Input,
   KpiCard,
-  Mono,
   MoneyInput,
+  Mono,
   NumberInput,
   PageHeader,
+  PageLink,
   PersonCell,
   RadioCards,
   confirm,
@@ -500,9 +500,9 @@ function ManagerDrawer({
       }
       footer={
         <>
-          <Link to="/system/programa-afiliados/visao-geral" className="link mr-auto self-center text-[13px]">
+          <PageLink to="/system/programa-afiliados/visao-geral" className="link mr-auto self-center text-[13px]">
             Ver resultado da rede
-          </Link>
+          </PageLink>
           {m.status === 'ativo' ? (
             <Button icon={Pause} onClick={onToggle} disabled={!canEdit} title={canEdit ? undefined : 'Seu cargo não pode pausar gerentes'}>
               Pausar gerente

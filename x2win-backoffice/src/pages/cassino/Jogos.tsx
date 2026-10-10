@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import {
   Building2,
   CheckCircle2,
@@ -39,6 +38,7 @@ import {
   Mono,
   NumberInput,
   PageHeader,
+  PageLink,
   Pagination,
   Progress,
   Segmented,
@@ -329,14 +329,14 @@ export default function Jogos() {
     <>
       <PageHeader
         actions={
-          <Link
+          <PageLink
             to="/games/agregadores"
             className="inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-surface px-3 text-[13px] text-fg-2 transition-colors hover:border-line-strong hover:text-fg"
             title="Abrir Agregadores de jogos"
           >
             <RefreshCw size={14} className="text-fg-3" aria-hidden />
             Catálogo sincronizado <strong className="font-semibold text-fg">{relative(lastSync)}</strong>
-          </Link>
+          </PageLink>
         }
       />
 
@@ -751,9 +751,9 @@ function GameDrawerBody({
             {active && provider?.status === 'pausada' ? (
               <>
                 Reative a provedora em{' '}
-                <Link to="/games/provedoras" className="link">
+                <PageLink to="/games/provedoras" className="link">
                   Provedoras
-                </Link>{' '}
+                </PageLink>{' '}
                 para o jogo voltar.
               </>
             ) : (
@@ -800,7 +800,7 @@ function GameDrawerBody({
                   : undefined
               }
             >
-              <div className="flex items-center gap-3">
+              <div className="flex items-start gap-3">
                 <input
                   type="range"
                   min={0}
@@ -809,10 +809,10 @@ function GameDrawerBody({
                   value={Number.isFinite(highlight) ? highlight : 0}
                   onChange={(e) => setHighlight(Number(e.target.value))}
                   aria-label="Destaque, de 0 a 100"
-                  className="h-2 flex-1 cursor-pointer accent-primary"
+                  className="mt-4 h-2 flex-1 cursor-pointer accent-primary"
                 />
                 <div className="w-24">
-                  <NumberInput id="g-highlight" value={highlight} onValueChange={(n) => setHighlight(n)} min={0} max={100} suffix="/100" invalid={!!err} />
+                  <NumberInput id="g-highlight" integer value={highlight} onValueChange={(n) => setHighlight(n)} min={0} max={100} suffix="/100" invalid={!!err} />
                 </div>
               </div>
             </Field>

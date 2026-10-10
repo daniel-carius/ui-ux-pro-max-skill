@@ -38,9 +38,9 @@ import {
   buildReversalTx,
   canReverse,
   reversalRef,
+  reversalPlayerPatch,
   reversedIds,
   statementTotals,
-  walletPatch,
   type AnnotatedTransaction,
 } from '@/domain/geral'
 import { PlayerDrawer, SignedAmount, TableFrame, TxTypeBadge, maskEmailShort } from './_shared'
@@ -85,7 +85,7 @@ export default function Transacoes() {
     return c
   }, [inPeriod])
   const rows = type === 'todos' ? inPeriod : inPeriod.filter((t) => t.type === type)
-  const totals = useMemo(() => statementTotals(inPeriod), [inPeriod])
+  const totals = useMemo(() => statementTotals(inPeriod, reversed), [inPeriod, reversed])
 
   // séries diárias para os mini gráficos dos cartões
   const daily = useMemo(() => {
@@ -98,11 +98,11 @@ export default function Transacoes() {
       if (i === undefined) continue
       if (t.type === 'deposito') s.dep[i] += t.amount
       else if (t.type === 'saque') s.wd[i] += -t.amount
-      else if (t.type === 'aposta') s.bets[i] += -t.amount
+      else if (t.type === 'aposta' && !reversed.has(t.id)) s.bets[i] += -t.amount
       else if (t.type === 'ganho' || t.type === 'free_spin') s.wins[i] += t.amount
     }
     return s
-  }, [inPeriod, range])
+  }, [inPeriod, range, reversed])
 
   const clearPlayer = () => {
     const next = new URLSearchParams(params)
@@ -160,7 +160,7 @@ export default function Transacoes() {
       await refreshKey(DATA_KEYS.players)
     } else {
       txs.add(est)
-      if (p) players.update(p.id, walletPatch(t.wallet, est.balanceAfter))
+      if (p) players.update(p.id, reversalPlayerPatch(p, t, est.balanceAfter))
       audit('estornar', `Transação #${t.id}`, `Estorno de ${brl(amount)} para ${t.playerName} (${est.id}). Motivo: ${r.value}`)
     }
     toast.success('Estorno lançado', { description: `${est.id} devolveu ${brl(amount)} ao saldo ${t.wallet === 'real' ? 'real' : 'bônus'}.` })
@@ -295,7 +295,7 @@ export default function Transacoes() {
           icon={Dices}
           value={brlCompact(totals.bets)}
           hint={`${num(totals.betsCount)} apostas`}
-          formula={<>Soma das apostas debitadas no período, com saldo real e bônus.</>}
+          formula={<>Soma das apostas debitadas no período, com saldo real e bônus. Aposta estornada não conta: o valor voltou ao jogador.</>}
           chart={<Sparkline data={daily.bets} slot={1} ariaLabel="Apostas por dia" />}
         />
         <KpiCard

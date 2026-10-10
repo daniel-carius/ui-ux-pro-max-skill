@@ -565,6 +565,7 @@ function MissionDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Mis
                   value={o.target}
                   min={unit === 'mult' ? 1.01 : 1}
                   step={unit === 'mult' ? 0.5 : 1}
+                  integer={unit !== 'mult'}
                   suffix={unit === 'mult' ? 'x' : unit === 'days' ? 'dias' : 'rodadas'}
                   invalid={!!errs.target}
                   onValueChange={(n) => setObj({ target: unit === 'mult' ? n : Math.round(n) })}
@@ -631,6 +632,7 @@ function MissionDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Mis
                   id="ms-rv"
                   value={m.reward.value}
                   min={1}
+                  integer={m.reward.kind !== 'cashback'}
                   suffix={m.reward.kind === 'moedas' ? coin.symbol : m.reward.kind === 'free_spins' ? 'giros' : '%'}
                   invalid={!!errs.reward}
                   onValueChange={(n) => setM({ ...m, reward: { ...m.reward, value: m.reward.kind === 'cashback' ? n : Math.round(n) } })}

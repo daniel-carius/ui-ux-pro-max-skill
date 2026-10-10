@@ -6,7 +6,7 @@
 import type { Deposit } from '@/data/finance'
 import type { Player } from '@/data/players'
 import { DAY } from '@/data/now'
-import type { CampaignPlayer } from './campanhas-jogadores'
+import type { CampaignPlayer } from './campanhas-jogador'
 
 export type AudienceKind = 'todos' | 'depositou' | 'inativos' | 'vip' | 'novos' | 'sem_deposito' | 'nivel' | 'ids'
 

@@ -1,5 +1,4 @@
 import { useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
 import {
   Ban,
   CalendarClock,
@@ -31,6 +30,7 @@ import {
   KpiCard,
   Mono,
   PageHeader,
+  PageLink,
   PersonCell,
   Tabs,
   Tooltip,
@@ -514,9 +514,9 @@ export default function AfiliadosSaques() {
           icon={ShieldCheck}
           title="Dados do PIX mascarados (LGPD)"
           action={
-            <Link to="/settings/auditoria" className="link text-[13px]">
+            <PageLink to="/settings/auditoria" className="link text-[13px]">
               Ver auditoria
-            </Link>
+            </PageLink>
           }
         >
           A lista mostra chave PIX e conta bancária mascaradas, e o CSV também sai mascarado. O botão de olho (Revelar) mostra o dado completo só para cargos

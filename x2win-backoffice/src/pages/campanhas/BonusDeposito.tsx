@@ -558,7 +558,7 @@ function CampaignEditor({
               <MoneyInput id="db-max" value={c.maxBonus} onValueChange={(n) => set('maxBonus', n)} invalid={!!err('maxBonus')} />
             </Field>
             <Field label="Prazo para cumprir" htmlFor="db-valid" error={err('validityDays')} hint="Depois disso, o bônus restante expira.">
-              <NumberInput id="db-valid" value={c.validityDays} min={1} max={90} suffix="dias" onValueChange={(n) => set('validityDays', Math.round(n))} invalid={!!err('validityDays')} />
+              <NumberInput integer id="db-valid" value={c.validityDays} min={1} max={90} suffix="dias" onValueChange={(n) => set('validityDays', Math.round(n))} invalid={!!err('validityDays')} />
             </Field>
           </FormGrid>
           <Field label="Rollover" htmlFor="db-roll" error={err('rollover')}>

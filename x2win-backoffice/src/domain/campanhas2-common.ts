@@ -3,7 +3,7 @@
 // servidor, estas mesmas regras devem rodar no back-end.
 import { brl, num } from '@/lib/format'
 import { DAY, NOW, dayKey } from '@/data/now'
-import type { CampaignPlayer } from './campanhas-jogadores'
+import type { CampaignPlayer } from './campanhas-jogador'
 
 /** Chaves persistidas das telas (padrão 'campanhas.<tela>[.<coisa>]'). */
 export const C2_KEYS = {

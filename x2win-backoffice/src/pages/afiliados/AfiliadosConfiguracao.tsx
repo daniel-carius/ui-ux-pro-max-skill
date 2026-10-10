@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react'
-import { Link } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import { ArrowDownUp, CalendarClock, Check, CalendarDays, Gamepad2, HandCoins, Landmark, QrCode, Repeat, Smartphone, TriangleAlert, Wallet } from 'lucide-react'
 import {
@@ -11,6 +10,7 @@ import {
   MoneyInput,
   NumberInput,
   PageHeader,
+  PageLink,
   RadioCards,
   SaveBar,
   Select,
@@ -94,9 +94,9 @@ export default function AfiliadosConfiguracao() {
                   ? '1 pedido pendente fica fora das regras e aparece'
                   : `${outOfLimits.length} pedidos pendentes ficam fora das regras e aparecem`}{' '}
                 com aviso em{' '}
-                <Link to="/system/programa-afiliados/saques" className="link">
+                <PageLink to="/system/programa-afiliados/saques" className="link">
                   Saques de afiliados
-                </Link>
+                </PageLink>
                 .
               </Alert>
             )}
@@ -223,6 +223,7 @@ export default function AfiliadosConfiguracao() {
                 hint={`Pedido feito hoje é pago até ${date(payBy)}. Não considera feriados.`}
               >
                 <NumberInput
+                  integer
                   id="cfg-days"
                   value={v.payoutDays}
                   onValueChange={(n) => form.set('payoutDays', Math.round(n))}

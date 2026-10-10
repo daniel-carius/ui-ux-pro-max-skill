@@ -4,11 +4,11 @@ import { useState, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { Crown, Eye, EyeOff, Gamepad2, Landmark, Lock, Megaphone, QrCode, Sprout, X } from 'lucide-react'
 import type { SeriesSlot } from '@/components/charts'
-import { Badge, Button, DescriptionList, Input, Mono, toast, type Tone } from '@/components/ui'
+import { Badge, Button, DecimalTextNote, DescriptionList, Input, Mono, NumericFieldBox, toast, useDecimalText, useFieldId, type Tone } from '@/components/ui'
 import type { Affiliate, AffiliateType } from '@/data/players'
 import { PAYOUT_METHOD_LABEL, type PayoutMethod } from '@/data/afiliados'
 import { maskAffiliatePixKey, revealAffiliateContact, type AffiliateContactDetails } from '@/domain/afiliados'
-import { formatDecimalInput, maskEmail, parseDecimalInput } from '@/lib/format'
+import { maskEmail } from '@/lib/format'
 import { cn } from '@/lib/cn'
 
 export const TYPE_META: Record<AffiliateType, { label: string; icon: LucideIcon; tone: Tone; slot: SeriesSlot; description: string }> = {
@@ -85,53 +85,44 @@ export function OptionalMoneyInput({
   invalid?: boolean
   disabled?: boolean
 }) {
-  // campo de texto com vírgula decimal ("1.500,50"): o campo numérico do navegador descartava a vírgula
-  const [draft, setDraft] = useState<string | null>(null)
-  const shown =
-    draft !== null && (draft.trim() === '' ? value === null : Object.is(parseDecimalInput(draft), value))
-      ? draft
-      : value === null || !Number.isFinite(value)
-        ? ''
-        : formatDecimalInput(value)
+  // campo de texto pt-BR ("1.000.000", "1.500,50"), o mesmo de MoneyInput; vazio é "sem teto"
+  const noteId = useFieldId('nota')
+  const text = useDecimalText(value, onChange, { nullable: true, minDecimals: 2, step: 0.01 })
+  // o aviso fica fora do bloco "relative": dentro dele, o botão "Sem teto" (centrado na altura) descia com o aviso
   return (
-    <div className="relative">
-      <Input
-        id={id}
-        prefix="R$"
-        type="text"
-        inputMode="decimal"
-        autoComplete="off"
-        disabled={disabled}
-        invalid={invalid}
-        placeholder={emptyLabel}
-        value={shown}
-        onChange={(e) => {
-          const t = e.target.value
-          if (t.trim() === '') {
-            setDraft('')
-            onChange(null)
-            return
-          }
-          const n = parseDecimalInput(t)
-          if (n === null) return
-          setDraft(t)
-          onChange(n)
-        }}
-        className="tnum"
-      />
-      {value !== null && !disabled && (
-        <button
-          type="button"
-          onClick={() => onChange(null)}
-          aria-label={`Limpar (${emptyLabel.toLowerCase()})`}
-          title={emptyLabel}
-          className="absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-md px-1.5 py-1 text-xs text-fg-3 hover:bg-surface-3 hover:text-fg"
-        >
-          <X size={12} aria-hidden />
-          <span className="hidden sm:inline">{emptyLabel}</span>
-        </button>
-      )}
-    </div>
+    <NumericFieldBox>
+      <div className="relative">
+        <Input
+          id={id}
+          aria-describedby={text.message ? noteId : undefined}
+          prefix="R$"
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          disabled={disabled}
+          invalid={invalid}
+          placeholder={emptyLabel}
+          value={text.value}
+          onChange={text.onChange}
+          onBlur={text.onBlur}
+          onKeyDown={text.onKeyDown}
+          className="tnum"
+        />
+        {value !== null && !disabled && (
+          <button
+            type="button"
+            onClick={() => onChange(null)}
+            aria-label={`Limpar (${emptyLabel.toLowerCase()})`}
+            title={emptyLabel}
+            className="absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-md px-1.5 py-1 text-xs text-fg-3 hover:bg-surface-3 hover:text-fg"
+          >
+            <X size={12} aria-hidden />
+            <span className="hidden sm:inline">{emptyLabel}</span>
+          </button>
+        )}
+      </div>
+      <DecimalTextNote id={noteId} message={text.message} />
+    </NumericFieldBox>
   )
 }
 

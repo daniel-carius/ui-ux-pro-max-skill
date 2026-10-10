@@ -682,9 +682,9 @@ function Routing() {
             {active.map((a) => {
               const p = v.deposits[a.id] ?? 0
               return (
-                <li key={a.id} className="flex flex-wrap items-center gap-3 px-3 py-2.5">
-                  <span className="h-2.5 w-2.5 shrink-0 rounded-[3px]" style={{ background: `var(--chart-${slotOf(a.id)})` }} aria-hidden />
-                  <div className="min-w-0 flex-1">
+                <li key={a.id} className="flex flex-wrap items-start gap-3 px-3 py-2.5">
+                  <span className="mt-[15px] h-2.5 w-2.5 shrink-0 rounded-[3px]" style={{ background: `var(--chart-${slotOf(a.id)})` }} aria-hidden />
+                  <div className="flex min-h-10 min-w-0 flex-1 flex-col justify-center">
                     <p className="truncate text-[13px] font-medium text-fg">{label(a)}</p>
                     <p className="text-xs text-fg-3">{p ? `≈ ${num(p * 10)} de cada 1.000 depósitos` : 'não recebe depósitos'}</p>
                   </div>

@@ -1128,12 +1128,12 @@ function PromoEditor({
               </Field>
               {d.audience.kind === 'nivel' && (
                 <Field label="Nível mínimo" htmlFor="pr-level" error={err('minLevel')}>
-                  <NumberInput id="pr-level" value={d.audience.minLevel} min={1} max={30} onValueChange={(n) => set('audience', { ...d.audience, minLevel: Math.round(n) })} invalid={!!err('minLevel')} />
+                  <NumberInput integer id="pr-level" value={d.audience.minLevel} min={1} max={30} onValueChange={(n) => set('audience', { ...d.audience, minLevel: Math.round(n) })} invalid={!!err('minLevel')} />
                 </Field>
               )}
               {d.audience.kind === 'inativos' && (
                 <Field label="Sem acessar há pelo menos" htmlFor="pr-inactive" error={err('inactiveDays')}>
-                  <NumberInput id="pr-inactive" value={d.audience.inactiveDays} min={7} max={365} suffix="dias" onValueChange={(n) => set('audience', { ...d.audience, inactiveDays: Math.round(n) })} invalid={!!err('inactiveDays')} />
+                  <NumberInput integer id="pr-inactive" value={d.audience.inactiveDays} min={7} max={365} suffix="dias" onValueChange={(n) => set('audience', { ...d.audience, inactiveDays: Math.round(n) })} invalid={!!err('inactiveDays')} />
                 </Field>
               )}
               <Switch
@@ -1271,7 +1271,7 @@ function RulesFields({
   )
   const perPlayer = (
     <Field label="Participações por jogador" htmlFor="pr-per" error={err('maxPerPlayer')}>
-      <NumberInput id="pr-per" value={r.maxPerPlayer} min={1} suffix="vezes" onValueChange={(n) => setRule('maxPerPlayer', Math.round(n))} invalid={!!err('maxPerPlayer')} />
+      <NumberInput integer id="pr-per" value={r.maxPerPlayer} min={1} suffix="vezes" onValueChange={(n) => setRule('maxPerPlayer', Math.round(n))} invalid={!!err('maxPerPlayer')} />
     </Field>
   )
   switch (d.type) {
@@ -1298,7 +1298,7 @@ function RulesFields({
             <GamePicker id="pr-game" value={r.gameId} onChange={(g) => setRule('gameId', g)} games={games} providers={providers} invalid={!!err('gameId')} filter={(g) => g.category === 'slots' && g.active} />
           </Field>
           <Field label="Quantidade de giros" htmlFor="pr-spins" error={err('spins')}>
-            <NumberInput id="pr-spins" value={r.spins} min={1} max={1000} suffix="giros" onValueChange={(n) => setRule('spins', Math.round(n))} invalid={!!err('spins')} />
+            <NumberInput integer id="pr-spins" value={r.spins} min={1} max={1000} suffix="giros" onValueChange={(n) => setRule('spins', Math.round(n))} invalid={!!err('spins')} />
           </Field>
           <Field label="Valor por giro" htmlFor="pr-spinv" error={err('spinValue')} hint={`Total em giros: ${brl(r.spins * r.spinValue)}`}>
             <MoneyInput id="pr-spinv" value={r.spinValue} onValueChange={(n) => setRule('spinValue', n)} invalid={!!err('spinValue')} />
@@ -1341,7 +1341,7 @@ function RulesFields({
             <MoneyInput id="pr-cval" value={r.couponValue} onValueChange={(n) => setRule('couponValue', n)} invalid={!!err('couponValue')} />
           </Field>
           <Field label="Resgates totais" htmlFor="pr-cmax" hint="0 = sem limite. Ao atingir, o cupom deixa de funcionar.">
-            <NumberInput id="pr-cmax" value={r.maxRedemptions} min={0} suffix="resgates" onValueChange={(n) => setRule('maxRedemptions', Math.round(n))} />
+            <NumberInput integer id="pr-cmax" value={r.maxRedemptions} min={0} suffix="resgates" onValueChange={(n) => setRule('maxRedemptions', Math.round(n))} />
           </Field>
           {rollover}
           {perPlayer}
@@ -1387,7 +1387,7 @@ function RulesFields({
             {r.goal === 'apostar' ? (
               <MoneyInput id="pr-target" value={r.goalTarget} onValueChange={(n) => setRule('goalTarget', n)} invalid={!!err('goalTarget')} />
             ) : (
-              <NumberInput id="pr-target" value={r.goalTarget} min={1} suffix={r.goal === 'depositar' ? 'depósitos' : 'rodadas'} onValueChange={(n) => setRule('goalTarget', Math.round(n))} invalid={!!err('goalTarget')} />
+              <NumberInput integer id="pr-target" value={r.goalTarget} min={1} suffix={r.goal === 'depositar' ? 'depósitos' : 'rodadas'} onValueChange={(n) => setRule('goalTarget', Math.round(n))} invalid={!!err('goalTarget')} />
             )}
           </Field>
           <Field label="Recompensa" htmlFor="pr-reward" error={err('rewardValue')}>

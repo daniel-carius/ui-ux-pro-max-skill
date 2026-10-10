@@ -342,8 +342,8 @@ describe('kv: segredos (rule.secrets)', () => {
   const original = {
     callbackToken: 'tok_callback_5678',
     accounts: [
-      { id: 'g1', name: 'PixPay', apiKey: 'sk_live_ABCDEFGH1234', clientSecret: 'cs_secreto_9999', url: 'https://pixpay.exemplo.com' },
-      { id: 'g2', name: 'Outro', apiKey: 'sk_live_ZZZZYYYY4321', clientSecret: 'cs_outro_8888', url: 'https://outro.exemplo.com' },
+      { id: 'g1', name: 'PixPay', apiKey: 'tst_key_ABCDEFGH1234', clientSecret: 'cs_secreto_9999', url: 'https://pixpay.exemplo.com' },
+      { id: 'g2', name: 'Outro', apiKey: 'tst_key_ZZZZYYYY4321', clientSecret: 'cs_outro_8888', url: 'https://outro.exemplo.com' },
     ],
     credentials: { user: 'usuario-integracao', region: 'sa-east-1' },
     pins: ['1111', '2222'],
@@ -372,7 +372,7 @@ describe('kv: segredos (rule.secrets)', () => {
     expect(row?.value).toBeNull()
     expect(row?.value_enc).toMatch(/^v1\./)
     const dump = JSON.stringify(row)
-    for (const s of ['sk_live_ABCDEFGH1234', 'cs_secreto_9999', 'tok_callback_5678', 'PixPay', 'usuario-integracao']) expect(dump).not.toContain(s)
+    for (const s of ['tst_key_ABCDEFGH1234', 'cs_secreto_9999', 'tok_callback_5678', 'PixPay', 'usuario-integracao']) expect(dump).not.toContain(s)
     expect(await storedPlain(app, KEY)).toEqual(original)
 
     const r = await get(app, admin.cookie, KEY)
@@ -406,12 +406,12 @@ describe('kv: segredos (rule.secrets)', () => {
   it('segredo novo em claro substitui o gravado', async () => {
     const cur = (await get(app, admin.cookie, KEY)).json()
     const next = structuredClone(cur.value)
-    next.accounts[0].apiKey = 'sk_live_NOVO00009876'
+    next.accounts[0].apiKey = 'tst_key_NOVO00009876'
     const w = await put(app, admin.cookie, KEY, next, cur.version)
     expect(w.statusCode).toBe(200)
     expect(w.json().value.accounts[0].apiKey).toBe(`${BULLETS}9876`)
     const stored = (await storedPlain(app, KEY)) as typeof original
-    expect(stored.accounts[0].apiKey).toBe('sk_live_NOVO00009876')
+    expect(stored.accounts[0].apiKey).toBe('tst_key_NOVO00009876')
   })
 
   it('máscara sem valor gravado correspondente → 400 (não vira dado real)', async () => {
@@ -942,7 +942,7 @@ describe('kv: transações (geral.transacoes)', () => {
     ...extra,
   })
   const playerBase = [
-    { id: 'p1', name: 'Joana', email: 'joana@exemplo.com', status: 'ativo', balanceReal: 75, balanceBonus: 0, coins: 0, tags: [] },
+    { id: 'p1', name: 'Joana', email: 'joana@exemplo.com', status: 'ativo', balanceReal: 75, balanceBonus: 0, coins: 0, tags: [], totalBet: 25, betsCount: 2 },
     { id: 'p9', name: 'Outro', email: 'outro@exemplo.com', status: 'ativo', balanceReal: 0, balanceBonus: 0, coins: 0, tags: [] },
   ]
   beforeAll(async () => {
@@ -1086,11 +1086,15 @@ describe('kv: transações (geral.transacoes)', () => {
       expect(r.statusCode, label).toBe(400)
       expect(r.json().error.code, label).toBe('dados_invalidos')
     }
+    const before = ((await storedPlain(app, 'geral.jogadores')) as { id: string; balanceReal: number }[]).find((p) => p.id === 'p1')!
     const ok = await put(app, estornos, KEY, [reversal('TX47', 'TX2', 20), ...cur.value], cur.version)
     expect(ok.statusCode).toBe(200)
     const a = await lastAudit(app)
     expect(a.action).toBe('estornar')
     expect(a.summary).toContain('Estorno de R$ 20,00 (carteira real) da transação TX2 do jogador p1 · TX47')
+    // aposta estornada: o saldo volta e ela sai do apostado e do nº de apostas da ficha
+    const after = ((await storedPlain(app, 'geral.jogadores')) as { id: string; balanceReal: number; totalBet: number; betsCount: number }[]).find((p) => p.id === 'p1')!
+    expect(after).toMatchObject({ balanceReal: before.balanceReal + 20, totalBet: 5, betsCount: 1 })
 
     cur = await current(estornos)
     const twice = await put(app, estornos, KEY, [reversal('TX48', 'TX2', 20), ...cur.value], cur.version)
@@ -1099,8 +1103,9 @@ describe('kv: transações (geral.transacoes)', () => {
     // dois estornos da mesma transação na mesma gravação
     const pair = await put(app, estornos, KEY, [reversal('TX49', 'TX11', 10), reversal('TX50', 'TX11', 10), ...cur.value], cur.version)
     expect(pair.statusCode).toBe(400)
-    // subtração manual pode ser estornada
+    // subtração manual pode ser estornada (não mexe no apostado)
     expect((await put(app, estornos, KEY, [reversal('TX51', 'TX11', 10), ...cur.value], cur.version)).statusCode).toBe(200)
+    expect(((await storedPlain(app, 'geral.jogadores')) as { id: string; totalBet: number; betsCount: number }[]).find((p) => p.id === 'p1')).toMatchObject({ totalBet: 5, betsCount: 1 })
   })
 
   it('id repetido, versão desatualizada e limite de lançamentos por vez', async () => {

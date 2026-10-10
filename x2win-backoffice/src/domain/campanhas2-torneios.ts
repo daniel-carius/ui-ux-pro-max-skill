@@ -1,7 +1,7 @@
 // Torneios: competição por pontuação, com ranking e prêmios por posição.
 import { brl, mult, num } from '@/lib/format'
 import { createRng } from '@/lib/random'
-import type { CampaignPlayer } from './campanhas-jogadores'
+import type { CampaignPlayer } from './campanhas-jogador'
 import { hashSeed, maskNick, rewardCost, rewardShort, type Audience, type CoinInfo, type RewardKind } from './campanhas2-common'
 
 export type Scoring = 'maior_multiplicador' | 'maior_ganho' | 'volume_apostado'

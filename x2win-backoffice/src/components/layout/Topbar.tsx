@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, useState } from 'react'
+import { Suspense, lazy, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   Bell,
@@ -32,7 +32,7 @@ import { INVOICES_KEY, type Invoice } from '@/domain/config1-faturas'
 import { seedInvoices } from '@/data/config1-faturas'
 import { useCollection } from '@/lib/store'
 import { useWithdrawals } from '@/data/hooks'
-import { Avatar, IconButton, Menu, Popover, confirm, toast, type MenuEntry } from '@/components/ui'
+import { Avatar, IconButton, Menu, Popover, confirm, toast, usePathAccess, type MenuEntry } from '@/components/ui'
 
 // só no modo API (carregado ao abrir)
 const ChangePasswordModal = lazy(() => import('@/pages/auth/ChangePasswordPage').then((m) => ({ default: m.ChangePasswordModal })))
@@ -96,6 +96,22 @@ function useNotices(): Notice[] {
   }, [withdrawals, team, roles, panel, can, invoices])
 }
 
+/** Aviso de estado na barra: leva à tela que liga e desliga; quem não abre a tela vê o aviso sem link. */
+function StatusLink({ to, title, className, children, ...rest }: { to: string; title: string; className: string; children: ReactNode; 'aria-label'?: string }) {
+  const access = usePathAccess()(to)
+  if (!access.ok)
+    return (
+      <span title={title} aria-label={rest['aria-label']} className={className}>
+        {children}
+      </span>
+    )
+  return (
+    <Link to={to} title={title} aria-label={rest['aria-label']} className={className}>
+      {children}
+    </Link>
+  )
+}
+
 function StatusPill() {
   const [attack] = useAttackMode()
   // só leitura de `active`: quem não vê a tela Manutenção recebe do servidor só {active, message,
@@ -106,7 +122,7 @@ function StatusPill() {
     return (
       <span className="flex items-center gap-1.5">
         {attack.active && (
-          <Link
+          <StatusLink
             to="/settings/modo-ataque"
             title="Modo de ataque ligado"
             aria-label="Modo de ataque ligado"
@@ -115,10 +131,10 @@ function StatusPill() {
             <Siren size={14} className="shrink-0 animate-pulse" aria-hidden />
             {/* no celular só o ícone (o nome fica no title e no aria-label): o texto quebrava em duas linhas e esmagava a busca */}
             <span className="hidden whitespace-nowrap sm:inline">Modo de ataque ligado</span>
-          </Link>
+          </StatusLink>
         )}
         {maint.active && (
-          <Link
+          <StatusLink
             to="/settings/manutencao"
             title="Site em manutenção"
             aria-label="Site em manutenção"
@@ -126,7 +142,7 @@ function StatusPill() {
           >
             <Construction size={14} className="shrink-0" aria-hidden />
             <span className="hidden whitespace-nowrap sm:inline">Site em manutenção</span>
-          </Link>
+          </StatusLink>
         )}
       </span>
     )

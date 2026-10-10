@@ -229,7 +229,7 @@ export function AudiencePicker({
           error={value.days < 1 || value.days > 365 ? 'De 1 a 365 dias.' : null}
           className="max-w-xs"
         >
-          <NumberInput id={`${idPrefix}-days`} value={value.days} min={1} max={365} suffix="dias" disabled={disabled} onValueChange={(n) => onChange({ ...value, days: Math.round(n) })} />
+          <NumberInput integer id={`${idPrefix}-days`} value={value.days} min={1} max={365} suffix="dias" disabled={disabled} onValueChange={(n) => onChange({ ...value, days: Math.round(n) })} />
         </Field>
       )}
       {value.kind === 'nivel' && (

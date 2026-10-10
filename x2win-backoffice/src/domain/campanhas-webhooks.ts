@@ -211,13 +211,16 @@ export interface DeliveryResult {
   message: string
 }
 
-/** Entrega simulada: domínios .invalid/.test não resolvem; o resto responde quase sempre 200. */
+/**
+ * Entrega simulada: domínios .invalid/.test não resolvem; o resto responde quase sempre 200. Sem resposta (DNS,
+ * tempo esgotado) é HTTP 0, como o servidor grava: não entra no tempo médio de resposta.
+ */
 export function simulateDelivery(url: string): DeliveryResult {
   const host = hostOf(url)
-  if (/\.(invalid|test|local)$/i.test(host)) return { status: 'falha', httpStatus: 502, durationMs: 30 + Math.round(Math.random() * 40), message: 'Domínio não encontrado (DNS).' }
+  if (/\.(invalid|test|local)$/i.test(host)) return { status: 'falha', httpStatus: 0, durationMs: 30 + Math.round(Math.random() * 40), message: 'Domínio não encontrado (DNS).' }
   const r = Math.random()
   if (r < 0.05) return { status: 'falha', httpStatus: 500, durationMs: 200 + Math.round(Math.random() * 600), message: 'O destino respondeu com erro interno (500).' }
-  if (r < 0.08) return { status: 'falha', httpStatus: 504, durationMs: 10000, message: 'Sem resposta em 10 segundos (tempo esgotado).' }
+  if (r < 0.08) return { status: 'falha', httpStatus: 0, durationMs: 10000, message: 'Sem resposta em 10 segundos (tempo esgotado).' }
   return { status: 'sucesso', httpStatus: 200, durationMs: 90 + Math.round(Math.random() * 380), message: 'Recebido com sucesso (200 OK).' }
 }
 
@@ -256,12 +259,69 @@ export function latestAttempts(execs: WebhookExecution[]): WebhookExecution[] {
   return execs.filter((e) => keep.has(e))
 }
 
+/** A tentativa recebeu resposta HTTP do destino? (0 = sem resposta: DNS, conexão, tempo esgotado, endereço recusado) */
+export function gotResponse(e: Pick<WebhookExecution, 'httpStatus'>): boolean {
+  return e.httpStatus > 0
+}
+
+/**
+ * Espera do servidor depois da tentativa N que falhou (retryDelaySeconds em server/src/modules/webhooks/dispatcher.ts):
+ * 30 s × 2^(N − 1), no máximo 1 h.
+ */
+export function retryDelayMs(attempt: number): number {
+  return Math.min(30 * 2 ** Math.max(0, attempt - 1), 3600) * 1000
+}
+
+/** Folga sobre o horário previsto da nova tentativa: laço do servidor (2 s), reserva do item (60 s) e relógios diferentes. */
+export const RETRY_GRACE_MS = 3 * 60_000
+
+/**
+ * Horário previsto (ms) da próxima tentativa de uma entrega cuja tentativa mais recente é `e` e falhou: o servidor
+ * tenta de novo até a 6ª. null quando não haverá outra: sucesso, 6ª tentativa, envio de teste, registro sem número
+ * de tentativa (demonstração, registro antigo) ou horário previsto passado há mais que a folga (novas tentativas
+ * canceladas ao editar ou excluir o destino, ou servidor parado).
+ */
+export function nextRetryAt(e: WebhookExecution, now = Date.now()): number | null {
+  if (e.status !== 'falha' || isTestExecution(e) || !e.deliveryId || !e.attempt || e.attempt >= WEBHOOK_MAX_ATTEMPTS) return null
+  const at = new Date(e.at).getTime() + retryDelayMs(e.attempt)
+  return Number.isFinite(at) && now <= at + RETRY_GRACE_MS ? at : null
+}
+
+/** Tentativas mais recentes de entregas ainda em nova tentativa (id da execução → horário previsto da próxima). */
+export function retryingAttempts(execs: WebhookExecution[], now = Date.now()): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const e of latestAttempts(execs)) {
+    const next = nextRetryAt(e, now)
+    if (next !== null) out.set(e.id, next)
+  }
+  return out
+}
+
+/**
+ * A que a entrega se refere: o id do registro no corpo enviado (saque "SQ…", depósito), para distinguir duas
+ * entregas do mesmo evento; sem ele, o X-X2W-Delivery. null quando não há nenhum dos dois.
+ */
+export function deliverySubject(e: Pick<WebhookExecution, 'payload' | 'deliveryId'>): string | null {
+  try {
+    const body = JSON.parse(e.payload) as { data?: { id?: unknown; withdrawalId?: unknown; depositId?: unknown } } | null
+    const data = body?.data
+    const id = data?.id ?? data?.withdrawalId ?? data?.depositId
+    if (typeof id === 'string' && id) return id
+  } catch {
+    /* corpo que não é JSON: usa o id da entrega */
+  }
+  return e.deliveryId ? `entrega #${e.deliveryId}` : null
+}
+
 /**
  * Números das entregas: uma entrega conta uma vez, com todas as tentativas (antes cada tentativa contava como
  * entrega, e um saque recusado com 6 tentativas virava "6 entregas · 6 falhas"). Entrega com sucesso = alguma
- * tentativa 2xx. avgMs: média de todas as tentativas; null sem nenhuma (nada medido, a tela mostra "—").
+ * tentativa 2xx; entrega cuja última tentativa falhou mas que o servidor ainda vai tentar de novo fica "em nova
+ * tentativa" (`retrying`): não conta como falha nem entra na taxa até terminar (`rate` = sucessos ÷ entregas
+ * terminadas). avgMs: média só das tentativas com resposta HTTP (sem resposta não há tempo de resposta); null sem
+ * nenhuma (a tela mostra "—").
  */
-export function deliveryStats(execs: WebhookExecution[], sinceMs: number) {
+export function deliveryStats(execs: WebhookExecution[], sinceMs: number, now = Date.now()) {
   const list = execs.filter((e) => new Date(e.at).getTime() >= sinceMs)
   const delivered = new Map<string, boolean>()
   for (const e of list) {
@@ -270,6 +330,18 @@ export function deliveryStats(execs: WebhookExecution[], sinceMs: number) {
   }
   const total = delivered.size
   const ok = [...delivered.values()].filter(Boolean).length
-  const avgMs = list.length ? Math.round(list.reduce((s, e) => s + e.durationMs, 0) / list.length) : null
-  return { total, ok, failed: total - ok, attempts: list.length, rate: total ? ok / total : null, avgMs }
+  const retrying = latestAttempts(list).filter((e) => delivered.get(deliveryKey(e)) !== true && nextRetryAt(e, now) !== null).length
+  const finished = total - retrying
+  const responded = list.filter(gotResponse)
+  const avgMs = responded.length ? Math.round(responded.reduce((s, e) => s + e.durationMs, 0) / responded.length) : null
+  return {
+    total,
+    ok,
+    failed: finished - ok,
+    retrying,
+    attempts: list.length,
+    responded: responded.length,
+    rate: finished ? ok / finished : null,
+    avgMs,
+  }
 }

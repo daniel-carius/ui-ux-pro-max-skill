@@ -123,35 +123,120 @@ export function parseBRNumber(input: string): number {
   return Number(clean)
 }
 
+export interface DecimalTextOptions {
+  /** aceita "-" na frente (padrão: não) */
+  allowNegative?: boolean
+  /** casas decimais aceitas (padrão: 2, como centavos) */
+  maxDecimals?: number
+}
+
+/**
+ * Resultado da leitura do texto de um campo numérico:
+ *  - ok: `value` é o número; `text` é o texto limpo (sem "R$" e espaços, para o campo mostrar ao colar);
+ *    `pending` marca pontos fora do lugar do milhar ("1.000.0" enquanto se digita 1.000.000, "1.00,50" ao
+ *    apagar um dígito): todo ponto conta como milhar e, ao sair do campo, ele mostra o número lido com um aviso;
+ *  - recusado: o texto não forma número; `message` diz por quê (o campo fica como estava e mostra o aviso).
+ */
+export type DecimalText =
+  | { ok: true; value: number; text: string; pending: boolean }
+  | { ok: false; message: string }
+
+export const DECIMAL_TEXT_MESSAGES = {
+  chars: 'Digite só números (ex.: 1.500,50).',
+  charsInteger: 'Digite só números inteiros (ex.: 1.500).',
+  negative: 'O valor não pode ser negativo.',
+  format: 'Use ponto só no milhar e vírgula nos decimais (ex.: 1.000.000 ou 1.500,50).',
+  decimals: (n: number) => (n === 0 ? 'Use um número inteiro.' : `Use no máximo ${n} ${n === 1 ? 'casa decimal' : 'casas decimais'}.`),
+  pending: (shown: string) => `Ponto conta como milhar: ficou ${shown}. Confira o valor.`,
+}
+
+/** Grupos de milhar: "1.000", "12.500.000" (o primeiro grupo não começa com zero). */
+const GROUPED = /^[1-9]\d{0,2}(\.\d{3})+$/
+
 /**
  * Lê o texto de um campo numérico do jeito brasileiro (o campo é texto: o <input type="number"> do navegador
  * descarta a vírgula sem aviso e "12,5" virava 125).
- *  - vírgula é o separador decimal: "12,5" → 12.5; "1.500,50" e "1500,50" → 1500.5;
- *  - sem vírgula, ponto seguido de grupos de 3 dígitos é milhar ("1.500" → 1500) e os demais são decimais
- *    ("12.5" → 12.5, como um número colado de outro sistema);
- *  - vazio, "-" e "," valem 0 (a pessoa ainda está digitando).
- * null: o texto não é um número (a tecla é recusada e o campo fica como estava).
+ *  - vírgula é o separador decimal e ponto é o milhar: "12,5" → 12.5; "1.500,50" e "1500,50" → 1500.5;
+ *    "1.000.000" e "1.000.000,00" → 1000000;
+ *  - sem vírgula, ponto seguido de grupos de 3 dígitos é milhar ("1.500" → 1500); um ponto seguido de 1 ou 2
+ *    dígitos é decimal ("12.5" → 12.5, como um número colado de outro sistema);
+ *  - "R$" e espaços são ignorados (colar "R$ 1.500,50" funciona);
+ *  - vazio, "-" e "," valem 0 (a pessoa ainda está digitando); "1.000." vale 1000 (o próximo grupo vem aí);
+ *  - com `maxDecimals: 0` (contagens), "2,5" é recusado com "Use um número inteiro." (o campo fica em 2); o ponto
+ *    é sempre milhar ("2.5" fica pendente como 25, com o aviso ao sair do campo).
+ * Nada é reinterpretado em silêncio: "1.0000" (milhar ou decimal?) e "12,345" com 2 casas são recusados com a
+ * mensagem, em vez de virar 1 ou 12,34; pontos fora do lugar ficam pendentes (aviso ao sair do campo).
  */
-export function parseDecimalInput(raw: string, allowNegative = false): number | null {
-  let t = raw.replace(/\s/g, '')
+export function readDecimalText(raw: string, { allowNegative = false, maxDecimals = 2 }: DecimalTextOptions = {}): DecimalText {
+  let t = raw.replace(/\s/g, '').replace(/r\$/gi, '')
   let sign = 1
-  if (allowNegative && t.startsWith('-')) {
+  if (t.startsWith('-')) {
+    if (!allowNegative) return { ok: false, message: DECIMAL_TEXT_MESSAGES.negative }
     sign = -1
     t = t.slice(1)
   }
+  if (!/^[\d.,]*$/.test(t)) return { ok: false, message: maxDecimals === 0 ? DECIMAL_TEXT_MESSAGES.charsInteger : DECIMAL_TEXT_MESSAGES.chars }
+  const text = `${sign < 0 ? '-' : ''}${t}`
+  const done = (digits: string, pending = false): DecimalText => {
+    const n = digits === '' || digits === '.' ? 0 : Number(digits)
+    if (!Number.isFinite(n)) return { ok: false, message: DECIMAL_TEXT_MESSAGES.format }
+    return { ok: true, value: n === 0 ? 0 : sign * n, text, pending }
+  }
+  // pontos fora do lugar do milhar ("1.000.0" a caminho de 1.000.000, "1.00,50" ao apagar um dígito):
+  // com mais de um ponto, ou com vírgula, todo ponto é milhar; o número vale os dígitos e fica pendente
+  const misgrouped = (int: string) => /^\d+(\.\d+)*$/.test(int) && !GROUPED.test(int)
   if (t.includes(',')) {
-    if (!/^(\d{1,3}(\.\d{3})+|\d*),\d*$/.test(t)) return null
-    t = t.replace(/\./g, '').replace(',', '.')
-  } else if (/^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, '')
-  else if (!/^\d*\.?\d*$/.test(t)) return null
-  if (t === '' || t === '.') return 0
-  const n = Number(t)
-  return Number.isFinite(n) ? sign * n : null
+    const [int, frac, ...rest] = t.split(',')
+    if (rest.length || frac.includes('.')) return { ok: false, message: DECIMAL_TEXT_MESSAGES.format }
+    if (frac.length > maxDecimals) return { ok: false, message: DECIMAL_TEXT_MESSAGES.decimals(maxDecimals) }
+    if (int === '' || /^\d+$/.test(int) || GROUPED.test(int)) return done(`${int.replace(/\./g, '')}.${frac}`)
+    if (misgrouped(int)) return done(`${int.replace(/\./g, '')}.${frac}`, true)
+    return { ok: false, message: DECIMAL_TEXT_MESSAGES.format }
+  }
+  if (/^\d*$/.test(t)) return done(t)
+  if (GROUPED.test(t)) return done(t.replace(/\./g, ''))
+  // ponto no fim: o próximo grupo (ou a casa decimal) ainda vem
+  if (/^\d+\.$/.test(t) || /^[1-9]\d{0,2}(\.\d{3})+\.$/.test(t)) return done(t.slice(0, -1).replace(/\./g, ''))
+  // um só ponto: decimal ("12.5", "0.005") até maxDecimals casas ("1.500" já foi lido como milhar acima);
+  // "1.0000" e "0.500" são ambíguos (milhar ou decimal?) e são recusados
+  const dot = /^\d+\.(\d+)$/.exec(t)
+  if (dot) {
+    if (dot[1].length <= maxDecimals) return done(t)
+    // número inteiro: o ponto só pode ser milhar ("1.0" a caminho de 1.000); fica pendente (aviso ao sair)
+    if (maxDecimals === 0 && dot[1].length < 3) return done(t.replace('.', ''), true)
+    return { ok: false, message: dot[1].length < 3 ? DECIMAL_TEXT_MESSAGES.decimals(maxDecimals) : DECIMAL_TEXT_MESSAGES.format }
+  }
+  const body = t.endsWith('.') ? t.slice(0, -1) : t
+  if (misgrouped(body)) return done(body.replace(/\./g, ''), true)
+  return { ok: false, message: DECIMAL_TEXT_MESSAGES.format }
 }
 
-/** Número no campo de texto, com vírgula decimal e sem milhar ("1500,5"). */
-export function formatDecimalInput(n: number): string {
-  return Number.isFinite(n) ? String(n).replace('.', ',') : ''
+/**
+ * Atalho de readDecimalText: o número, ou null quando o texto é recusado. Texto pendente ("1.000.0") também é
+ * null aqui: quem chama não tem como mostrar o aviso.
+ */
+export function parseDecimalInput(raw: string, allowNegative = false, maxDecimals = 2): number | null {
+  const r = readDecimalText(raw, { allowNegative, maxDecimals })
+  return r.ok && !r.pending ? r.value : null
+}
+
+/**
+ * Número no campo de texto, como o painel mostra: milhar com ponto e vírgula decimal ("1.500,5").
+ * `minDecimals: 2` para reais ("1.500,50", "5.000,00"). O texto volta ao mesmo número em readDecimalText.
+ */
+export function formatDecimalInput(n: number, { minDecimals = 0, maxDecimals = 2 }: { minDecimals?: number; maxDecimals?: number } = {}): string {
+  if (!Number.isFinite(n)) return ''
+  const max = Math.max(minDecimals, maxDecimals)
+  return n.toLocaleString('pt-BR', { minimumFractionDigits: minDecimals, maximumFractionDigits: max, useGrouping: true })
+}
+
+/** Casas decimais de um passo ("0.001" → 3), para o campo aceitar o que as setas produzem. */
+export function decimalsOf(step: number): number {
+  if (!Number.isFinite(step) || Number.isInteger(step)) return 0
+  const s = String(step)
+  const e = /e-(\d+)$/.exec(s)
+  if (e) return Number(e[1])
+  return s.split('.')[1]?.length ?? 0
 }
 
 /** Esconde o meio de um CPF: 123.***.***-09 */

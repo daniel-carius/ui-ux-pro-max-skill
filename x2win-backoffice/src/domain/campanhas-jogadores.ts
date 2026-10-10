@@ -15,34 +15,14 @@ import type { Player } from '@/data/players'
 import { isApiMode } from '@/lib/api'
 import { prefetchKeys, refreshKey, useDb, type Collection } from '@/lib/store'
 import type { CashbackPeriod } from './campanhas3-cashback'
+import type { CampaignPlayer } from './campanhas-jogador'
+
+export type { CampaignPlayer }
 
 export const AUDIENCE_KEY = 'geral.jogadores.audiencia'
 export const PLAYER_METRICS_KEY = 'geral.jogadores.metricas'
 
 const API = isApiMode()
-
-/**
- * Jogador como as campanhas o enxergam: os campos do público de marketing. O jogador
- * completo da demonstração (Player) também serve; nome, e-mail, saldo e moedas só
- * existem nele.
- */
-export interface CampaignPlayer {
-  id: string
-  nickname: string
-  status: Player['status']
-  level: number
-  xp: number
-  tags: string[]
-  createdAt: string
-  lastAccess: string
-  depositsCount: number
-  /** último depósito pago (modo API; na demonstração vem de operacao.depositos) */
-  lastDepositAt?: string | null
-  name?: string
-  email?: string
-  balanceReal?: number
-  coins?: number
-}
 
 /** Projeção do próximo crédito do cashback num período (só totais). */
 export interface CashbackProjection {

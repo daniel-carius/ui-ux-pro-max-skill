@@ -34,10 +34,11 @@ import {
   FormFieldset,
   FormGrid,
   KpiCard,
-  Mono,
   MoneyInput,
+  Mono,
   NumberInput,
   PageHeader,
+  PageLink,
   PersonCell,
   RadioCards,
   SaveBar,
@@ -696,7 +697,7 @@ function Rules() {
               <MoneyInput id="r-max" value={v.maxPerRequest} onValueChange={(n) => form.set('maxPerRequest', n)} invalid={v.maxPerRequest < v.min} />
             </Field>
             <Field label="Limite diário" htmlFor="r-daily" hint="Quantidade de saques por jogador por dia.">
-              <NumberInput id="r-daily" value={v.dailyLimit} onValueChange={(n) => form.set('dailyLimit', Math.round(n))} min={1} suffix="por dia" />
+              <NumberInput integer id="r-daily" value={v.dailyLimit} onValueChange={(n) => form.set('dailyLimit', Math.round(n))} min={1} suffix="por dia" />
             </Field>
             <Field label="Taxa fixa do saque" htmlFor="r-fee" hint="Descontada do valor pago. R$ 0,00 = sem taxa.">
               <MoneyInput id="r-fee" value={v.fee} onValueChange={(n) => form.set('fee', n)} />
@@ -737,9 +738,9 @@ function Rules() {
           </Field>
           <Alert tone="info">
             O peso de cada tipo de jogo (slots, ao vivo, crash) é definido em{' '}
-            <a href="#/campanhas/rollover" className="link">
+            <PageLink to="/campanhas/rollover" className="link">
               Campanhas › Rollover
-            </a>
+            </PageLink>
             .
           </Alert>
         </SettingsSection>
@@ -803,7 +804,7 @@ function Rules() {
               <MoneyInput id="s-amount" value={sim.amount} onValueChange={(n) => setSim((s) => ({ ...s, amount: n }))} />
             </Field>
             <Field label="Saques já feitos hoje" htmlFor="s-today">
-              <NumberInput id="s-today" value={sim.withdrawalsToday} min={0} onValueChange={(n) => setSim((s) => ({ ...s, withdrawalsToday: Math.round(n) }))} />
+              <NumberInput integer id="s-today" value={sim.withdrawalsToday} min={0} onValueChange={(n) => setSim((s) => ({ ...s, withdrawalsToday: Math.round(n) }))} />
             </Field>
             <Field label="Total depositado" htmlFor="s-dep">
               <MoneyInput id="s-dep" value={sim.deposited} onValueChange={(n) => setSim((s) => ({ ...s, deposited: n }))} />

@@ -5,8 +5,8 @@ import { Link, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/cn'
 import { dbSetAndWaitResult, useDb } from '@/lib/store'
 import { isApiMode, type ApiError } from '@/lib/api'
-import { MODULE_BY_ID, pageByPath } from '@/nav'
-import { audit, usePageAccess } from '@/domain/session'
+import { MODULE_BY_ID, PAGES, pageByPath } from '@/nav'
+import { audit, usePageAccess, useSession } from '@/domain/session'
 import { Delta } from './Badge'
 import { Button } from './Button'
 import { toast } from './Feedback'
@@ -399,11 +399,72 @@ export function FormFieldset({ readOnly, children, className }: { readOnly: bool
   )
 }
 
-/** Link interno com estilo */
-export function TextLink({ to, children }: { to: string; children: ReactNode }) {
+/** Caminho interno sem busca e fragmento ("#/settings/integracoes?aba=x" → "/settings/integracoes"). */
+function pathOnly(to: string) {
+  return to.replace(/^#/, '').split(/[?#]/)[0]
+}
+
+export type PathAccess = { ok: true } | { ok: false; reason: string }
+
+/**
+ * O cargo abre a tela deste caminho interno? Caminho que não é uma tela do menu: sim. Para links e botões que
+ * levam a outra tela: sem acesso, eles viram texto ou ficam desligados com o motivo, em vez de levar ao aviso
+ * "Sem acesso à tela" (mesma regra do menu e dos atalhos do Dashboard: <tela>.ver ou <tela>.editar).
+ *   const canOpen = usePathAccess()
+ *   <Button disabled={!canOpen('/campanhas/webhooks').ok} …>
+ */
+export function usePathAccess(): (to: string) => PathAccess {
+  const { canView } = useSession()
+  return (to: string) => {
+    const path = pathOnly(to)
+    // a tela do caminho, ou a mais específica que o contém ("/dashboard/usuarios/123" → Usuários)
+    const page = pageByPath(path) ?? PAGES.filter((pg) => path.startsWith(`${pg.path}/`)).sort((a, b) => b.path.length - a.path.length)[0]
+    if (!page || canView(page.id)) return { ok: true }
+    return { ok: false, reason: `Seu cargo não abre a tela ${page.title}.` }
+  }
+}
+
+/** Título do botão que leva a outra tela: o motivo quando o cargo não abre a tela, senão `title`. */
+export function pathAccessTitle(access: PathAccess, title?: string) {
+  return access.ok ? title : access.reason
+}
+
+/**
+ * Link para outra tela do painel. Se o cargo não abre a tela, vira texto (link com a classe "link") ou fica
+ * desligado (link com cara de botão), com o motivo no title.
+ *   <PageLink to="/settings/integracoes" className="link">Integrações</PageLink>
+ */
+export function PageLink({ to, className, title, children, onClick }: { to: string; className?: string; title?: string; children: ReactNode; onClick?: () => void }) {
+  const access = usePathAccess()(to)
+  if (!access.ok) {
+    const plain = !className || /(^|\s)link(\s|$)/.test(className)
+    return (
+      <span
+        className={plain ? cn(className?.replace(/(^|\s)link(?=\s|$)/, ' ').trim()) : cn(className, 'cursor-not-allowed opacity-60')}
+        title={access.reason}
+        aria-disabled={plain ? undefined : true}
+      >
+        {children}
+      </span>
+    )
+  }
   return (
-    <Link to={to} className="link">
+    <Link to={pathFromHash(to)} className={className} title={title} onClick={onClick}>
       {children}
     </Link>
+  )
+}
+
+/** "#/campanhas/rollover" (âncora antiga) → "/campanhas/rollover" para o Link do roteador. */
+function pathFromHash(to: string) {
+  return to.startsWith('#') ? to.slice(1) : to
+}
+
+/** Link interno com estilo (texto, sem acesso à tela; ver PageLink) */
+export function TextLink({ to, children }: { to: string; children: ReactNode }) {
+  return (
+    <PageLink to={to} className="link">
+      {children}
+    </PageLink>
   )
 }

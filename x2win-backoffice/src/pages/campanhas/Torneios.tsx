@@ -787,8 +787,10 @@ function TournamentDrawer({ initial, isNew, coin, onClose, onSave }: { initial: 
               const err = show ? errs.prize[p.id] : undefined
               return (
                 <li key={p.id} className={cn('rounded-xl border p-2.5', err ? 'border-danger/50 bg-danger/[0.03]' : 'border-line')}>
-                  <div className="grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[auto_150px_minmax(0,1fr)_96px_auto]">
-                    <PositionMark position={i + 1} />
+                  <div className="grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_auto] items-start gap-2 sm:grid-cols-[auto_150px_minmax(0,1fr)_96px_auto]">
+                    <span className="flex h-10 items-center">
+                      <PositionMark position={i + 1} />
+                    </span>
                     <Select
                       aria-label={`Tipo do prêmio do ${i + 1}º lugar`}
                       value={p.kind}
@@ -798,10 +800,10 @@ function TournamentDrawer({ initial, isNew, coin, onClose, onSave }: { initial: 
                     {p.kind === 'dinheiro' || p.kind === 'bonus_brl' ? (
                       <MoneyInput value={p.value} invalid={!!err} onValueChange={(n) => setPrize(p.id, { value: n })} />
                     ) : (
-                      <NumberInput value={p.value} min={1} suffix={p.kind === 'moedas' ? coin.symbol : 'giros'} invalid={!!err} onValueChange={(n) => setPrize(p.id, { value: Math.round(n) })} />
+                      <NumberInput integer value={p.value} min={1} suffix={p.kind === 'moedas' ? coin.symbol : 'giros'} invalid={!!err} onValueChange={(n) => setPrize(p.id, { value: Math.round(n) })} />
                     )}
-                    <span className="hidden text-right text-xs text-fg-3 tnum sm:block">≈ {brl(prizeValueBrl(p, coin))}</span>
-                    <IconButton icon={Trash2} label={`Remover prêmio do ${i + 1}º lugar`} size="sm" variant="danger" disabled={t.prizes.length <= 1} onClick={() => setT((x) => ({ ...x, prizes: x.prizes.filter((y) => y.id !== p.id) }))} />
+                    <span className="hidden text-right text-xs leading-10 text-fg-3 tnum sm:block">≈ {brl(prizeValueBrl(p, coin))}</span>
+                    <IconButton icon={Trash2} label={`Remover prêmio do ${i + 1}º lugar`} size="sm" variant="danger" className="mt-1" disabled={t.prizes.length <= 1} onClick={() => setT((x) => ({ ...x, prizes: x.prizes.filter((y) => y.id !== p.id) }))} />
                   </div>
                   {err && (
                     <p className="mt-1.5 text-xs font-medium text-danger" role="alert">

@@ -5,7 +5,7 @@
 import { createRng } from '@/lib/random'
 import { demoIp, demoPhone, demoRecords } from './demo'
 import { DAY, HOUR, NOW, iso } from './now'
-import { seedAffiliates, seedPlayers, type Player, type PlayerStatus } from './players'
+import { demoLedger, seedAffiliates, seedPlayers, type Player, type PlayerStatus } from './players'
 
 export const SEGURANCA_KEYS = {
   /** bloqueios ativos (IPs e redes banidas) */
@@ -95,8 +95,11 @@ function build(): Built {
   }
   const isRecent = (p: Player, days = 30) => now - new Date(p.createdAt).getTime() < days * DAY
 
-  // Rede A: "fazenda de bônus" — contas novas sacando para o CPF de uma só pessoa
-  const ringA = take(pool((p) => isRecent(p) && p.status === 'ativo' && p.depositsCount <= 4), 5)
+  // Rede A: "fazenda de bônus" — contas novas, de bônus maior que o depositado, sacando para o CPF de uma só pessoa
+  const received = demoLedger().bonusReceived
+  const farm = (p: Player) => isRecent(p) && p.status === 'ativo' && p.depositsCount > 0 && p.depositsCount <= 4
+  const bonusFarm = pool((p) => farm(p) && (received[p.id] ?? 0) >= Math.max(50, p.totalDeposited))
+  const ringA = take(bonusFarm.length >= 3 ? bonusFarm : pool(farm), 5)
   if (ringA.length >= 3) {
     const [lead, ...rest] = ringA
     const ip = randomIp(rng)
@@ -161,20 +164,8 @@ function build(): Built {
     rings.push(ringF.map((p) => p.id))
   }
 
-  // Bônus recebido (boas-vindas, giros, cashback). Redes de abuso recebem bem mais.
-  const abuse = new Set([...(rings[0] ?? []), ...(rings[1] ?? []), ...(rings[4] ?? [])])
-  const bonus: Record<string, number> = {}
-  for (const p of players) {
-    let v = 0
-    if (p.depositsCount === 0) v = rng.bool(0.18) ? 20 : 0
-    else {
-      const avg = p.totalDeposited / p.depositsCount
-      if (rng.bool(0.55)) v += Math.min(500, avg) * rng.float(0.4, 1)
-      if (rng.bool(0.35)) v += rng.money(5, 120)
-    }
-    if (abuse.has(p.id)) v = Math.max(v, Math.max(p.totalDeposited * rng.float(0.7, 1.4), rng.money(120, 520)))
-    bonus[p.id] = Math.round(v * 100) / 100
-  }
+  // Bônus recebido (boas-vindas e outros bônus, giros grátis e cashback): o do livro-razão de cada conta
+  const bonus = { ...demoLedger().bonusReceived }
 
   return { signals, bonus, rings }
 }

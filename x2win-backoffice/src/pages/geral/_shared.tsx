@@ -2,7 +2,6 @@
 // tipo de transação e valor com sinal. Usadas por Usuários, Transações, Rankings,
 // Depósitos e Apostas esportivas.
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
   ArrowDownToLine,
@@ -50,11 +49,12 @@ import {
   Menu,
   MoneyInput,
   Mono,
+  PageLink,
   Progress,
   Segmented,
   Select,
-  TagInput,
   Tabs,
+  TagInput,
   Textarea,
   confirm,
   confirmWithInput,
@@ -82,6 +82,7 @@ import {
   STATUS_ACTION_LABEL,
   STATUS_REASONS,
   ageFrom,
+  bannedNetworkAccounts,
   buildManualTx,
   isPlayerRequestedPause,
   manualAdjustPreview,
@@ -200,6 +201,17 @@ export function SignedAmount({ value, className }: { value: number; className?: 
 
 const EMPTY_HISTORY: StatusEvent[] = []
 const EMPTY_NET_BANS: BannedNetworkAccount[] = []
+
+/** O cargo lê os bloqueios do Anti-fraude (seguranca.bloqueios)? A mesma regra do servidor (canReadKey). */
+function canReadBlocks(canView: (pageId: string) => boolean): boolean {
+  const rule = findKvRule(SEGURANCA_KEYS.blocks)
+  return !rule || rule.read === 'equipe' || [rule.page, ...(rule.readPages ?? [])].some((pg) => canView(pg))
+}
+
+/** Modo API: relê o status dos jogadores, a projeção dos banimentos e os bloqueios (sem leitura: ignorado). */
+function refreshBanState() {
+  for (const key of [DATA_KEYS.players, GERAL_KEYS.bannedNetworks, SEGURANCA_KEYS.blocks]) refreshKey(key).catch(() => {})
+}
 
 const STATUS_ACTION_ICON: Record<StatusAction, LucideIcon> = {
   bloquear: Ban,
@@ -492,9 +504,9 @@ function SummaryTab({ p, players, canReveal, canEdit }: { p: Player; players: Pl
             className="mt-3"
             title={`${plural(sameIp.length, 'outra conta usa', 'outras contas usam')} o mesmo IP`}
             action={
-              <Link to={`/seguranca/antifraude?aba=ips&ip=${encodeURIComponent(p.ip)}`} className="link text-[13px]">
+              <PageLink to={`/seguranca/antifraude?aba=ips&ip=${encodeURIComponent(p.ip)}`} className="link text-[13px]">
                 Ver no Anti-fraude
-              </Link>
+              </PageLink>
             }
           >
             {sameIp
@@ -541,13 +553,22 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
   // modo API, sem leitura do Anti-fraude (Suporte): o servidor diz só a rede e a data do banimento da conta
   const [netBanView] = useDb<BannedNetworkAccount[]>(GERAL_KEYS.bannedNetworks, EMPTY_NET_BANS)
   const { user, can, canView } = useSession()
+  // a ficha (re)aberta lê de novo o status, a projeção dos banimentos e os bloqueios: um banimento feito em outra
+  // sessão aparece sem recarregar a página (refreshKey ignora chave sem leitura e não faz nada na demonstração)
+  useEffect(() => {
+    refreshBanState()
+  }, [p.id])
   const mine = history.items.filter((h) => h.playerId === p.id)
   const lastPause = mine.find((h) => h.action === 'pausar') ?? null
   const lastBlock = mine.find((h) => h.action === 'bloquear') ?? null
   // conta bloqueada pelo banimento de uma rede: só sai do bloqueio desfazendo o banimento (o servidor recusa
-  // o desbloqueio pela ficha com 409 rede_banida, e a aprovação de saque da conta segue recusada)
-  const fullBan = blocks.find((b) => b.kind === 'rede' && b.accounts.includes(p.id)) ?? null
-  const viewBan = !fullBan && isApiMode() ? (netBanView.find((b) => b.playerId === p.id) ?? null) : null
+  // o desbloqueio pela ficha com 409 rede_banida, e a aprovação de saque da conta segue recusada).
+  // Quem não lê o Anti-fraude (Suporte) recebe do servidor só a rede e a data (geral.jogadores.redes-banidas);
+  // a demonstração ("ver como") monta a mesma projeção a partir dos bloqueios, sem motivo nem autor.
+  const readsBlocks = canReadBlocks(canView)
+  const fullBan = readsBlocks ? (blocks.find((b) => b.kind === 'rede' && b.accounts.includes(p.id)) ?? null) : null
+  const netBans = isApiMode() ? netBanView : readsBlocks ? EMPTY_NET_BANS : bannedNetworkAccounts(blocks)
+  const viewBan = fullBan ? null : (netBans.find((b) => b.playerId === p.id) ?? null)
   const netBan =
     p.status !== 'bloqueado'
       ? null
@@ -596,7 +617,12 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
       setBusy(true)
       try {
         const saved = await dbSetAndWait<Player[]>(DATA_KEYS.players, (prev) => prev.map((x) => (x.id === p.id ? { ...x, status: next } : x)))
-        if (!saved) return
+        if (!saved) {
+          // recusa (versão velha, 409 rede_banida): a conta pode ter sido banida em outra sessão; a ficha relê a
+          // projeção junto com a base, para mostrar o banimento e travar "Desbloquear conta"
+          refreshBanState()
+          return
+        }
         await dbSetAndWait<StatusEvent[]>(GERAL_KEYS.statusHistory, (prev) => [event, ...prev], EMPTY_HISTORY)
       } finally {
         setBusy(false)
@@ -725,9 +751,9 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
               Enquanto o banimento valer, a conta não é desbloqueada por aqui e os saques dela são recusados na aprovação. Para liberar, desfaça o
               banimento da rede em{' '}
               {canView('antifraude') ? (
-                <Link to="/seguranca/antifraude?aba=bloqueios" className="link">
+                <PageLink to="/seguranca/antifraude?aba=bloqueios" className="link">
                   Anti-fraude › Bloqueios
-                </Link>
+                </PageLink>
               ) : (
                 'Anti-fraude › Bloqueios'
               )}
@@ -821,7 +847,7 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
 
 function RecentTx({ p, list, onNavigate }: { p: Player; list: Transaction[]; onNavigate: () => void }) {
   if (!list.length) {
-    return <EmptyState icon={ReceiptText} title="Sem transações nos últimos 30 dias" description="Depósitos, apostas e ajustes deste jogador aparecem aqui." />
+    return <EmptyState icon={ReceiptText} title="Sem transações no extrato" description="Depósitos, apostas e ajustes deste jogador aparecem aqui." />
   }
   return (
     <div>
@@ -855,9 +881,9 @@ function RecentTx({ p, list, onNavigate }: { p: Player; list: Transaction[]; onN
       </ul>
       <div className="mt-3 flex items-center justify-between gap-2 text-[13px]">
         <span className="text-fg-3">{list.length > 15 ? `Mostrando 15 de ${num(list.length)}` : plural(list.length, 'transação', 'transações')}</span>
-        <Link to={`/dashboard/transacoes?jogador=${p.id}`} onClick={onNavigate} className="link inline-flex items-center gap-1">
+        <PageLink to={`/dashboard/transacoes?jogador=${p.id}`} onClick={onNavigate} className="link inline-flex items-center gap-1">
           Ver extrato completo
-        </Link>
+        </PageLink>
       </div>
     </div>
   )

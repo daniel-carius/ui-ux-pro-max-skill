@@ -31,7 +31,7 @@ const integrations = (over: { password?: unknown; smtp?: Record<string, unknown>
   emailProvider: 'smtp',
   smtp: { host: 'smtp.relay-x2win.com.br', port: 587, user: 'mailer@x2win.bet.br', password: over.password ?? 'Smtp-Real-Password-2026!', fromName: 'X2Win', fromEmail: 'no-reply@x2win.bet.br', secure: true, ...over.smtp },
   mailgun: { connected: true, domain: 'mg.x2win.bet.br', apiKey: over.mailgunKey ?? 'key-8bx2kq7mn41zp0d7r3t9vj5Wq', region: 'us' },
-  sendwork: { connected: true, accountId: 'SW-901277', apiKey: over.sendworkKey ?? 'sk_live_5d1c0e9b77a2Hn4V', smsSender: 'X2WIN', rcsAgent: 'x2win-br' },
+  sendwork: { connected: true, accountId: 'SW-901277', apiKey: over.sendworkKey ?? 'tst_key_5d1c0e9b77a2Hn4V', smsSender: 'X2WIN', rcsAgent: 'x2win-br' },
 })
 
 describe('kv: máscara de segredo (unidades)', () => {

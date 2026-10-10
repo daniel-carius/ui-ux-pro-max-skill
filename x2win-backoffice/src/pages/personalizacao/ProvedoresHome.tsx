@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { Ellipsis, ImageUp, Monitor, Plus, RotateCcw, Search, Smartphone, Trash2 } from 'lucide-react'
 import {
   Alert,
@@ -15,6 +14,7 @@ import {
   Menu,
   Modal,
   PageHeader,
+  PageLink,
   SaveBar,
   Segmented,
   SortableList,
@@ -154,9 +154,9 @@ export default function ProvedoresHome() {
                 tone="warning"
                 title="O bloco Provedores está desligado na Página inicial"
                 action={
-                  <Link to="/settings/home" className="link text-[13px]">
+                  <PageLink to="/settings/home" className="link text-[13px]">
                     Abrir Página inicial
-                  </Link>
+                  </PageLink>
                 }
               >
                 A faixa só aparece na home quando o bloco estiver ligado.

@@ -15,6 +15,7 @@ import {
   Popover,
   Select,
   toast,
+  usePathAccess,
   type Column,
 } from '@/components/ui'
 import { brl, brlCompact, date, dateTime, maskPhone, num, pct, plural, relative } from '@/lib/format'
@@ -57,6 +58,7 @@ function describeFilters(f: Filters) {
 export default function Usuarios() {
   const { can, canEdit } = usePageAccess()
   const navigate = useNavigate()
+  const canOpen = usePathAccess()
   const { items } = usePlayers()
   const [status, setStatus] = useState<StatusFilter>('todos')
   const [filters, setFilters] = useState<Filters>(NO_FILTERS)
@@ -245,7 +247,7 @@ export default function Usuarios() {
           resetKey={`${status}|${JSON.stringify(filters)}`}
           rowActions={(p) => [
             { label: 'Ver resumo do usuário', icon: Eye, onSelect: () => setOpen({ id: p.id, tab: 'resumo' }) },
-            { label: 'Ver transações', icon: ReceiptText, onSelect: () => navigate(`/dashboard/transacoes?jogador=${p.id}`) },
+            { label: 'Ver transações', icon: ReceiptText, onSelect: () => navigate(`/dashboard/transacoes?jogador=${p.id}`), disabled: !canOpen('/dashboard/transacoes').ok },
             { label: 'Copiar ID', icon: Copy, onSelect: () => copyId(p) },
             { divider: true },
             {

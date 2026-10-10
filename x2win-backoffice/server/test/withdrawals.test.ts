@@ -9,6 +9,7 @@ import type { KvContext } from '../src/kv/types'
 import type { AuthContext } from '../src/types'
 import { kvHandlers, RULES_SETTINGS_KEY } from '../src/modules/withdrawals/kv'
 import { seedDemo } from '../src/modules/withdrawals/seed'
+import { seedWithdrawals } from '@/data/finance'
 import { DEMO_STAFF_LABEL, demoCpf, demoPhone } from '../src/modules/kv/demo-seed'
 import { api, createTestApp, createUser, loginAs, sessionCookie } from './helpers'
 
@@ -539,15 +540,17 @@ describe('seed de demonstração', () => {
   it('insere os saques do painel (centavos, PIX cifrado) e não repete', async () => {
     const probe = await createTestApp()
     const msg = await seedDemo(probe)
-    expect(msg).toMatch(/96 saques/)
+    const demo = seedWithdrawals()
+    expect(demo.length).toBeGreaterThan(70)
+    expect(msg).toMatch(new RegExp(`^${demo.length} saques de demonstração`))
     const rows = await probe.db.query<{ amount_cents: number; pix_key_enc: string; pix_key_type: string; status: string }>('select * from withdrawals')
-    expect(rows).toHaveLength(96)
+    expect(rows).toHaveLength(demo.length)
     expect(rows.every((r) => Number.isInteger(r.amount_cents) && r.amount_cents > 0)).toBe(true)
     expect(rows.every((r) => r.pix_key_enc.startsWith('v1.'))).toBe(true)
     expect(rows.filter((r) => ['criado', 'pendente', 'em_analise'].includes(r.status)).length).toBeGreaterThanOrEqual(12)
     expect(probe.cipher.decrypt(rows[0].pix_key_enc).length).toBeGreaterThan(5)
     expect(await seedDemo(probe)).toMatch(/nada a semear/)
-    expect((await probe.db.query('select id from withdrawals')).length).toBe(96)
+    expect((await probe.db.query('select id from withdrawals')).length).toBe(demo.length)
     await probe.close()
   })
 

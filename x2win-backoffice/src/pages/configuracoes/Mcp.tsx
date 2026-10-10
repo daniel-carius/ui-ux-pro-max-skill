@@ -33,6 +33,7 @@ import {
   Modal,
   Mono,
   PageHeader,
+  PageLink,
   PersonCell,
   RadioCards,
   Segmented,
@@ -272,7 +273,7 @@ export default function Mcp() {
             }
           >
             {weak.map((k) => `"${k.name}" (${k.createdByName}, ${roleOfCreator(k)?.name ?? '—'})`).join(' · ')}. Hoje só cria chave quem tem 2FA; estas são anteriores à regra. Peça a ativação
-            do 2FA em <a className="link" href="#/settings/equipe">Equipe</a> ou revogue.
+            do 2FA em <PageLink className="link" to="/settings/equipe">Equipe</PageLink> ou revogue.
           </Alert>
         )}
 

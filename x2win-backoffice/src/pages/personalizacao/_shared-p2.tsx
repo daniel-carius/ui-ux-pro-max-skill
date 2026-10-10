@@ -397,6 +397,17 @@ export function fmtCnpj(v: string) {
   return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`
 }
 
+/**
+ * Linha legal do rodapé ("Razão social · CNPJ 00.000.000/0000-00") só com o que existe em Empresa e licença,
+ * sem separador sobrando; null sem razão social nem CNPJ (o rodapé deixa a linha de fora).
+ */
+export function legalLine(company: Pick<CompanyState, 'legalName' | 'cnpj'>): string | null {
+  const name = company.legalName.trim()
+  const cnpj = company.cnpj.trim()
+  const parts = [name, cnpj ? `CNPJ ${fmtCnpj(cnpj)}` : ''].filter(Boolean)
+  return parts.length ? parts.join(' · ') : null
+}
+
 const CONTACT_ICON: Partial<Record<ContactKey, typeof Phone>> = { phone: Phone, email: Mail, chat: MessagesSquare, hours: Clock, address: MapPin }
 
 export function SocialRow({ links, mobile, highlight }: { links: SocialLink[]; mobile?: boolean; highlight?: boolean }) {
@@ -452,6 +463,7 @@ export function SiteFooter({
   const heading: CSSProperties = { color: PREVIEW.text, fontSize: 13, fontWeight: 700, marginBottom: 12, letterSpacing: '0.02em' }
   const linkStyle: CSSProperties = { color: PREVIEW.muted, fontSize: 13, lineHeight: '26px' }
   const year = new Date().getFullYear()
+  const legal = legalLine(company)
 
   const contactIcon = (key: ContactKey) => {
     if (key === 'whatsapp') return <SocialGlyph network="whatsapp" size={15} />
@@ -555,10 +567,10 @@ export function SiteFooter({
 
       <div style={{ padding: mobile ? '14px 20px 22px' : '14px 56px 22px', borderTop: `1px solid ${PREVIEW.line}`, fontSize: 11.5, color: PREVIEW.faint, textAlign: mobile ? 'center' : 'left', lineHeight: '18px' }}>
         © {year} {footer.companyName || 'X2Win'}
-        {footer.showLegalLine && (
+        {footer.showLegalLine && legal && (
           <>
             {' · '}
-            {company.legalName} · CNPJ {fmtCnpj(company.cnpj)}
+            {legal}
           </>
         )}
         {' · '}Jogue com responsabilidade.

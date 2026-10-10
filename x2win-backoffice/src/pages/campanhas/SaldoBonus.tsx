@@ -13,6 +13,7 @@ import {
   MoneyInput,
   NumberInput,
   PageHeader,
+  PageLink,
   RadioCards,
   SaveBar,
   SettingsSection,
@@ -130,9 +131,9 @@ export default function SaldoBonus() {
           />
           <p className="text-xs text-fg-3">
             Pesos por tipo de jogo:{' '}
-            <a href="#/campanhas/rollover" className="link">
+            <PageLink to="/campanhas/rollover" className="link">
               Campanhas › Rollover
-            </a>
+            </PageLink>
           </p>
         </SettingsSection>
 
@@ -142,7 +143,7 @@ export default function SaldoBonus() {
               <MoneyInput id="sb-maxbet" value={v.maxBetWithBonus} onValueChange={(n) => form.set('maxBetWithBonus', n)} invalid={v.maxBetWithBonus < 0} />
             </Field>
             <Field label="Validade do bônus" htmlFor="sb-valid" error={v.validityDays < 1 || v.validityDays > 365 ? 'Entre 1 e 365 dias.' : null} hint="Bônus não convertido expira depois desse prazo.">
-              <NumberInput id="sb-valid" value={v.validityDays} min={1} max={365} suffix="dias" onValueChange={(n) => form.set('validityDays', Math.round(n))} invalid={v.validityDays < 1 || v.validityDays > 365} />
+              <NumberInput integer id="sb-valid" value={v.validityDays} min={1} max={365} suffix="dias" onValueChange={(n) => form.set('validityDays', Math.round(n))} invalid={v.validityDays < 1 || v.validityDays > 365} />
             </Field>
           </FormGrid>
           {v.maxBetWithBonus === 0 && (

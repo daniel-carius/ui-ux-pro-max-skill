@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { ArrowDownToLine, ArrowRight, BadgeCheck, CircleDollarSign, Link2, ShieldCheck, UserPlus, UserRound, Users, Wallet } from 'lucide-react'
 import {
   Alert,
@@ -11,6 +11,7 @@ import {
   Drawer,
   KpiCard,
   PageHeader,
+  PageLink,
   PersonCell,
   Select,
   Tooltip,
@@ -394,9 +395,9 @@ function LeadDrawer({ lead, onClose }: { lead: Lead | undefined; onClose: () => 
           {lead.affiliate && (
             <p className="mt-3 text-[13px] text-fg-3">
               Cadastro pelo link <span className="font-mono text-fg-2">x2win.bet.br/?ref={lead.affiliate.code}</span>.{' '}
-              <Link to={`/analysis/links?afiliado=${lead.affiliate.id}`} className="link">
+              <PageLink to={`/analysis/links?afiliado=${lead.affiliate.id}`} className="link">
                 Ver desempenho do link
-              </Link>
+              </PageLink>
             </p>
           )}
         </section>
@@ -434,9 +435,9 @@ function LeadDrawer({ lead, onClose }: { lead: Lead | undefined; onClose: () => 
           />
           <p className="mt-3 text-xs text-fg-3">
             Dados completos ficam na ficha do jogador, em{' '}
-            <Link to="/dashboard/usuarios" className="link">
+            <PageLink to="/dashboard/usuarios" className="link">
               Usuários
-            </Link>
+            </PageLink>
             , para cargos com a permissão de ver dados pessoais.
           </p>
         </section>
@@ -449,9 +450,9 @@ function LeadDrawer({ lead, onClose }: { lead: Lead | undefined; onClose: () => 
                 <>
                   Este jogador gera comissão para <strong className="text-fg">{lead.affiliate.name}</strong> conforme a regra do tipo{' '}
                   {TYPE_META[lead.affiliate.type].label} em{' '}
-                  <Link to="/system/affiliates" className="link">
+                  <PageLink to="/system/affiliates" className="link">
                     Comissões
-                  </Link>
+                  </PageLink>
                   .
                 </>
               ) : (

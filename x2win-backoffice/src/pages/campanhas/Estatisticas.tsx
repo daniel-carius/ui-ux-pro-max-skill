@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { Activity, AlertTriangle, CheckCircle2, CircleX, Clock, Gauge, Send, ShieldCheck, Timer, Webhook } from 'lucide-react'
 import { BarsChart, DonutChart, type SeriesSlot } from '@/components/charts'
 import {
@@ -17,6 +16,7 @@ import {
   KpiCard,
   Mono,
   PageHeader,
+  PageLink,
   Select,
   inRange,
   presetRange,
@@ -28,13 +28,13 @@ import {
 import { WEBHOOK_MAX_ATTEMPTS } from '@shared/api'
 import { cn } from '@/lib/cn'
 import { isApiMode } from '@/lib/api'
-import { dateShort, dateTime, num, pct, plural, relative } from '@/lib/format'
+import { date, dateShort, dateTime, num, pct, plural, relative, time } from '@/lib/format'
 import { useWebhookDestinations, useWebhookExecutions } from '@/data/hooks'
 import { NOW } from '@/data/now'
 import { audit } from '@/domain/session'
 import { WEBHOOK_EVENT_LABEL, WEBHOOK_TEST_EVENT, isTestExecution, type WebhookEvent, type WebhookExecution } from '@/domain/webhooks'
 import { daysBetween, hasTokenLikeSegment, latencyTone, maskTokenUrl, prettyJson, rollingRange, webhookStats } from '@/domain/campanhas3-webhooks'
-import { attemptLabel, isDemoExecution, isRealDelivery } from '@/domain/campanhas-webhooks'
+import { attemptLabel, destinationReceives, isDemoExecution, isRealDelivery, retryingAttempts } from '@/domain/campanhas-webhooks'
 import { RateBar, TableFrame } from './_shared-c3'
 
 const EVENT_SLOT: Record<WebhookEvent, SeriesSlot> = {
@@ -99,6 +99,40 @@ export default function Estatisticas() {
     teste: byEvent.filter((e) => matchesStatus(e, 'teste')).length,
   }
   const open = openId ? inPeriod.find((e) => e.id === openId) ?? executions.find((e) => e.id === openId) : undefined
+  // tabela por evento vazia: diz por quê. Sem nenhuma execução real, um período maior não ajuda; com execuções
+  // fora do período, aponta a mais antiga (o seletor também aceita datas livres)
+  const realListed = listed.filter((e) => isRealDelivery(e, API))
+  // entregas que o servidor ainda vai tentar de novo (tentativa mais recente → horário previsto da próxima)
+  const retrying = useMemo(() => retryingAttempts(listed), [listed])
+  const oldest = realListed.reduce<string | null>((min, e) => (min === null || e.at < min ? e.at : min), null)
+  const realDests = destinations.filter((d) => destinationReceives(d, API)).length
+  const eventsEmpty = !realListed.length
+    ? {
+        title: 'Nenhuma execução ainda',
+        description: realDests
+          ? 'Os destinos ativos recebem os eventos quando eles acontecem (saques e depósitos). Testes não contam aqui.'
+          : 'Nenhum destino ativo fora da demonstração. Cadastre um em Webhooks para receber eventos.',
+        icon: Webhook,
+      }
+    : oldest && new Date(oldest).getTime() < range.from.getTime()
+      ? { title: 'Sem execuções no período', description: `Escolha um período maior: a execução mais antiga é de ${date(oldest)}.`, icon: Webhook }
+      : { title: 'Sem execuções no período', description: 'Nenhuma execução entre estas datas.', icon: Webhook }
+  // lista de execuções vazia: mesmo raciocínio, mas aqui os testes contam. Só sugere trocar status ou evento
+  // quando um deles está aplicado e o período tem execuções
+  const oldestListed = listed.reduce<string | null>((min, e) => (min === null || e.at < min ? e.at : min), null)
+  const execsEmpty = !listed.length
+    ? {
+        title: 'Nenhuma execução ainda',
+        description: realDests
+          ? 'Os destinos ativos recebem os eventos quando eles acontecem (saques e depósitos).'
+          : 'Nenhum destino ativo fora da demonstração. Cadastre um em Webhooks para receber eventos.',
+        icon: Webhook,
+      }
+    : !inPeriod.length
+      ? oldestListed && new Date(oldestListed).getTime() < range.from.getTime()
+        ? { title: 'Sem execuções no período', description: `Escolha um período maior: a execução mais antiga é de ${date(oldestListed)}.`, icon: Webhook }
+        : { title: 'Sem execuções no período', description: 'Nenhuma execução entre estas datas.', icon: Webhook }
+      : { title: 'Nenhuma execução neste filtro', description: event === 'todos' ? 'Troque o status.' : status === 'todas' ? 'Troque o evento.' : 'Troque o status ou o evento.', icon: Webhook }
 
   const execColumns: Column<WebhookExecution>[] = [
     {
@@ -191,7 +225,16 @@ export default function Estatisticas() {
     },
     { id: 'success', header: 'Sucesso', sortValue: (r) => (r.total ? r.success / r.total : 0), csv: (r) => r.success, cell: (r) => <RateBar value={r.success} total={r.total} tone="success" /> },
     { id: 'failures', header: 'Falhas', align: 'right', sortValue: (r) => r.failures, cell: (r) => <span className={r.failures ? 'font-semibold text-danger' : 'text-fg-3'}>{num(r.failures)}</span> },
-    { id: 'avg', header: 'Tempo médio', label: 'Tempo médio (ms)', align: 'right', sortValue: (r) => r.avgMs, csv: (r) => r.avgMs, cell: (r) => <Badge tone={latencyTone(r.avgMs)}>{`${num(r.avgMs)} ms`}</Badge> },
+    {
+      id: 'avg',
+      header: 'Tempo médio',
+      label: 'Tempo médio (ms)',
+      align: 'right',
+      sortValue: (r) => r.avgMs ?? -1,
+      csv: (r) => r.avgMs,
+      // sem nenhuma resposta do destino não há tempo para medir
+      cell: (r) => (r.avgMs === null ? <span className="text-xs text-fg-3" title="Nenhuma resposta do destino">—</span> : <Badge tone={latencyTone(r.avgMs)}>{`${num(r.avgMs)} ms`}</Badge>),
+    },
     { id: 'last', header: 'Última execução', sortValue: (r) => r.lastAt ?? '', csv: (r) => (r.lastAt ? dateTime(r.lastAt) : ''), cell: (r) => <span className="whitespace-nowrap text-[13px] text-fg-2">{r.lastAt ? relative(r.lastAt) : '—'}</span> },
   ]
 
@@ -212,9 +255,9 @@ export default function Estatisticas() {
             icon={AlertTriangle}
             title={`${tokenDests.length} ${tokenDests.length === 1 ? 'destino tem' : 'destinos têm'} trecho com cara de token na URL`}
             action={
-              <Link to="/campanhas/webhooks" className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-surface px-2.5 text-[13px] font-medium text-fg ring-1 ring-inset ring-line-strong hover:bg-surface-3">
+              <PageLink to="/campanhas/webhooks" className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-surface px-2.5 text-[13px] font-medium text-fg ring-1 ring-inset ring-line-strong hover:bg-surface-3">
                 <Webhook size={14} aria-hidden /> Revisar webhooks
-              </Link>
+              </PageLink>
             }
           >
             Tokens no caminho da URL aparecem em logs de servidores e proxies. Aqui o trecho fica mascarado ({tokenDests.map((d) => maskTokenUrl(d.url)).join(', ')}). Prefira mandar o token no cabeçalho ou usar a assinatura HMAC.
@@ -256,8 +299,8 @@ export default function Estatisticas() {
             value={stats.avgMs === null ? '—' : `${num(stats.avgMs)} ms`}
             delta={stats.avgMs !== null && prev.avgMs !== null ? delta(stats.avgMs, prev.avgMs) : undefined}
             goodWhenUp={false}
-            hint={stats.p95Ms === null ? 'nenhuma execução no período' : `p95: ${num(stats.p95Ms)} ms`}
-            formula="Média do tempo entre o envio e a resposta do destino. p95 = 95% das chamadas responderam abaixo desse tempo."
+            hint={stats.p95Ms === null ? (stats.total ? 'nenhum destino respondeu' : 'nenhuma execução no período') : `p95: ${num(stats.p95Ms)} ms`}
+            formula="Média do tempo entre o envio e a resposta do destino, só das execuções com resposta HTTP: sem resposta (endereço que não resolve, conexão recusada, tempo esgotado) não há o que medir. p95 = 95% das chamadas responderam abaixo desse tempo."
           />
         </section>
 
@@ -311,7 +354,7 @@ export default function Estatisticas() {
             exportName="webhooks-por-evento"
             onExport={(n) => audit('exportar', 'Estatísticas de webhooks', `Exportação CSV de ${n} eventos (${rangeLabel(range)})`)}
             pageSize={10}
-            empty={{ title: 'Sem execuções no período', description: 'Escolha um período maior.', icon: Webhook }}
+            empty={eventsEmpty}
           />
         </Card>
 
@@ -354,7 +397,7 @@ export default function Estatisticas() {
                 </div>
               </>
             }
-            empty={{ title: 'Nenhuma execução neste filtro', description: 'Troque o status, o evento ou o período.', icon: Webhook }}
+            empty={execsEmpty}
           />
         </TableFrame>
       </div>
@@ -372,7 +415,7 @@ export default function Estatisticas() {
           )
         }
       >
-        {open && <ExecutionDetail e={open} destActive={destById.get(open.destinationId)?.active ?? null} />}
+        {open && <ExecutionDetail e={open} destActive={destById.get(open.destinationId)?.active ?? null} nextAt={retrying.get(open.id) ?? null} />}
       </Drawer>
     </>
   )
@@ -387,7 +430,7 @@ function httpTone(status: number) {
   return status < 300 ? 'text-success' : status < 500 ? 'text-warning' : 'text-danger'
 }
 
-function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: boolean | null }) {
+function ExecutionDetail({ e, destActive, nextAt }: { e: WebhookExecution; destActive: boolean | null; nextAt: number | null }) {
   const body = prettyJson(e.payload)
   const tone = latencyTone(e.durationMs)
   // teste: sai como webhook.teste; a execução fica no evento do destino
@@ -435,7 +478,7 @@ function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: b
         <p className="text-xs text-fg-3">
           {destActive === null
             ? 'O destino foi removido depois desta tentativa: as tentativas que faltavam foram canceladas.'
-            : `O servidor tenta de novo até ${WEBHOOK_MAX_ATTEMPTS} vezes, com intervalos crescentes. Se o endereço ou o evento do destino mudou, ou ele foi removido, as tentativas que faltavam são canceladas (a Auditoria registra quantas).`}
+            : `${nextAt !== null ? `Entrega em nova tentativa: a próxima está prevista para as ${time(nextAt)}. ` : ''}O servidor tenta de novo até ${WEBHOOK_MAX_ATTEMPTS} vezes, com intervalos crescentes. Se o endereço ou o evento do destino mudou, ou ele foi removido, as tentativas que faltavam são canceladas (a Auditoria registra quantas).`}
         </p>
       )}
       {notSent ? (

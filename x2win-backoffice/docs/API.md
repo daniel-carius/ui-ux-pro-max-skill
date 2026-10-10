@@ -339,7 +339,8 @@ Extrato só de inclusão, cifrado e com dados pessoais mascarados. Todo item gra
   estorno referencia a original (`EST-<id>`), só de aposta ou subtração ainda não estornada, no prazo de 15 dias;
 - o servidor define `at`, `by`, `byId`, `balanceBefore`, `balanceAfter`, `playerName`, `playerEmail` (e o jogo, no
   estorno); a lista gravada é itens novos + gravados. O saldo do jogador muda na mesma transação, sem mudar a
-  versão de `geral.jogadores`. Cada lançamento vira um registro `creditar`/`estornar` na auditoria.
+  versão de `geral.jogadores`; estorno de aposta também tira a aposta de `totalBet` e de `betsCount`. Cada
+  lançamento vira um registro `creditar`/`estornar` na auditoria.
 
 ### Importação e correção de base (Superadmin com 2FA ativo; senão 403)
 - `POST /api/kv/geral.jogadores/import` `{ players }` → `{ ok, imported, version }`. Até 5000 por vez; recusa ids

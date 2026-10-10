@@ -1,7 +1,7 @@
 // Free spins: campanhas de giros, custo estimado e concessões (automáticas e manuais).
 import { brl, num } from '@/lib/format'
 import type { Game } from '@/data/catalog'
-import type { CampaignPlayer } from './campanhas-jogadores'
+import type { CampaignPlayer } from './campanhas-jogador'
 
 export type FsTrigger = 'deposito' | 'cadastro' | 'manual' | 'cupom'
 export type FsCampaignStatus = 'agendada' | 'ativa' | 'pausada' | 'encerrada'

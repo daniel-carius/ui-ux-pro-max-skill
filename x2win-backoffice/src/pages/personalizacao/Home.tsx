@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
   Blocks,
@@ -24,6 +23,7 @@ import {
   Button,
   FormFieldset,
   PageHeader,
+  PageLink,
   Progress,
   SaveBar,
   Segmented,
@@ -239,9 +239,9 @@ function BlockRow({ block, warning, onToggle, disabled }: { block: HomeBlock; wa
         <p className="mt-0.5 text-xs leading-4 text-fg-3">
           {info.description}{' '}
           {info.configure && (
-            <Link to={info.configure.to} className="link whitespace-nowrap">
+            <PageLink to={info.configure.to} className="link whitespace-nowrap">
               {info.configure.label}
-            </Link>
+            </PageLink>
           )}
         </p>
       </div>

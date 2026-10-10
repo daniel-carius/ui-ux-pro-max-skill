@@ -41,7 +41,9 @@ import {
   Textarea,
   Tooltip,
   confirm,
+  pathAccessTitle,
   toast,
+  usePathAccess,
   type Column,
 } from '@/components/ui'
 import type { WebhookTestResponse } from '@shared/api'
@@ -151,6 +153,7 @@ export default function Templates() {
   const canTestServer = !API || can('webhooks.editar')
   const { user } = useSession()
   const navigate = useNavigate()
+  const webhooksPage = usePathAccess()('/campanhas/webhooks')
   const templates = useCollection<WebhookTemplate>(TEMPLATE_KEY, seedTemplates)
   const { items: destinations } = useWebhookDestinations()
   const executions = useWebhookExecutions()
@@ -307,7 +310,7 @@ export default function Templates() {
           destinations: dests.length,
         }
         templates.update(r.id, { lastTest: result })
-        audit('testar', `Template ${r.def.label}`, `Envio de teste para ${dests.length ? `${dests.length} destino(s)` : 'a caixa de teste'}: ${allOk ? 'sucesso' : `falha (HTTP ${worst.httpStatus})`}`)
+        audit('testar', `Template ${r.def.label}`, `Envio de teste para ${dests.length ? `${dests.length} destino(s)` : 'a caixa de teste'}: ${allOk ? 'sucesso' : worst.httpStatus ? `falha (HTTP ${worst.httpStatus})` : 'falha (sem resposta)'}`)
         if (allOk) toast.success('Teste enviado', { description: `${targets.length} ${targets.length === 1 ? 'envio recebido' : 'envios recebidos'} · ${result.durationMs} ms em média` })
         else toast.error('O teste falhou', { description: worst.message })
         resolve({ result, targets })
@@ -423,7 +426,7 @@ export default function Templates() {
     <>
       <PageHeader
         actions={
-          <Button icon={Webhook} onClick={() => navigate('/campanhas/webhooks')}>
+          <Button icon={Webhook} onClick={() => navigate('/campanhas/webhooks')} disabled={!webhooksPage.ok} title={pathAccessTitle(webhooksPage)}>
             Destinos HTTP
           </Button>
         }

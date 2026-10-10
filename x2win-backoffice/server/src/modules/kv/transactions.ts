@@ -16,6 +16,8 @@
 //    manda nesses campos é ignorado;
 //  - o saldo do jogador (balanceReal/balanceBonus em geral.jogadores) muda na
 //    mesma transação, sem mudar a versão da lista de jogadores (é campo do servidor);
+//    estorno de aposta também tira a aposta do apostado (totalBet) e do nº de
+//    apostas (betsCount) da ficha;
 //  - a lista gravada é: itens novos (na ordem enviada) + gravados (na ordem gravada);
 //  - nada gravado = extrato vazio: todo item passa pelas regras de lançamento novo
 //    (a gravação pela tela nunca cria uma "base" sem regras).
@@ -292,9 +294,14 @@ export const kvHandlers: KvHandlers = {
             if (balanceAfter < 0) throw fail(`o saldo ${walletLabel(p.wallet)} do jogador é ${brl(balanceBefore)}.`, 'amount')
             const player: JsonObject = { ...base }
             setOwn(player, field, balanceAfter)
+            const orig = p.type === 'estorno' ? storedById.get(p.reference.slice(4)) : undefined
+            // aposta estornada: o valor voltou e ela deixa de contar no apostado e no nº de apostas da ficha
+            if (orig?.type === 'aposta') {
+              if (typeof player.totalBet === 'number') setOwn(player, 'totalBet', round2(Math.max(0, player.totalBet - Math.abs(p.amount))))
+              if (typeof player.betsCount === 'number') setOwn(player, 'betsCount', Math.max(0, player.betsCount - 1))
+            }
             updated.set(p.playerId, player)
 
-            const orig = p.type === 'estorno' ? storedById.get(p.reference.slice(4)) : undefined
             const note = p.note?.trim()
             entries.push({
               id: p.id,
