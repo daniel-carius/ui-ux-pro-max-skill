@@ -227,9 +227,11 @@ function assertSameDestination(incoming: JsonObject, stored: JsonObject, path: (
     const a = hasOwn(incoming, f) ? destinationView(incoming[f]) : undefined
     const b = hasOwn(stored, f) ? destinationView(stored[f]) : undefined
     if (!deepEqual(a, b)) {
+      // reason: o painel reconhece este 400 pelo código, não pelo texto
       throw Errors.invalid(`O destino desta credencial mudou (${f}): digite o segredo novamente.`, {
         path: path.join('.'),
         field: f,
+        reason: 'destino_mudou',
       })
     }
   }

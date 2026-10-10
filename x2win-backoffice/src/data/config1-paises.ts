@@ -1,5 +1,6 @@
 // Países (código ISO 3166-1 alfa-2 e nome em português) e bloqueios de demonstração.
 import { DAY, NOW, iso } from './now'
+import { demoRecords } from './demo'
 
 export type Region = 'Américas' | 'Europa' | 'África' | 'Ásia e Oriente Médio' | 'Oceania'
 
@@ -78,3 +79,6 @@ export function blockedHits30d(code: string): number {
   const base: Record<string, number> = { US: 1840, AR: 1312, PT: 964, PY: 0, GB: 211, ES: 187, FR: 96 }
   return base[code] ?? (hash(code) % 60)
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedBlockedCountries)

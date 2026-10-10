@@ -236,6 +236,8 @@ describe('kv: leitura das chaves com segredos (r3-secret-config-2, r3-secret-con
     const cases: [string, unknown][] = [
       ['senha de 4', integrations({ password: 'a9Z!' })],
       ['senha numérica', integrations({ password: 482913 })],
+      ['senha de demonstração', integrations({ password: 'DEMO-smtp-password' })],
+      ['chave de demonstração', integrations({ sendworkKey: 'DEMO-sendwork-key-123' })],
       ['porta', integrations({ smtp: { port: 70000 } })],
       ['porta texto', integrations({ smtp: { port: '587' } })],
       ['quebra de linha no remetente', integrations({ smtp: { fromName: 'X2Win\r\nBcc: a@b.com' } })],

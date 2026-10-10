@@ -6,8 +6,11 @@
 //    rollover 0–100x, validade 1–90 dias); contadores e autor são do servidor;
 //  - campanhas.cashback: validateCashback (fixo 0,1–50%, rakeback até 5% por categoria…);
 //  - campanhas.free-spins.concessoes: concessão manual montada pelo servidor
-//    (valor do giro, jogo e prazo vêm da campanha; autor e data do servidor;
-//    jogador autoexcluído não recebe); concessão gravada só pode ser cancelada;
+//    (valor do giro, jogo e prazo vêm da campanha; autor e data do servidor);
+//    mesmas recusas do painel (canGrant): jogador autoexcluído, em pausa de jogo
+//    responsável ou bloqueado, campanha encerrada (fim no passado) e acima do limite
+//    por jogador (maxPerPlayer, contando as concessões não canceladas, inclusive as
+//    desta gravação); concessão gravada só pode ser cancelada;
 //  - campanhas.loja.compras: compras vêm da plataforma; o painel só confirma a
 //    entrega ou estorna (pendente → entregue/estornada, entregue → estornada);
 //  - campanhas.niveis: validateLevelsConfig (2–20 níveis, nome até 24 letras sem
@@ -258,6 +261,13 @@ const newGrant = z.looseObject({
   note: z.string('Motivo inválido.').trim().min(3, 'Informe o motivo da concessão.').max(300, 'Motivo com mais de 300 caracteres.'),
 })
 
+/** Status do jogador que não recebe giros (mesmas mensagens do painel, canGrant). */
+const GRANT_REFUSED_STATUS = new Map<unknown, string>([
+  ['autoexcluido', 'jogador autoexcluído não recebe free spins (Lei 14.790/2023).'],
+  ['pausa', 'jogador em pausa de jogo responsável não pode receber giros.'],
+  ['bloqueado', 'jogador bloqueado não pode receber giros.'],
+])
+
 const freeSpinGrants: KvValidator = async ({ t, app, next, stored, auth, now }) => {
   const list = incomingList(next, 'concessões', 200_000)
   const old = storedList(stored)
@@ -279,13 +289,28 @@ const freeSpinGrants: KvValidator = async ({ t, app, next, stored, auth, now }) 
     const playersRow = await loadRow(t, PLAYERS_KEY)
     const players = new Map(storedList(playersRow ? storedValue(playersRow, app.cipher) : []).map((p) => [idOf(p), p]))
     const grantedAt = new Date(now).toISOString()
+    const addedIds = new Set(d.added.map(idOf))
     for (const raw of d.added) {
       const g = parseOr400(newGrant, raw, `Concessão ${idOf(raw)}: `)
       const camp = campaigns.find((c) => c.id === g.campaignId)
       if (!camp) throw Errors.invalid(`Concessão ${g.id}: a campanha de free spins não existe.`, { id: g.id })
       const player = players.get(g.playerId)
       if (!player) throw Errors.invalid(`Concessão ${g.id}: o jogador ${g.playerId} não existe na base de jogadores.`, { id: g.id })
-      if (player.status === 'autoexcluido') throw Errors.invalid(`Concessão ${g.id}: jogador autoexcluído não recebe free spins.`, { id: g.id })
+      const refuse = GRANT_REFUSED_STATUS.get(player.status)
+      if (refuse) throw Errors.invalid(`Concessão ${g.id}: ${refuse}`, { id: g.id })
+      const endAt = typeof camp.endAt === 'string' ? Date.parse(camp.endAt) : Number.NaN
+      if (!Number.isNaN(endAt) && endAt < now) throw Errors.invalid(`Concessão ${g.id}: esta campanha está encerrada.`, { id: g.id })
+      const max = typeof camp.maxPerPlayer === 'number' && Number.isFinite(camp.maxPerPlayer) && camp.maxPerPlayer >= 1 ? Math.floor(camp.maxPerPlayer) : null
+      if (max !== null) {
+        // concessões não canceladas deste jogador nesta campanha, já na lista nova (gravadas e desta gravação até aqui)
+        const already = list.filter((x) => {
+          const item = addedIds.has(idOf(x)) ? built.get(idOf(x)) : x
+          return !!item && item.campaignId === g.campaignId && item.playerId === g.playerId && item.status !== 'cancelada'
+        }).length
+        if (already >= max) {
+          throw Errors.invalid(`Concessão ${g.id}: o jogador já recebeu esta campanha ${already} ${already === 1 ? 'vez' : 'vezes'} (limite: ${max}).`, { id: g.id })
+        }
+      }
       const spinValue = typeof camp.spinValue === 'number' && camp.spinValue > 0 ? camp.spinValue : 0
       const days = typeof camp.validityDays === 'number' && camp.validityDays >= 1 ? Math.min(365, Math.floor(camp.validityDays)) : 7
       built.set(g.id, {

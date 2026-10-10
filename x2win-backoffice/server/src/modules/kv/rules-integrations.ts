@@ -3,11 +3,14 @@
 // 1 a 65535, booleanos), textos sem quebra de linha nem caractere de controle (o
 // remetente vai para o cabeçalho do e-mail) e segredos em texto com pelo menos
 // 8 caracteres (ou vazio = conta sem chave), o mesmo mínimo do campo de segredo
-// do painel. Senha numérica ou curta demais não é gravada.
+// do painel. Senha numérica ou curta demais não é gravada, nem segredo de
+// demonstração ("DEMO-…", público no código do painel).
 import { z } from 'zod'
 import { parseOr400, type KvValidator } from './validate-util'
 
 export const SECRET_MIN_LENGTH = 8
+/** Segredos dos dados de demonstração do painel (ex.: DEMO-smtp-password). */
+const DEMO_SECRET = /^DEMO-/i
 const SECRET_MAX_LENGTH = 512
 
 // eslint-disable-next-line no-control-regex
@@ -24,6 +27,7 @@ const secret = (what: string) =>
     .string(`${what}: o segredo precisa ser texto.`)
     .max(SECRET_MAX_LENGTH, `${what}: no máximo ${SECRET_MAX_LENGTH} caracteres.`)
     .refine((s) => s === '' || s.length >= SECRET_MIN_LENGTH, `${what}: o segredo precisa de pelo menos ${SECRET_MIN_LENGTH} caracteres.`)
+    .refine((s) => !DEMO_SECRET.test(s), `${what}: este é um segredo de demonstração. Digite o segredo real da conta.`)
     .refine((s) => !CONTROL.test(s), `${what}: sem quebras de linha nem caracteres de controle.`)
 
 const integrations = z.strictObject(

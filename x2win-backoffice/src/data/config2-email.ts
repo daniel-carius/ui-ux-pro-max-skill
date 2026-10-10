@@ -1,5 +1,6 @@
 // Templates de e-mail transacional (texto padrão da plataforma).
 import type { EmailTemplate } from '@/domain/config2-email'
+import { apiValue } from './demo'
 import { DAY, NOW, iso } from './now'
 
 export const EMAIL_KEYS = {
@@ -91,7 +92,7 @@ const DEFS: Def[] = [
     id: 'saque-pago',
     name: 'Saque pago',
     category: 'financeiro',
-    trigger: 'Quando o saque é aprovado e o PIX é enviado',
+    trigger: 'Quando o pagamento do saque é confirmado',
     subject: 'Seu saque de {{valor}} foi pago',
     body: 'Olá, {{nome}}.\n\nO PIX de **{{valor}}** foi enviado para a sua chave. Ele costuma cair em poucos minutos.\n\nPedido {{id_transacao}} · {{data}}',
     locked: false,
@@ -156,3 +157,6 @@ export function seedEmailTemplates(): EmailTemplate[] {
     return t
   })
 }
+
+// modo API, sem nada gravado: o catálogo com os textos padrão (sem as edições de demonstração)
+apiValue(seedEmailTemplates, () => DEFS.map((d) => defaultTemplate(d.id)!))

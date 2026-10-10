@@ -14,6 +14,7 @@ import {
   SignedInAs,
   describeAuthError,
   passwordProblem,
+  withBusyRetry,
   type AuthErrorView,
 } from './_shared'
 
@@ -58,7 +59,10 @@ export function ChangePasswordForm({
     setBusy(true)
     setError(null)
     try {
-      const res = await api<LoginResponse>('POST', '/api/auth/password', requireCurrent ? { currentPassword: current, newPassword: next } : { newPassword: next })
+      const body = requireCurrent ? { currentPassword: current, newPassword: next } : { newPassword: next }
+      // servidor ocupado (503): espera o tempo indicado e tenta mais uma vez sozinho
+      const res = await withBusyRetry(() => api<LoginResponse>('POST', '/api/auth/password', body), setError)
+      setError(null)
       await onDone(res)
     } catch (err) {
       setError(describeAuthError(err, 'password'))

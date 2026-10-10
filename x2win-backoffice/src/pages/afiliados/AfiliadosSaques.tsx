@@ -43,9 +43,10 @@ import {
   type Column,
   type Tone,
 } from '@/components/ui'
-import { brl, brlCompact, cpf, dateTime, num, phone, relative } from '@/lib/format'
+import { brl, brlCompact, cpf, dateTime, maskEmail, num, phone, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { DATA_KEYS, useAffiliates } from '@/data/hooks'
+import { isApiMode } from '@/lib/api'
 import { refreshKey, useLoadFailed } from '@/lib/store'
 import {
   AFFILIATE_REJECT_REASONS,
@@ -58,39 +59,50 @@ import type { Affiliate } from '@/data/players'
 import { audit, useSession } from '@/domain/session'
 import {
   AFILIADOS_KEYS,
+  REVEAL_PAYOUT_PERMISSION,
   addBusinessDays,
   isLate,
   maskAccount,
   maskPixKey,
   payAffiliateWithdrawal,
   rejectAffiliateWithdrawal,
+  revealAffiliateWithdrawal,
   useAffiliateWithdrawals,
   useProgramConfig,
   withdrawalIssues,
+  type AffiliatePayoutDetails,
 } from '@/domain/afiliados'
 import { MethodBadge, StatTile, TYPE_META } from './_shared'
+
+/** Modo API: pagar só registra a decisão no servidor (o PIX/TED é feito pelo financeiro). */
+const API = isApiMode()
 
 const STATUS_TONE: Record<AffiliateWithdrawalStatus, Tone> = { pendente: 'warning', pago: 'success', recusado: 'danger' }
 const TABS = ['pendentes', 'pagos', 'recusados', 'todos'] as const
 type TabV = (typeof TABS)[number]
 const TAB_STATUS: Record<TabV, AffiliateWithdrawalStatus | null> = { pendentes: 'pendente', pagos: 'pago', recusados: 'recusado', todos: null }
 
-/** Destino do pagamento, mascarado ou completo. */
-function destination(w: AffiliateWithdrawal, revealed: boolean) {
+/**
+ * Destino do pagamento: mascarado (como vem da lista) ou em claro, com os dados revelados
+ * (`clear`, só no estado da tela; modo API: vindos de POST .../:id/reveal).
+ */
+function destination(w: AffiliateWithdrawal, clear: AffiliatePayoutDetails | null) {
   if (w.method === 'pix') {
-    const key = revealed
-      ? w.pixKeyType === 'CPF'
-        ? cpf(w.pixKey ?? '')
-        : w.pixKeyType === 'Celular'
-          ? phone(w.pixKey ?? '')
-          : w.pixKey
+    const type = clear?.pixKeyType ?? w.pixKeyType
+    const key = clear
+      ? type === 'CPF'
+        ? cpf(clear.pixKey ?? '')
+        : type === 'Celular'
+          ? phone(clear.pixKey ?? '')
+          : clear.pixKey
       : maskPixKey(w.pixKeyType, w.pixKey)
-    return { label: `Chave ${w.pixKeyType}`, value: key ?? '—' }
+    return { label: `Chave ${type}`, value: key || '—' }
   }
   if (w.method === 'ted' && w.bank) {
+    const bank = clear?.bank
     return {
-      label: `${w.bank.bank} · Ag. ${revealed ? w.bank.agency : `••${w.bank.agency.slice(-2)}`}`,
-      value: `C/C ${revealed ? w.bank.account : maskAccount(w.bank.account)}`,
+      label: `${w.bank.bank} · Ag. ${bank ? bank.agency : `••${w.bank.agency.slice(-2)}`}`,
+      value: `C/C ${bank ? bank.account : maskAccount(w.bank.account)}`,
     }
   }
   return { label: 'Conta de jogador', value: 'Saldo real do jogo' }
@@ -102,10 +114,12 @@ export default function AfiliadosSaques() {
   const { items: affiliates } = useAffiliates()
   const cfg = useProgramConfig()
   const [tab, setTab] = useTabParam<TabV>('pendentes', TABS)
-  const [revealed, setRevealed] = useState<Set<string>>(() => new Set())
+  // dados em claro ficam só aqui (memória da tela), nunca na lista nem no navegador
+  const [revealed, setRevealed] = useState<ReadonlyMap<string, AffiliatePayoutDetails>>(() => new Map())
+  const [revealing, setRevealing] = useState<ReadonlySet<string>>(() => new Set())
   const [openId, setOpenId] = useState<string | null>(null)
   const canDecide = can('afiliados-saques.aprovar')
-  const canReveal = can('afiliados-saques.ver-pix')
+  const canReveal = can(REVEAL_PAYOUT_PERMISSION)
   const affById = useMemo(() => new Map(affiliates.map((a) => [a.id, a])), [affiliates])
   // modo API: leitura que falhou mostra o padrão no lugar do servidor; aqui isso vira erro, nunca lista decidível
   const withdrawalsFailed = useLoadFailed(AFILIADOS_KEYS.withdrawals)
@@ -139,18 +153,32 @@ export default function AfiliadosSaques() {
   const refusedMonth = items.filter((w) => w.status === 'recusado' && w.decidedAt && inRange(w.decidedAt, month))
   const sum = (l: AffiliateWithdrawal[]) => l.reduce((s, w) => s + w.amount, 0)
 
-  const reveal = (w: AffiliateWithdrawal) => {
+  const reveal = async (w: AffiliateWithdrawal) => {
     if (!canReveal) {
       toast.error('Seu cargo não pode ver dados do PIX completos', { description: 'Peça a permissão “Ver dados do PIX completos” a um Superadmin.' })
       return
     }
-    if (w.method === 'saldo') return
-    setRevealed((s) => new Set(s).add(w.id))
-    audit('revelar', `Saque de afiliado #${w.id}`, `Dados de pagamento (${PAYOUT_METHOD_LABEL[w.method]}) de ${w.affiliateName} exibidos para conferência`)
+    if (w.method === 'saldo' || revealing.has(w.id)) return
+    setRevealing((s) => new Set(s).add(w.id))
+    try {
+      // modo API: o servidor devolve o dado em claro e registra a revelação na auditoria
+      const r = await revealAffiliateWithdrawal(w)
+      if (!r.ok) {
+        toast.error('Não foi possível mostrar os dados', { description: r.message })
+        return
+      }
+      setRevealed((m) => new Map(m).set(w.id, r.data))
+    } finally {
+      setRevealing((s) => {
+        const n = new Set(s)
+        n.delete(w.id)
+        return n
+      })
+    }
   }
   const hide = (w: AffiliateWithdrawal) =>
-    setRevealed((s) => {
-      const n = new Set(s)
+    setRevealed((m) => {
+      const n = new Map(m)
       n.delete(w.id)
       return n
     })
@@ -171,16 +199,18 @@ export default function AfiliadosSaques() {
 
   const payFlow = async (w: AffiliateWithdrawal) => {
     const issues = withdrawalIssues(w, cfg, affById.get(w.affiliateId))
-    const dest = destination(w, false)
+    const dest = destination(w, revealed.get(w.id) ?? null)
     const ok = await confirm({
       title: `Pagar ${brl(w.amount)} para ${w.affiliateName}?`,
-      description:
-        w.method === 'pix'
+      // modo API: o servidor só registra a decisão (sem gateway nem webhook); o financeiro faz a transferência
+      description: API
+        ? `O pagamento fica registrado e não pode ser desfeito. ${w.method === 'pix' ? 'O PIX é feito' : w.method === 'ted' ? 'A TED é feita' : 'O crédito no saldo do jogo é feito'} pelo financeiro: o painel não transfere.`
+        : w.method === 'pix'
           ? 'O PIX é enviado na hora e não pode ser desfeito.'
           : w.method === 'ted'
             ? 'A TED é agendada para hoje e não pode ser cancelada.'
             : 'O valor entra no saldo real do jogo do afiliado.',
-      confirmLabel: `Pagar ${brl(w.amount)}`,
+      confirmLabel: API ? 'Registrar pagamento' : `Pagar ${brl(w.amount)}`,
       tone: 'success',
       icon: CheckCircle2,
       typeToConfirm: issues.length ? 'PAGAR' : undefined,
@@ -205,7 +235,7 @@ export default function AfiliadosSaques() {
     if (!ok) return
     // o aviso de sucesso só sai com a confirmação do servidor
     const r = await payAffiliateWithdrawal(w, role, user.name)
-    if (r.ok) toast.success('Saque pago', { description: r.message })
+    if (r.ok) toast.success(API ? 'Pagamento registrado' : 'Saque pago', { description: r.message })
     else toast.error('Não foi possível pagar', { description: r.message })
   }
 
@@ -301,12 +331,13 @@ export default function AfiliadosSaques() {
       id: 'pix',
       header: 'Dados do PIX / conta',
       csv: (w) => {
-        const d = destination(w, false)
+        const d = destination(w, null)
         return `${d.label}: ${d.value}`
       },
       cell: (w) => {
-        const open = revealed.has(w.id)
-        const d = destination(w, open)
+        const clear = revealed.get(w.id) ?? null
+        const open = !!clear
+        const d = destination(w, clear)
         return (
           <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
             <div className="min-w-0">
@@ -321,7 +352,7 @@ export default function AfiliadosSaques() {
                   size="sm"
                   icon={Eye}
                   onClick={() => reveal(w)}
-                  disabled={!canReveal}
+                  disabled={!canReveal || revealing.has(w.id)}
                   label={canReveal ? `Revelar dados de ${w.affiliateName} (fica na auditoria)` : 'Revelar exige a permissão “Ver dados do PIX completos”'}
                 />
               ))}
@@ -513,7 +544,8 @@ export default function AfiliadosSaques() {
           w={open}
           affiliate={affById.get(open.affiliateId)}
           history={items.filter((x) => x.affiliateId === open.affiliateId && x.id !== open.id).slice(0, 4)}
-          revealed={revealed.has(open.id)}
+          clear={revealed.get(open.id) ?? null}
+          revealing={revealing.has(open.id)}
           canReveal={canReveal}
           canDecide={canDecide}
           deciding={busy.has(open.id)}
@@ -532,7 +564,8 @@ function WithdrawalDrawer({
   w,
   affiliate,
   history,
-  revealed,
+  clear,
+  revealing,
   canReveal,
   canDecide,
   deciding,
@@ -545,7 +578,9 @@ function WithdrawalDrawer({
   w: AffiliateWithdrawal
   affiliate: Affiliate | undefined
   history: AffiliateWithdrawal[]
-  revealed: boolean
+  /** dados em claro (só em memória) ou null para mascarado */
+  clear: AffiliatePayoutDetails | null
+  revealing: boolean
   canReveal: boolean
   canDecide: boolean
   deciding: boolean
@@ -557,7 +592,8 @@ function WithdrawalDrawer({
 }) {
   const cfg = useProgramConfig()
   const issues = w.status === 'pendente' ? withdrawalIssues(w, cfg, affiliate) : []
-  const dest = destination(w, revealed)
+  const revealed = !!clear
+  const dest = destination(w, clear)
   const deadline = addBusinessDays(new Date(w.createdAt), cfg.payoutDays)
   return (
     <Drawer
@@ -646,9 +682,10 @@ function WithdrawalDrawer({
                         <button
                           type="button"
                           onClick={onReveal}
-                          className="inline-flex items-center gap-1 text-xs font-semibold text-primary-text hover:underline"
+                          disabled={revealing}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-primary-text hover:underline disabled:opacity-60"
                         >
-                          <Eye size={12} aria-hidden /> Revelar
+                          <Eye size={12} aria-hidden /> {revealing ? 'Buscando…' : 'Revelar'}
                         </button>
                       ) : (
                         <span className="text-xs text-fg-3">sem permissão para revelar</span>
@@ -656,8 +693,13 @@ function WithdrawalDrawer({
                   </span>
                 ),
               },
-              ...(w.method === 'ted' && w.bank ? [{ label: 'Titular', value: w.bank.holder }] : []),
-              ...(w.reference ? [{ label: 'Comprovante', value: <Mono className="break-all">{w.reference}</Mono>, full: true }] : []),
+              ...(w.method === 'ted' && w.bank ? [{ label: 'Titular', value: clear?.bank?.holder || w.bank.holder }] : []),
+              {
+                label: 'E-mail do afiliado',
+                value: <span className="break-all">{clear?.affiliateEmail || maskEmail(w.affiliateEmail)}</span>,
+                full: true,
+              },
+              ...(w.reference ? [{ label: API ? 'Referência interna' : 'Comprovante', value: <Mono className="break-all">{w.reference}</Mono>, full: true }] : []),
               ...(w.reason ? [{ label: 'Motivo da recusa', value: w.reason, full: true }] : []),
             ]}
           />

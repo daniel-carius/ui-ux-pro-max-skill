@@ -3,14 +3,24 @@
 // Modo demonstração: a decisão roda aqui e grava no navegador.
 // Modo API: pagar e recusar são do servidor (POST /api/kv/afiliados.saques/:id/pay|reject),
 // que confere o status, grava a lista (e o saldo, na recusa) e audita numa transação.
+// As listas de pedidos e de afiliados chegam sempre mascaradas (chave PIX, conta, titular,
+// e-mail); o dado em claro sai um registro por vez pelas rotas .../:id/reveal, que auditam.
 import type { Affiliate, AffiliateType } from '@/data/players'
 import { seedAffiliates } from '@/data/players'
 import { DATA_KEYS } from '@/data/hooks'
-import { seedAffiliateWithdrawals, type AffiliateWithdrawal, type PayoutMethod, type PeriodStats } from '@/data/afiliados'
+import {
+  PAYOUT_METHOD_LABEL,
+  seedAffiliateWithdrawals,
+  type AffiliateWithdrawal,
+  type BankAccount,
+  type PayoutMethod,
+  type PeriodStats,
+  type PixKeyType,
+} from '@/data/afiliados'
 import { DAY, NOW, startOfDay } from '@/data/now'
 import { slugify } from '@/data/names'
-import { ApiError, api, isApiMode } from '@/lib/api'
-import { brl, maskCpf, maskEmail, maskPhone } from '@/lib/format'
+import { ApiError, api, isApiMode, isVersionConflict } from '@/lib/api'
+import { brl, hasMaskChars, maskCpf, maskEmail, maskPhone } from '@/lib/format'
 import { LOAD_FAILED_MESSAGE, dbSetAndWait, isLoadFailed, patchCache, refreshKey, useCollection, useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { KEYS as SESSION_KEYS, audit } from './session'
@@ -358,6 +368,17 @@ export function maskPixKey(type: AffiliateWithdrawal['pixKeyType'], key: string 
   return `${key.slice(0, 4)}••••${key.slice(-4)}`
 }
 
+/** Chave PIX de afiliado (tipo não informado) mascarada; máscara que veio do servidor fica como está. */
+export function maskAffiliatePixKey(key: string | null | undefined) {
+  if (!key) return '—'
+  if (hasMaskChars(key)) return key
+  if (key.includes('@')) return maskEmail(key)
+  const digits = key.replace(/\D/g, '')
+  if (digits.length === 11 && /^[\d.\-\s]+$/.test(key)) return maskCpf(key)
+  if (digits.length >= 10 && /^[\d()+\-\s]+$/.test(key)) return maskPhone(key)
+  return key.length > 8 ? `${key.slice(0, 4)}••••${key.slice(-4)}` : '••••'
+}
+
 export function maskAccount(account: string) {
   const [num, dv] = account.split('-')
   return `•••${num.slice(-2)}${dv ? `-${dv}` : ''}`
@@ -402,8 +423,10 @@ async function decideOnServer(w: AffiliateWithdrawal, action: 'pay' | 'reject', 
     refreshKey(SESSION_KEYS.audit).catch(() => {})
     return { ok: true, message: res.message }
   } catch (e) {
-    // já decidido por outra pessoa ou pedido que não existe no servidor: mostra a lista real
-    if (e instanceof ApiError && (e.code === 'ja_decidido' || e.status === 404)) refreshKey(AFILIADOS_KEYS.withdrawals).catch(() => {})
+    // já decidido por outra pessoa, pedido que não existe no servidor ou gravações cruzadas (409 versao_desatualizada,
+    // às vezes sem details.version): mostra a lista real
+    if (e instanceof ApiError && (e.code === 'ja_decidido' || e.status === 404 || isVersionConflict(e))) refreshKey(AFILIADOS_KEYS.withdrawals).catch(() => {})
+    if (isVersionConflict(e)) refreshKey(DATA_KEYS.affiliates).catch(() => {})
     const why = e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor.'
     return { ok: false, message: `${why} ${NOT_SAVED}` }
   }
@@ -476,9 +499,106 @@ export async function rejectAffiliateWithdrawal(w: AffiliateWithdrawal, role: Ro
   return { ok: true, message: `${brl(w.amount)} voltaram para o saldo de comissão de ${w.affiliateName}.` }
 }
 
+// ---------- Dados de pagamento em claro (LGPD) ----------
+
+/** Permissão para ver chave PIX, conta e e-mail de afiliados em claro. */
+export const REVEAL_PAYOUT_PERMISSION = 'afiliados-saques.ver-pix'
+
+export type RevealResult<T> = { ok: true; data: T } | { ok: false; message: string }
+
+/** Dados de pagamento de um pedido em claro. Ficam só no estado da tela, nunca gravados. */
+export interface AffiliatePayoutDetails {
+  affiliateEmail: string | null
+  pixKeyType: PixKeyType | null
+  pixKey: string | null
+  bank: BankAccount | null
+}
+
+/** Contato de um afiliado em claro. Fica só no estado da tela, nunca gravado. */
+export interface AffiliateContactDetails {
+  email: string | null
+  pixKey: string | null
+}
+
+/** Resposta de POST /api/kv/afiliados.saques/:id/reveal. */
+interface WithdrawalRevealResponse {
+  ok: true
+  id: string
+  affiliateId: string | null
+  affiliateEmail: string | null
+  method: string | null
+  pixKeyType: string | null
+  pixKey: string | null
+  bank: { bank: string | null; agency: string | null; account: string | null; holder: string | null } | null
+}
+
+/** Resposta de POST /api/kv/crescimento.afiliados/:id/reveal. */
+interface AffiliateRevealResponse {
+  ok: true
+  id: string
+  email: string | null
+  pixKey: string | null
+}
+
+const PIX_KEY_TYPES: readonly PixKeyType[] = ['CPF', 'E-mail', 'Celular', 'Aleatória']
+
+function revealFailure(e: unknown, key: string): { ok: false; message: string } {
+  // registro que não existe mais no servidor: mostra a lista real
+  if (e instanceof ApiError && e.status === 404) refreshKey(key).catch(() => {})
+  return { ok: false, message: e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor.' }
+}
+
+/**
+ * Chave PIX, conta bancária e e-mail de um pedido de saque em claro.
+ * Modo API: o servidor confere a permissão, devolve o dado e audita ('revelar'); a lista continua mascarada.
+ * Modo demonstração: o dado já está no navegador; a revelação vai para a auditoria local.
+ */
+export async function revealAffiliateWithdrawal(w: AffiliateWithdrawal): Promise<RevealResult<AffiliatePayoutDetails>> {
+  if (!isApiMode()) {
+    audit('revelar', `Saque de afiliado #${w.id}`, `Dados de pagamento (${PAYOUT_METHOD_LABEL[w.method]}) de ${w.affiliateName} exibidos para conferência`)
+    return { ok: true, data: { affiliateEmail: w.affiliateEmail, pixKeyType: w.pixKeyType, pixKey: w.pixKey, bank: w.bank } }
+  }
+  try {
+    const res = await api<WithdrawalRevealResponse>('POST', `/api/kv/${encodeURIComponent(AFILIADOS_KEYS.withdrawals)}/${encodeURIComponent(w.id)}/reveal`)
+    refreshKey(SESSION_KEYS.audit).catch(() => {})
+    const type = PIX_KEY_TYPES.find((t) => t === res.pixKeyType) ?? null
+    const b = res.bank
+    return {
+      ok: true,
+      data: {
+        affiliateEmail: res.affiliateEmail,
+        pixKeyType: type,
+        pixKey: res.pixKey,
+        bank: b ? { bank: b.bank ?? w.bank?.bank ?? '', agency: b.agency ?? '', account: b.account ?? '', holder: b.holder ?? '' } : null,
+      },
+    }
+  } catch (e) {
+    return revealFailure(e, AFILIADOS_KEYS.withdrawals)
+  }
+}
+
+/** E-mail e chave PIX de um afiliado em claro (mesmas regras de revealAffiliateWithdrawal). */
+export async function revealAffiliateContact(a: Affiliate): Promise<RevealResult<AffiliateContactDetails>> {
+  if (!isApiMode()) {
+    audit('revelar', `Afiliado #${a.id}`, `E-mail e chave PIX de ${a.name} exibidos para conferência`)
+    return { ok: true, data: { email: a.email, pixKey: a.pixKey || null } }
+  }
+  try {
+    const res = await api<AffiliateRevealResponse>('POST', `/api/kv/${encodeURIComponent(DATA_KEYS.affiliates)}/${encodeURIComponent(a.id)}/reveal`)
+    refreshKey(SESSION_KEYS.audit).catch(() => {})
+    return { ok: true, data: { email: res.email, pixKey: res.pixKey } }
+  } catch (e) {
+    return revealFailure(e, DATA_KEYS.affiliates)
+  }
+}
+
 // ---------- Hooks ----------
 
-export const useAffiliateWithdrawals = () => useCollection(AFILIADOS_KEYS.withdrawals, seedAffiliateWithdrawals)
+/** sem nada gravado no servidor: lista vazia (o mesmo valor sempre, para o store não ver mudança) */
+const NO_WITHDRAWALS = (): AffiliateWithdrawal[] => []
+
+/** Modo API: nunca os pedidos de demonstração (o servidor é a fonte). */
+export const useAffiliateWithdrawals = () => useCollection(AFILIADOS_KEYS.withdrawals, isApiMode() ? NO_WITHDRAWALS : seedAffiliateWithdrawals)
 
 /** Regras de comissão salvas (sempre com os três tipos). */
 export function useCommissionRules(): CommissionRules {

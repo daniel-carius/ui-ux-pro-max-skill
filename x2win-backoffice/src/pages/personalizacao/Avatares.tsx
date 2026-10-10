@@ -31,6 +31,7 @@ import {
   displayName,
   maskName,
   rgba,
+  safeImageSrc,
   tierErrors,
   validateAvatarConfig,
   type AchievementKind,
@@ -43,7 +44,7 @@ import {
   type SitePalette,
 } from '@/domain/personalizacao-p1'
 import { DEFAULT_AVATARS, P1_KEYS, SAMPLE_RANKING, SAMPLE_WINS, avatarArt, medalArt, samplePlayers, type SamplePlayer } from '@/data/personalizacao-p1'
-import { EditorLayout, EditorSection, PreviewJumpButton, PreviewPanel, SiteBlockTitle, useSitePalette } from './_shared-p1'
+import { EditorLayout, EditorSection, PreviewJumpButton, PreviewPanel, SafeImage, SiteBlockTitle, useSitePalette } from './_shared-p1'
 
 const KIND_LABEL: Record<AchievementKind, { title: string; unit: string; hint: string }> = {
   apostas: { title: 'Por apostas', unit: 'apostas', hint: 'Conta todas as apostas feitas no site, no cassino e nos esportes.' },
@@ -244,7 +245,7 @@ export default function Avatares() {
             <ul className={cn('grid grid-cols-3 gap-2 sm:grid-cols-4 2xl:grid-cols-6', !v.allowLibrary && 'opacity-60')} aria-label="Avatares da biblioteca">
               {v.library.map((a) => (
                 <li key={a.id} className="group relative flex flex-col items-center gap-1.5 rounded-xl border border-line bg-surface-2 p-2.5">
-                  <img src={a.image} alt={`Avatar ${a.name}`} className="h-14 w-14 rounded-full object-cover ring-2 ring-surface" />
+                  <SafeImage src={a.image} alt={`Avatar ${a.name}`} className="h-14 w-14 rounded-full object-cover ring-2 ring-surface" />
                   <span className="w-full truncate text-center text-xs text-fg-2">{a.name}</span>
                   <IconButton
                     icon={Trash2}
@@ -318,7 +319,7 @@ export default function Avatares() {
                                 aria-label={`Trocar imagem do nível ${t.name}`}
                                 title="Trocar imagem"
                               >
-                                {t.image ? <img src={t.image} alt="" className="h-full w-full object-cover" /> : <UserRound size={18} className="m-auto text-fg-3" aria-hidden />}
+                                <SafeImage src={t.image} className="h-full w-full object-cover" fallback={<UserRound size={18} className="m-auto text-fg-3" aria-hidden />} />
                                 <span className="absolute inset-0 hidden items-center justify-center bg-fg/50 text-surface group-hover:flex">
                                   <ImageUp size={14} aria-hidden />
                                 </span>
@@ -408,7 +409,7 @@ export default function Avatares() {
           <ImageUpload
             width={96}
             height={96}
-            value={tierImage.image}
+            value={safeImageSrc(tierImage.image)}
             onChange={(url) => setTier(tierImage.id, { image: url })}
             disabled={!canEdit}
             previewClassName="mx-auto w-40"
@@ -458,11 +459,12 @@ function PlayerAvatar({ player, index, cfg, size, palette: pal }: { player: Samp
         {face}
       </span>
       {tier?.image && (
-        <img
+        <SafeImage
           src={tier.image}
           alt={`Selo ${tier.name}`}
           className="absolute -bottom-1 -right-1 rounded-full"
           style={{ width: size * 0.48, height: size * 0.48, boxShadow: `0 0 0 1.5px ${pal.surface}` }}
+          fallback={null}
         />
       )}
     </span>
@@ -585,7 +587,7 @@ function AvatarPreview({ cfg }: { cfg: AvatarConfig }) {
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                   {cfg.library.slice(0, 10).map((a, i) => (
-                    <img
+                    <SafeImage
                       key={a.id}
                       src={a.image}
                       alt={a.name}
@@ -606,11 +608,12 @@ function AvatarPreview({ cfg }: { cfg: AvatarConfig }) {
                     const done = (t.kind === 'apostas' ? me.bets : me.wins) >= t.threshold
                     return (
                       <span key={t.id} className="flex w-[52px] flex-col items-center gap-0.5" title={`${t.name}: ${num(t.threshold)} ${KIND_LABEL[t.kind].unit}`}>
-                        {t.image ? (
-                          <img src={t.image} alt="" className="h-8 w-8 rounded-full" style={done ? undefined : { filter: 'grayscale(1)', opacity: 0.35 }} />
-                        ) : (
-                          <span className="h-8 w-8 rounded-full" style={{ background: p.surface2 }} />
-                        )}
+                        <SafeImage
+                          src={t.image}
+                          className="h-8 w-8 rounded-full"
+                          style={done ? undefined : { filter: 'grayscale(1)', opacity: 0.35 }}
+                          fallback={<span className="h-8 w-8 rounded-full" style={{ background: p.surface2 }} />}
+                        />
                         <span className="w-full truncate text-center text-[8px]" style={{ color: done ? p.text : p.muted }}>
                           {t.name}
                         </span>

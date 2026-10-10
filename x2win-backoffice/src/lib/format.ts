@@ -125,9 +125,22 @@ export function maskEmail(email: string): string {
   return `${user.slice(0, 2)}${'*'.repeat(Math.max(3, user.length - 2))}@${domain}`
 }
 
-/** Esconde segredo mostrando só o final: ••••••••a9F2 */
+/** Tamanho mínimo para a máscara mostrar o fim do segredo (mesma regra do servidor). */
+const SECRET_TAIL_MIN_LENGTH = 16
+
+/** Texto com caracteres de máscara (• ou ***): máscara vinda do servidor, nunca um segredo digitado. */
+export function hasMaskChars(value: string): boolean {
+  return value.includes('•') || value.includes('***')
+}
+
+/**
+ * Esconde segredo como o servidor: ••••••••••a9F2 (só pontos se tiver menos de 16 caracteres).
+ * Valor que já é máscara (modo API) aparece como veio.
+ */
 export function maskSecret(secret: string, visible = 4): string {
   if (!secret) return ''
+  if (hasMaskChars(secret)) return secret
+  if (secret.length < SECRET_TAIL_MIN_LENGTH) return '•'.repeat(10)
   return `${'•'.repeat(10)}${secret.slice(-visible)}`
 }
 

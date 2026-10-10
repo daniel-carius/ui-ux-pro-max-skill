@@ -21,6 +21,7 @@ import webhookRoutes from './modules/webhooks/routes'
 import { kvHandlers as webhookKv } from './modules/webhooks/kv'
 import { startWebhookDispatcher } from './modules/webhooks/dispatcher'
 import kvRoutes from './modules/kv/routes'
+import { startAttackAutoOff } from './modules/kv/attack-auto-off'
 import './types'
 
 /** Maior corpo aceito pelas rotas sem limite próprio (o nginx recusa antes, com client_max_body_size 1m). */
@@ -119,6 +120,9 @@ export async function buildApp({ config, db, logger = false }: BuildOptions): Pr
     const stop = startWebhookDispatcher(app)
     app.addHook('onClose', async () => stop())
   }
+  // modo de ataque com desligamento automático: o servidor desliga no prazo (não depende do painel aberto)
+  const stopAutoOff = startAttackAutoOff(app)
+  app.addHook('onClose', async () => stopAutoOff())
   app.addHook('onClose', async () => {
     if (!db) await database.close()
   })

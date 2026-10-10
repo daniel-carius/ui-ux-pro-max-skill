@@ -34,20 +34,26 @@ import {
   SettingsSection,
   Switch,
   confirm,
+  secretFieldError,
   toast,
   useSettingsForm,
   type Tone,
 } from '@/components/ui'
+import { isApiMode } from '@/lib/api'
 import { dateTime, num, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { useDb } from '@/lib/store'
-import { useAggregators, useProviders } from '@/data/hooks'
+import { DATA_KEYS, useAggregators, useProviders } from '@/data/hooks'
 import { seedSportsbookCredentials, type Aggregator, type SportsbookCredentials } from '@/data/catalog'
 import { CASSINO_KEYS, defaultSyncRules, providerOffers } from '@/data/cassino'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import {
+  aggregatorDestinationChanged,
   effectivePrecedence,
+  isDestinationChangedError,
   planSync,
+  saveCredentialsDirect,
+  secretNeedsRetype,
   simulateConnection,
   validatePlatformId,
   type AggregatorId,
@@ -58,6 +64,11 @@ import {
 import { AGGREGATOR_HUE, BrandMark } from './_shared'
 
 const NO_EDIT = 'Seu cargo pode ver, mas não editar os agregadores'
+const API = isApiMode()
+const NOT_SAVED = 'Erro inesperado ao falar com o servidor. Tente de novo.'
+/** outra pessoa gravou antes: a tela já recarregou o valor do servidor */
+const conflictToast = () =>
+  toast.warning('Outra pessoa alterou estes dados', { description: 'Carregamos a versão mais recente. Confira e salve de novo.', duration: 6000 })
 const OFFERS = providerOffers()
 const WEBHOOK_BASE = 'https://api.x2win.bet.br/webhooks'
 
@@ -183,7 +194,7 @@ interface Draft {
 }
 
 function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggregator; rules: SyncRules; canEdit: boolean }) {
-  const { update } = useAggregators()
+  const { items: aggregators, update } = useAggregators()
   const { items: providers } = useProviders()
   const { user } = useSession()
   const [tests, setTests] = useDb<Record<string, ConnectionResult | undefined>>(CASSINO_KEYS.aggregatorTests, {})
@@ -193,6 +204,9 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
   const [draft, setDraft] = useState<Draft>(saved)
   const [touched, setTouched] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [saving, setSaving] = useState(false)
+  // 400 do servidor para o segredo mantido pela máscara (destino mudou)
+  const [serverError, setServerError] = useState<string | null>(null)
   const [sync, setSync] = useState<{ pct: number; step: number } | null>(null)
   const attempt = useRef(0)
   const timers = useRef<number[]>([])
@@ -205,7 +219,12 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
   const lastSync = syncs[a.id]
   const st = STATUS[a.status]
   const providerCount = providers.filter((p) => p.aggregatorId === a.id).length
-  const busy = testing || !!sync
+  const busy = testing || !!sync || saving
+  // ambiente ou Platform ID mudou: o segredo salvo (a máscara) não vale para o destino novo
+  const destChanged = aggregatorDestinationChanged(draft, a)
+  const needsNew = (f: 'apiSecret' | 'webhookSecret') => secretNeedsRetype(API, a[f], destChanged)
+  const secretError = (f: 'apiSecret' | 'webhookSecret') => secretFieldError(draft[f], { requireNew: needsNew(f), saved: a[f] })
+  const fieldServerError = (f: 'apiSecret' | 'webhookSecret') => (serverError && draft[f] === a[f] ? serverError : null)
 
   const syncBlocker = !canEdit
     ? NO_EDIT
@@ -224,6 +243,11 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
       toast.error('Revise o Platform ID', { description: pidError })
       return
     }
+    const pendingSecret = secretError('apiSecret') ?? secretError('webhookSecret')
+    if (pendingSecret) {
+      toast.error('Digite os segredos de novo', { description: pendingSecret })
+      return
+    }
     if (draft.currentEnv !== a.currentEnv && draft.currentEnv === 'staging') {
       const ok = await confirm({
         title: `Usar o ambiente de staging na ${a.name}?`,
@@ -238,8 +262,29 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
     if (draft.platformId !== a.platformId) changed.push('Platform ID')
     if (draft.apiSecret !== a.apiSecret) changed.push('API secret substituído')
     if (draft.webhookSecret !== a.webhookSecret) changed.push('Webhook secret substituído')
+    if (API) {
+      // grava direto para mostrar o 400 do servidor junto do segredo; o registro da troca só depois da confirmação
+      setSaving(true)
+      setServerError(null)
+      const r = await saveCredentialsDirect<Aggregator[]>(
+        DATA_KEYS.aggregators,
+        aggregators,
+        aggregators.map((x) => (x.id === a.id ? { ...x, ...draft } : x)),
+      )
+      setSaving(false)
+      if (!r.ok) {
+        if (r.conflict) return conflictToast()
+        if (isDestinationChangedError(r.error)) setServerError(r.error!.message)
+        toast.error('Credenciais não salvas', { description: r.error?.message ?? NOT_SAVED, duration: 6000 })
+        return
+      }
+      // o servidor devolve os segredos mascarados: o rascunho passa a ser o salvo
+      const fresh = r.value.find((x) => x.id === a.id)
+      if (fresh) setDraft({ currentEnv: fresh.currentEnv, platformId: fresh.platformId, apiSecret: fresh.apiSecret, webhookSecret: fresh.webhookSecret })
+    } else {
+      update(a.id, { ...draft })
+    }
     const now = new Date().toISOString()
-    update(a.id, { ...draft })
     setMeta((m) => ({
       ...m,
       ...(draft.apiSecret !== a.apiSecret ? { [`${a.id}.apiSecret`]: { at: now, by: user.name } } : {}),
@@ -392,10 +437,22 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
                 invalid={!!pidError && (touched || draft.platformId !== a.platformId)}
               />
             </Field>
-            <SecretField label="API secret" value={draft.apiSecret} disabled={!canEdit} onChange={(v) => setDraft((d) => ({ ...d, apiSecret: v }))} hint={secretHint(meta, `${a.id}.apiSecret`, draft.apiSecret !== a.apiSecret)} />
+            <SecretField
+              label="API secret"
+              value={draft.apiSecret}
+              saved={a.apiSecret}
+              requireNew={needsNew('apiSecret')}
+              error={fieldServerError('apiSecret')}
+              disabled={!canEdit}
+              onChange={(v) => setDraft((d) => ({ ...d, apiSecret: v }))}
+              hint={secretHint(meta, `${a.id}.apiSecret`, draft.apiSecret !== a.apiSecret)}
+            />
             <SecretField
               label="Webhook secret"
               value={draft.webhookSecret}
+              saved={a.webhookSecret}
+              requireNew={needsNew('webhookSecret')}
+              error={fieldServerError('webhookSecret')}
               disabled={!canEdit}
               onChange={(v) => setDraft((d) => ({ ...d, webhookSecret: v }))}
               hint={secretHint(meta, `${a.id}.webhookSecret`, draft.webhookSecret !== a.webhookSecret)}
@@ -466,7 +523,7 @@ function AggregatorBlock({ aggregator: a, rules, canEdit }: { aggregator: Aggreg
           <Button icon={RefreshCw} onClick={runSync} disabled={busy || !!syncBlocker} title={syncBlocker ?? undefined}>
             Sincronizar catálogo
           </Button>
-          <Button variant="primary" icon={Save} onClick={save} disabled={!canEdit || !dirty || busy} title={!canEdit ? NO_EDIT : undefined}>
+          <Button variant="primary" icon={Save} onClick={save} loading={saving} disabled={!canEdit || !dirty || busy} title={!canEdit ? NO_EDIT : undefined}>
             Salvar credenciais
           </Button>
         </div>
@@ -484,15 +541,27 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
   const [meta, setMeta] = useDb<SecretsMeta>(CASSINO_KEYS.secretsMeta, {})
   const [draft, setDraft] = useState(saved)
   const [testing, setTesting] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
   const attempt = useRef(0)
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved)
   const pidError = validatePlatformId(draft.platformId)
   const pubError = draft.publicKey.trim().length < 8 ? 'A chave pública tem pelo menos 8 caracteres.' : null
+  // Platform ID mudou: os segredos salvos (a máscara) não valem para o destino novo
+  const destChanged = draft.platformId.trim() !== saved.platformId.trim()
+  const needsNew = (f: 'privateKey' | 'webhookSecret') => secretNeedsRetype(API, saved[f], destChanged)
+  const secretError = (f: 'privateKey' | 'webhookSecret') => secretFieldError(draft[f], { requireNew: needsNew(f), saved: saved[f] })
+  const fieldServerError = (f: 'privateKey' | 'webhookSecret') => (serverError && draft[f] === saved[f] ? serverError : null)
 
-  const save = () => {
-    if (!canEdit) return
+  const save = async () => {
+    if (!canEdit || saving) return
     if (pidError || pubError) {
       toast.error('Revise os campos do sportsbook', { description: pidError ?? pubError ?? '' })
+      return
+    }
+    const pendingSecret = secretError('privateKey') ?? secretError('webhookSecret')
+    if (pendingSecret) {
+      toast.error('Digite os segredos de novo', { description: pendingSecret })
       return
     }
     const changed: string[] = []
@@ -500,8 +569,23 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
     if (draft.publicKey !== saved.publicKey) changed.push('Public API key')
     if (draft.privateKey !== saved.privateKey) changed.push('Private API key substituída')
     if (draft.webhookSecret !== saved.webhookSecret) changed.push('Webhook secret substituído')
+    if (API) {
+      setSaving(true)
+      setServerError(null)
+      const r = await saveCredentialsDirect<SportsbookCredentials>(CASSINO_KEYS.sportsbook, saved, draft)
+      setSaving(false)
+      if (!r.ok) {
+        if (r.conflict) return conflictToast()
+        if (isDestinationChangedError(r.error)) setServerError(r.error!.message)
+        toast.error('Credenciais não salvas', { description: r.error?.message ?? NOT_SAVED, duration: 6000 })
+        return
+      }
+      // o servidor devolve os segredos mascarados: o rascunho passa a ser o salvo
+      setDraft(r.value)
+    } else {
+      setSaved(draft)
+    }
     const now = new Date().toISOString()
-    setSaved(draft)
     setMeta((m) => ({
       ...m,
       ...(draft.privateKey !== saved.privateKey ? { 'betby.privateKey': { at: now, by: user.name } } : {}),
@@ -538,9 +622,14 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
               <Badge tone="info" icon={Volleyball}>
                 Sportsbook
               </Badge>
-              <Badge tone={saved.status === 'conectado' ? 'success' : 'danger'} dot>
-                {saved.status === 'conectado' ? 'Conectado' : 'Com erro'}
-              </Badge>
+              {/* modo API sem nada gravado: credenciais em branco, ainda não é erro */}
+              {saved.platformId ? (
+                <Badge tone={saved.status === 'conectado' ? 'success' : 'danger'} dot>
+                  {saved.status === 'conectado' ? 'Conectado' : 'Com erro'}
+                </Badge>
+              ) : (
+                <Badge dot>Não configurado</Badge>
+              )}
             </div>
             <p className="mt-0.5 text-[13px] text-fg-3">Apostas esportivas. Tem campos próprios e não tem catálogo para sincronizar.</p>
           </div>
@@ -555,8 +644,26 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
             <Field label="Public API key" htmlFor="sb-pub" required error={draft.publicKey !== saved.publicKey ? pubError : null} hint="Chave pública: usada no navegador do jogador, por isso aparece inteira.">
               <Input id="sb-pub" value={draft.publicKey} className="font-mono" autoComplete="off" onChange={(e) => setDraft((d) => ({ ...d, publicKey: e.target.value.trim() }))} invalid={!!pubError && draft.publicKey !== saved.publicKey} />
             </Field>
-            <SecretField label="Private API key" value={draft.privateKey} disabled={!canEdit} onChange={(v) => setDraft((d) => ({ ...d, privateKey: v }))} hint={secretHint(meta, 'betby.privateKey', draft.privateKey !== saved.privateKey)} />
-            <SecretField label="Webhook secret" value={draft.webhookSecret} disabled={!canEdit} onChange={(v) => setDraft((d) => ({ ...d, webhookSecret: v }))} hint={secretHint(meta, 'betby.webhookSecret', draft.webhookSecret !== saved.webhookSecret)} />
+            <SecretField
+              label="Private API key"
+              value={draft.privateKey}
+              saved={saved.privateKey}
+              requireNew={needsNew('privateKey')}
+              error={fieldServerError('privateKey')}
+              disabled={!canEdit}
+              onChange={(v) => setDraft((d) => ({ ...d, privateKey: v }))}
+              hint={secretHint(meta, 'betby.privateKey', draft.privateKey !== saved.privateKey)}
+            />
+            <SecretField
+              label="Webhook secret"
+              value={draft.webhookSecret}
+              saved={saved.webhookSecret}
+              requireNew={needsNew('webhookSecret')}
+              error={fieldServerError('webhookSecret')}
+              disabled={!canEdit}
+              onChange={(v) => setDraft((d) => ({ ...d, webhookSecret: v }))}
+              hint={secretHint(meta, 'betby.webhookSecret', draft.webhookSecret !== saved.webhookSecret)}
+            />
           </FormGrid>
         </FormFieldset>
         <div className="mt-5 rounded-xl bg-surface-2 p-3.5">
@@ -588,7 +695,7 @@ function SportsbookBlock({ canEdit }: { canEdit: boolean }) {
           <Button icon={Plug} onClick={runTest} loading={testing} disabled={!canEdit} title={!canEdit ? NO_EDIT : undefined}>
             Testar conexão
           </Button>
-          <Button variant="primary" icon={Save} onClick={save} disabled={!canEdit || !dirty || testing} title={!canEdit ? NO_EDIT : undefined}>
+          <Button variant="primary" icon={Save} onClick={save} loading={saving} disabled={!canEdit || !dirty || testing} title={!canEdit ? NO_EDIT : undefined}>
             Salvar credenciais
           </Button>
         </div>

@@ -40,6 +40,7 @@ import {
   type Column,
 } from '@/components/ui'
 import type { KvGetResponse, KvPutResponse } from '@shared/api'
+import { AUDIT_SOURCE_LABEL, isPanelReported } from '@shared/audit'
 import { dateTime, num, plural, relative } from '@/lib/format'
 import { ApiError, api, isApiMode } from '@/lib/api'
 import { patchCache, refreshKey } from '@/lib/store'
@@ -48,7 +49,7 @@ import type { AuditEntry } from '@/data/team'
 import { SESSION_IP, audit, useAudit, usePageAccess, useRoles, useSession, useTeam } from '@/domain/session'
 import { DEFAULT_PANEL_SECURITY, PANEL_SECURITY_KEY, usePanelSecurity, type PanelSecurityState } from '@/domain/system'
 import { allowlistAllows, coveredBy, ipMatchesEntry, parseAllowEntry, rangeOf24, wouldLockOut } from '@/domain/config2-network'
-import { needs2faSetup } from '@/domain/config2-access'
+import { GRANT_PERM, needs2faSetup } from '@/domain/config2-access'
 import { useExternalSave } from './_shared-g'
 
 type Entry = PanelSecurityState['allowlist'][number]
@@ -66,6 +67,12 @@ interface ListSaveError {
   ip: string | null
   lockout: boolean
 }
+
+/** Ligar o 2FA de todos sem ter 2FA encerraria a própria sessão logo depois de salvar (o servidor recusa com 400). */
+const OWN_2FA_FIRST = 'Cadastre o 2FA na sua conta antes de exigir o 2FA de todos: sem ele, a sua sessão seria encerrada logo depois de salvar.'
+
+/** Incluir, retirar ou mudar IPs da lista exige cargos.conceder (o servidor responde 403). */
+const LIST_GRANT_ONLY = 'Só quem concede cargos altera a lista de IPs.'
 
 async function saveAllowlistOnServer(change: (list: Entry[]) => Entry[]): Promise<Entry[]> {
   const path = `/api/kv/${encodeURIComponent(PANEL_SECURITY_KEY)}`
@@ -88,17 +95,23 @@ const TIMEOUTS = [
 ]
 
 export default function SegurancaPainel() {
-  const { canEdit } = usePageAccess()
+  const { canEdit, can } = usePageAccess()
   const { user } = useSession()
+  // a lista pode deixar Superadmins de fora: só quem concede cargos inclui, retira ou muda IPs
+  const canEditList = canEdit && can(GRANT_PERM)
+  const listLockTitle = !canEdit ? undefined : !canEditList ? LIST_GRANT_ONLY : undefined
   const [team] = useTeam()
   const [roles] = useRoles()
   const [auditEntries] = useAudit()
-  const [, setPanel] = usePanelSecurity()
+  const [panelSaved, setPanel] = usePanelSecurity()
   const form = useSettingsForm<PanelSecurityState>(PANEL_SECURITY_KEY, DEFAULT_PANEL_SECURITY, {
     entity: 'Segurança do painel',
     successMessage: 'Segurança do painel salva',
-    validate: (v) => (v.sessionTimeoutMinutes < 5 ? 'O tempo de sessão precisa ser de pelo menos 5 minutos.' : null),
+    validate: (v) => validateSettings(v, panelSaved, user.twoFactor),
   })
+  // modo API: erro do servidor preso ao "Exigir 2FA de todos" (400 com details.field 'enforce2faForAll')
+  const [twoFaError, setTwoFaError] = useState<string | null>(null)
+  const [settingsSaving, setSettingsSaving] = useState(false)
   // modo API: a lista já foi gravada pelo servidor; só atualiza a memória (sem novo PUT)
   const patchSaved = useCallback((next: PanelSecurityState) => patchCache(PANEL_SECURITY_KEY, next, DEFAULT_PANEL_SECURITY), [])
   const applyNow = useExternalSave(form, API ? patchSaved : setPanel)
@@ -112,8 +125,8 @@ export default function SegurancaPainel() {
   const [listError, setListError] = useState<ListSaveError | null>(null)
   const [serverIp, setServerIp] = useState<string | null>(null)
   // modo API: o IP real só o servidor sabe; usa o que ele informou, o do último login ou o da auditoria
-  const myLoginIp = useMemo(() => (API ? auditEntries.find((e) => e.action === 'login' && e.actorId === user.id)?.ip ?? null : null), [auditEntries, user.id])
-  const myIp: string | null = API ? serverIp ?? team.find((m) => m.id === user.id)?.lastIp ?? myLoginIp : SESSION_IP
+  const myLoginIp = useMemo(() => (API ? auditEntries.find((e) => e.action === 'login' && e.actorId === user.id && e.ip)?.ip || null : null), [auditEntries, user.id])
+  const myIp: string | null = API ? serverIp || team.find((m) => m.id === user.id)?.lastIp || myLoginIp : SESSION_IP
   // modo API: com a lista preenchida, quem chega aqui está nela (o servidor recusa os outros IPs)
   const myAllowed = API ? true : allowlistAllows(list, SESSION_IP)
   const firstName = user.name.split(' ')[0]
@@ -156,6 +169,10 @@ export default function SegurancaPainel() {
   }
 
   const add = async (raw: string, lbl: string) => {
+    if (!canEditList) {
+      toast.error('Lista de IPs não alterada', { description: LIST_GRANT_ONLY })
+      return false
+    }
     const p = parseAllowEntry(raw)
     if (!p.ok) {
       toast.error('Endereço inválido', { description: p.error })
@@ -215,6 +232,10 @@ export default function SegurancaPainel() {
 
   const remove = async (e: Entry) => {
     if (listSaving) return
+    if (!canEditList) {
+      toast.error('Lista de IPs não alterada', { description: LIST_GRANT_ONLY })
+      return
+    }
     const next = list.filter((x) => x.id !== e.id)
     const lockOut = !API && wouldLockOut(next, SESSION_IP)
     const opens = next.length === 0
@@ -246,6 +267,56 @@ export default function SegurancaPainel() {
 
   const without2fa = activeTeam.filter((m) => !m.twoFactor)
   const pending = activeTeam.filter((m) => needs2faSetup(m, roles.find((r) => r.id === m.roleId), v.enforce2faForAll))
+  // ligar o 2FA de todos sem ter 2FA: bloqueado (a própria sessão cairia logo depois de salvar)
+  const blockEnforce = !user.twoFactor && !form.saved.enforce2faForAll
+  // só vale enquanto o rascunho liga o 2FA de todos (descartar ou desligar limpa o aviso)
+  const turningOn = v.enforce2faForAll && !form.saved.enforce2faForAll
+  const enforceError = turningOn ? twoFaError ?? (blockEnforce ? OWN_2FA_FIRST : null) : null
+
+  /**
+   * Modo API: grava o 2FA de todos e o tempo de sessão a partir do valor atual do servidor, só se ninguém mudou
+   * estes campos desde que a tela carregou; o 400 do 2FA aparece junto do botão.
+   */
+  const saveSettingsOnServer = async () => {
+    if (settingsSaving) return
+    if (!canEdit) {
+      toast.error('Seu cargo não pode editar esta tela.')
+      return
+    }
+    const err = validateSettings(v, form.saved, user.twoFactor)
+    if (err) {
+      if (err === OWN_2FA_FIRST) setTwoFaError(err)
+      toast.error('Revise os campos', { description: err })
+      return
+    }
+    setSettingsSaving(true)
+    setTwoFaError(null)
+    try {
+      const path = `/api/kv/${encodeURIComponent(PANEL_SECURITY_KEY)}`
+      const cur = await api<KvGetResponse<PanelSecurityState>>('GET', path)
+      if (cur.value.enforce2faForAll !== form.saved.enforce2faForAll || cur.value.sessionTimeoutMinutes !== form.saved.sessionTimeoutMinutes) {
+        await refreshKey(PANEL_SECURITY_KEY)
+        toast.warning('Outra pessoa alterou estes dados', { description: 'Carregamos a versão mais recente. Confira e faça a sua alteração de novo.', duration: 6000 })
+        return
+      }
+      const res = await api<KvPutResponse<PanelSecurityState>>('PUT', path, {
+        value: { ...cur.value, enforce2faForAll: v.enforce2faForAll, sessionTimeoutMinutes: v.sessionTimeoutMinutes },
+        version: cur.version,
+      })
+      patchCache(PANEL_SECURITY_KEY, res.value, DEFAULT_PANEL_SECURITY)
+      await refreshKey(PANEL_SECURITY_KEY)
+      toast.success('Segurança do painel salva', { description: 'A mudança já vale e foi registrada na auditoria.' })
+    } catch (e) {
+      const apiErr = e instanceof ApiError ? e : null
+      const field = (apiErr?.details as { field?: unknown } | undefined)?.field
+      if (field === 'enforce2faForAll') setTwoFaError(apiErr!.message)
+      else if (apiErr?.status === 409) refreshKey(PANEL_SECURITY_KEY).catch(() => {})
+      toast.error('Alterações não salvas', { description: apiErr?.message ?? 'Erro inesperado ao falar com o servidor. Tente de novo.', duration: 6000 })
+    } finally {
+      setSettingsSaving(false)
+    }
+  }
+  const settingsForm = API ? { ...form, save: () => void saveSettingsOnServer(), saving: settingsSaving } : form
 
   return (
     <>
@@ -275,7 +346,7 @@ export default function SegurancaPainel() {
             icon={Globe}
             title="Nenhuma restrição: a equipe entra de qualquer IP"
             action={
-              <Button variant="danger" size="sm" icon={Plus} onClick={addMyIp} disabled={!canEdit || !myIp || listSaving} title={noIpTitle}>
+              <Button variant="danger" size="sm" icon={Plus} onClick={addMyIp} disabled={!canEditList || !myIp || listSaving} title={listLockTitle ?? noIpTitle}>
                 Adicionar meu IP
               </Button>
             }
@@ -285,7 +356,7 @@ export default function SegurancaPainel() {
         )}
         {list.length > 0 && !myAllowed && (
           <Alert tone="danger" icon={ShieldAlert} title="Seu IP atual está fora da lista">
-            Esta sessão continua até expirar, mas um novo login daqui será recusado. Adicione seu IP se este é um local de trabalho.
+            Com a lista valendo, esta sessão é recusada na próxima ação no painel. Adicione seu IP se este é um local de trabalho.
           </Alert>
         )}
 
@@ -299,15 +370,20 @@ export default function SegurancaPainel() {
                 size="sm"
                 icon={MapPin}
                 onClick={addMyIp}
-                disabled={!canEdit || (list.length > 0 && myAllowed) || !myIp || listSaving}
-                title={list.length > 0 && myAllowed ? 'Seu IP já está liberado' : noIpTitle}
+                disabled={!canEditList || (list.length > 0 && myAllowed) || !myIp || listSaving}
+                title={listLockTitle ?? (list.length > 0 && myAllowed ? 'Seu IP já está liberado' : noIpTitle)}
               >
                 Adicionar meu IP
               </Button>
             }
           />
           <CardBody className="space-y-4">
-            <FormFieldset readOnly={!canEdit}>
+            {canEdit && !canEditList && (
+              <Alert tone="info" icon={LockKeyhole}>
+                {LIST_GRANT_ONLY} A lista pode deixar até o Superadmin de fora, por isso fica com quem dá e tira cargos.
+              </Alert>
+            )}
+            <FormFieldset readOnly={!canEditList}>
               <form
                 className="grid gap-3 rounded-xl border border-line bg-surface-2 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-start"
                 onSubmit={(e) => {
@@ -352,7 +428,7 @@ export default function SegurancaPainel() {
                 title={listError.lockout ? 'A mudança bloquearia o seu acesso: nada foi salvo' : 'A lista de IPs não foi salva'}
                 action={
                   listError.lockout && listError.ip && (!list.length || !coveredBy(listError.ip, list)) ? (
-                    <Button size="sm" variant="danger" icon={Plus} onClick={() => add(listError.ip!, `IP de ${firstName}`)} disabled={!canEdit || listSaving}>
+                    <Button size="sm" variant="danger" icon={Plus} onClick={() => add(listError.ip!, `IP de ${firstName}`)} disabled={!canEditList || listSaving}>
                       Adicionar {listError.ip}
                     </Button>
                   ) : undefined
@@ -385,7 +461,7 @@ export default function SegurancaPainel() {
                           {people.length > 0 && ` · usado por ${people.map((m) => m.name.split(' ')[0]).join(', ')}`}
                         </p>
                       </div>
-                      <IconButton icon={Trash2} variant="danger" label={`Remover ${e.value}`} disabled={!canEdit || listSaving} onClick={() => remove(e)} />
+                      <IconButton icon={Trash2} variant="danger" label={`Remover ${e.value}`} disabled={!canEditList || listSaving} onClick={() => remove(e)} />
                     </li>
                   )
                 })}
@@ -402,7 +478,7 @@ export default function SegurancaPainel() {
 
             {blockedTeam.length > 0 && (
               <Alert tone="warning" icon={UserRoundX} title={`${plural(blockedTeam.length, 'pessoa ativa acessou', 'pessoas ativas acessaram')} de fora da lista`}>
-                {blockedTeam.map((m) => `${m.name} (${m.lastIp})`).join(' · ')}. No próximo login, serão recusadas. Libere o IP delas ou confirme que é esperado.
+                {blockedTeam.map((m) => `${m.name} (${m.lastIp})`).join(' · ')}. Se acessarem de novo desse IP, serão recusadas. Libere o IP delas ou confirme que é esperado.
               </Alert>
             )}
           </CardBody>
@@ -414,12 +490,30 @@ export default function SegurancaPainel() {
               label="Exigir 2FA de todos"
               description={v.enforce2faForAll ? 'Ninguém entra só com a senha.' : 'Cada cargo decide se o 2FA é exigido.'}
               checked={v.enforce2faForAll}
-              onChange={(on) => form.set('enforce2faForAll', on)}
+              disabled={blockEnforce && !v.enforce2faForAll}
+              title={blockEnforce && !v.enforce2faForAll ? OWN_2FA_FIRST : undefined}
+              onChange={(on) => {
+                setTwoFaError(null)
+                form.set('enforce2faForAll', on)
+              }}
             />
-            {v.enforce2faForAll !== form.saved.enforce2faForAll && v.enforce2faForAll && (
+            {enforceError ? (
+              <p role="alert" className="flex items-start gap-1.5 text-[13px] font-medium text-danger">
+                <ShieldAlert size={14} className="mt-0.5 shrink-0" aria-hidden />
+                {enforceError}
+              </p>
+            ) : (
+              blockEnforce &&
+              !form.readOnly && (
+                <p className="text-xs text-fg-3">
+                  Para ligar, cadastre antes o 2FA na sua conta: sem ele, a sua sessão seria encerrada logo depois de salvar.
+                </p>
+              )
+            )}
+            {v.enforce2faForAll !== form.saved.enforce2faForAll && v.enforce2faForAll && !enforceError && (
               <Alert tone="info">
                 {pending.length
-                  ? `${pending.map((m) => m.name).join(', ')} precisa${pending.length > 1 ? 'm' : ''} ativar o 2FA no próximo acesso depois de salvar.`
+                  ? `Depois de salvar, ${pending.map((m) => m.name).join(', ')} ${pending.length > 1 ? 'saem' : 'sai'} do painel na próxima ação e cadastra${pending.length > 1 ? 'm' : ''} o 2FA ao entrar de novo.`
                   : 'Toda a equipe ativa já usa 2FA.'}
               </Alert>
             )}
@@ -434,30 +528,68 @@ export default function SegurancaPainel() {
         <RecentLogins list={list} />
       </div>
 
-      <SaveBar form={form} />
+      <SaveBar form={settingsForm} />
     </>
   )
+}
+
+function validateSettings(v: PanelSecurityState, saved: PanelSecurityState, has2fa: boolean): string | null {
+  if (v.sessionTimeoutMinutes < 5) return 'O tempo de sessão precisa ser de pelo menos 5 minutos.'
+  if (v.enforce2faForAll && !saved.enforce2faForAll && !has2fa) return OWN_2FA_FIRST
+  return null
 }
 
 function RecentLogins({ list }: { list: Entry[] }) {
   const [entries] = useAudit()
   const [team] = useTeam()
   const logins = useMemo(() => entries.filter((e) => e.action === 'login').slice(0, 50), [entries])
+  // modo API sem auditoria.ver: o IP dos logins de outras pessoas vem vazio
   const known = (e: AuditEntry) => {
+    if (!e.ip) return true
     const m = team.find((x) => x.id === e.actorId)
     return !m || m.lastIp === e.ip
   }
   const columns: Column<AuditEntry>[] = [
     { id: 'at', header: 'Quando', sortValue: (e) => e.at, cell: (e) => <Tooltip content={dateTime(e.at)}><span className="text-[13px] text-fg-2">{relative(e.at)}</span></Tooltip> },
     { id: 'who', header: 'Pessoa', sortValue: (e) => e.actorName, cell: (e) => <PersonCell name={e.actorName} sub={team.find((m) => m.id === e.actorId)?.email} /> },
-    { id: 'ip', header: 'IP', sortValue: (e) => e.ip, cell: (e) => <span className="inline-flex items-center gap-1.5"><Mono>{e.ip}</Mono>{!known(e) && <Badge tone="info">IP diferente do último</Badge>}</span> },
+    {
+      id: 'ip',
+      header: 'IP',
+      sortValue: (e) => e.ip,
+      cell: (e) =>
+        e.ip ? (
+          <span className="inline-flex items-center gap-1.5">
+            <Mono>{e.ip}</Mono>
+            {!known(e) && <Badge tone="info">IP diferente do último</Badge>}
+          </span>
+        ) : (
+          <span className="text-fg-3">—</span>
+        ),
+    },
     {
       id: 'allowed',
       header: 'Na lista atual',
       cell: (e) =>
-        !list.length ? <Badge>Sem restrição</Badge> : allowlistAllows(list, e.ip) ? <Badge tone="success" dot>Liberado</Badge> : <Badge tone="danger" dot>Seria recusado</Badge>,
+        !list.length ? (
+          <Badge>Sem restrição</Badge>
+        ) : !e.ip ? (
+          <span className="text-fg-3">—</span>
+        ) : allowlistAllows(list, e.ip) ? (
+          <Badge tone="success" dot>Liberado</Badge>
+        ) : (
+          <Badge tone="danger" dot>Seria recusado</Badge>
+        ),
     },
-    { id: 'summary', header: 'Como', cell: (e) => <span className="text-[13px] text-fg-3">{e.summary}</span> },
+    {
+      id: 'summary',
+      header: 'Como',
+      cell: (e) => (
+        <span className="inline-flex flex-wrap items-center gap-1.5 text-[13px] text-fg-3">
+          {e.summary}
+          {isPanelReported(e) && <Badge tone="warning">{AUDIT_SOURCE_LABEL.painel}</Badge>}
+        </span>
+      ),
+    },
   ]
   return (
     <Card>

@@ -80,7 +80,7 @@ import { cn } from '@/lib/cn'
 import { brl, brlCompact, date, dateShort, dateTime, mult, num, pct, plural, relative } from '@/lib/format'
 import { uid } from '@/lib/random'
 import { useCollection, useDb } from '@/lib/store'
-import { useGames, usePlayers, useProviders } from '@/data/hooks'
+import { useGames, useProviders } from '@/data/hooks'
 import { PROMO_KEY, promoDailySeries, seedPromos } from '@/data/campanhas-promocoes'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import {
@@ -114,6 +114,7 @@ import {
   type PromoType,
   type TournamentScoring,
 } from '@/domain/campanhas-promocoes'
+import { useCampaignPlayers } from '@/domain/campanhas-jogadores'
 import { BlockTitle, CalcLine, GamePicker, MiniStat, StepIndicator, fromDateInput, toDateInput } from './_shared-c1'
 
 type Draft = Omit<Promo, 'id' | 'createdAt' | 'createdBy' | 'updatedAt'>
@@ -950,7 +951,8 @@ function PromoEditor({
 }) {
   const { items: games } = useGames()
   const { items: providers } = useProviders()
-  const { items: players } = usePlayers()
+  // demonstração: a base inteira; modo API: só o público de marketing (ativos) e o tamanho da base
+  const { players, total: baseTotal } = useCampaignPlayers()
   const [d, setD] = useState<Draft>(initial)
   const isPublished = !!id && !initial.draft
   const [step, setStep] = useState(0)
@@ -1147,9 +1149,9 @@ function PromoEditor({
                     <p className="text-xs text-fg-3">Alcance estimado</p>
                     <p className="font-display text-2xl font-bold text-fg tnum">{num(reach)} jogadores</p>
                   </div>
-                  <p className="text-xs text-fg-3 tnum">{pct(players.length ? reach / players.length : 0, 0)} da base</p>
+                  <p className="text-xs text-fg-3 tnum">{pct(baseTotal ? reach / baseTotal : 0, 0)} da base</p>
                 </div>
-                <Progress value={reach} max={Math.max(1, players.length)} className="mt-2" label="Parte da base no público" />
+                <Progress value={reach} max={Math.max(1, baseTotal)} className="mt-2" label="Parte da base no público" />
               </div>
               <Alert tone="info" title="Jogo responsável">
                 Jogadores autoexcluídos, em pausa ou bloqueados nunca entram em promoções, qualquer que seja o público (Lei 14.790/2023).

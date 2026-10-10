@@ -1,5 +1,6 @@
 // Configuração inicial dos pixels (demonstração) e o log de testes.
 import type { TrackingConfig, TrackingTestEntry } from '@/domain/config2-tracking'
+import { apiValue, demoRecords } from './demo'
 import { MIN, NOW, iso } from './now'
 
 export const TRACKING_KEYS = {
@@ -9,16 +10,32 @@ export const TRACKING_KEYS = {
 
 const allOn = { pageview: true, signup: true, deposit_amount: true, pix_start: true, deposit_paid: true }
 
-export const DEFAULT_TRACKING: TrackingConfig = {
-  platforms: {
-    meta: { active: true, pixelId: '804512379946120', token: 'DEMO-meta-capi-token-7f3k', testCode: '', events: { ...allOn } },
-    tiktok: { active: true, pixelId: 'C8QK4RJ0DEMO7TQ2M3VA', token: '', testCode: '', events: { ...allOn, deposit_amount: false } },
-    kwai: { active: false, pixelId: '', token: '', testCode: '', events: { pageview: true, signup: true, deposit_amount: false, pix_start: false, deposit_paid: true } },
-    ga4: { active: true, pixelId: 'G-X2W1N7DEMO', token: 'DEMO-ga4-secret-91az', testCode: '', events: { ...allOn } },
+export const DEFAULT_TRACKING: TrackingConfig = apiValue<TrackingConfig>(
+  {
+    platforms: {
+      meta: { active: true, pixelId: '804512379946120', token: 'DEMO-meta-capi-token-7f3k', testCode: '', events: { ...allOn } },
+      tiktok: { active: true, pixelId: 'C8QK4RJ0DEMO7TQ2M3VA', token: '', testCode: '', events: { ...allOn, deposit_amount: false } },
+      kwai: { active: false, pixelId: '', token: '', testCode: '', events: { pageview: true, signup: true, deposit_amount: false, pix_start: false, deposit_paid: true } },
+      ga4: { active: true, pixelId: 'G-X2W1N7DEMO', token: 'DEMO-ga4-secret-91az', testCode: '', events: { ...allOn } },
+    },
+    pageViewPages: ['home', 'cassino', 'jogo', 'esportes', 'promocoes', 'cadastro', 'deposito'],
+    serverSide: true,
   },
-  pageViewPages: ['home', 'cassino', 'jogo', 'esportes', 'promocoes', 'cadastro', 'deposito'],
-  serverSide: true,
-}
+  // modo API, sem nada gravado: nenhum pixel configurado (nunca os IDs e tokens DEMO)
+  (): TrackingConfig => {
+    const off = { active: false, pixelId: '', token: '', testCode: '' }
+    return {
+      platforms: {
+        meta: { ...off, events: { ...allOn } },
+        tiktok: { ...off, events: { ...allOn, deposit_amount: false } },
+        kwai: { ...off, events: { pageview: true, signup: true, deposit_amount: false, pix_start: false, deposit_paid: true } },
+        ga4: { ...off, events: { ...allOn } },
+      },
+      pageViewPages: ['home', 'cassino', 'jogo', 'esportes', 'promocoes', 'cadastro', 'deposito'],
+      serverSide: true,
+    }
+  },
+)
 
 const ago = (m: number) => iso(new Date(NOW.getTime() - m * MIN))
 
@@ -59,3 +76,6 @@ export function seedTrackingTests(): TrackingTestEntry[] {
     },
   ]
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedTrackingTests)

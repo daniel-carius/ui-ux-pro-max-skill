@@ -1,7 +1,8 @@
 // Dados de demonstração do programa de afiliados:
 // - desempenho diário por afiliado (cliques, cadastros, FTD, depósitos e GGR), base da Visão geral;
-// - pedidos de saque de comissão dos afiliados.
+// - pedidos de saque de comissão dos afiliados (chave PIX fictícia, autor genérico; ver ./demo).
 import { createRng } from '@/lib/random'
+import { DEMO_STAFF_LABEL, apiValue, demoPhone, demoRecords } from './demo'
 import { DAY, HOUR, MIN, NOW, dayKey, iso, startOfDay } from './now'
 import { seedAffiliates, type Affiliate, type AffiliateType } from './players'
 
@@ -180,7 +181,8 @@ export interface AffiliateWithdrawal {
 }
 
 const BANKS = ['001 · Banco do Brasil', '104 · Caixa', '237 · Bradesco', '341 · Itaú', '033 · Santander', '260 · Nu Pagamentos', '077 · Banco Inter'] as const
-const DECIDERS = ['Daniel Carius', 'Pedro Santos'] as const
+/** autor das decisões de demonstração: um rótulo genérico (o sorteio continua, para não mudar os demais valores) */
+const DECIDERS = [DEMO_STAFF_LABEL] as const
 export const AFFILIATE_REJECT_REASONS = [
   'Dados do PIX divergentes do titular',
   'Comissão em revisão (suspeita de fraude)',
@@ -232,7 +234,7 @@ export function seedAffiliateWithdrawals(): AffiliateWithdrawal[] {
       ] as const)
       if (kind === 'Celular') {
         pixKeyType = 'Celular'
-        pixKey = `${rng.pick([11, 21, 31, 41, 51, 71, 81, 85])}9${rng.digits(8)}`
+        pixKey = demoPhone(`${rng.pick([11, 21, 31, 41, 51, 71, 81, 85])}9${rng.digits(8)}`)
       } else if (kind === 'Aleatória') {
         pixKeyType = 'Aleatória'
         pixKey = `${rng.id('', 8)}-${rng.id('', 4)}-${rng.id('', 4)}-${rng.id('', 4)}-${rng.id('', 12)}`
@@ -282,6 +284,9 @@ export function seedAffiliateWithdrawals(): AffiliateWithdrawal[] {
   return out
 }
 
+// modo API: os pedidos vêm da plataforma (DEMO_DATA grava estes mesmos); sem nada gravado, lista vazia
+demoRecords(seedAffiliateWithdrawals)
+
 // ---------- Links ----------
 
 export interface LinkState {
@@ -291,12 +296,15 @@ export interface LinkState {
   reason?: string
 }
 
-/** Estado inicial dos links: um link pausado pela equipe para revisão. */
-export const SEED_LINK_STATE: Record<string, LinkState> = {
-  af026: {
-    paused: true,
-    at: iso(new Date(NOW.getTime() - 12 * DAY - 3 * HOUR)),
-    by: 'Daniel Carius',
-    reason: 'Tráfego com cara de robô (cliques sem cadastro)',
+/** Estado inicial dos links: um link pausado pela equipe para revisão (modo API: nenhum, sem nada gravado). */
+export const SEED_LINK_STATE: Record<string, LinkState> = apiValue(
+  {
+    af026: {
+      paused: true,
+      at: iso(new Date(NOW.getTime() - 12 * DAY - 3 * HOUR)),
+      by: DEMO_STAFF_LABEL,
+      reason: 'Tráfego com cara de robô (cliques sem cadastro)',
+    },
   },
-}
+  () => ({}),
+)

@@ -25,7 +25,7 @@ import {
 import { cn } from '@/lib/cn'
 import { dateShort, num } from '@/lib/format'
 import { uid } from '@/lib/random'
-import { useCollection, useDb } from '@/lib/store'
+import { dbSetAndWait, useCollection, useDb } from '@/lib/store'
 import { dayKey } from '@/data/now'
 import { audit, usePageAccess } from '@/domain/session'
 import {
@@ -48,6 +48,7 @@ import {
   PreviewJumpButton,
   PreviewPanel,
   RatioImageUpload,
+  SafeImage,
   SiteBlockTitle,
   SiteHeaderMock,
   SiteLogo,
@@ -122,14 +123,21 @@ export default function Banners() {
     setPreviewPos(pos.id)
   }
 
-  const save = (b: Banner, isNew: boolean) => {
+  const save = async (b: Banner, isNew: boolean) => {
     const pos = BANNER_POSITION_BY_ID.get(b.position)!
+    // modo API: o servidor confere imagem e link antes de gravar; recusa já aparece no aviso com o motivo
+    // e a gaveta continua aberta para corrigir. Demonstração: grava na hora.
+    const saved = await dbSetAndWait<Banner[]>(
+      P1_KEYS.banners,
+      // clique repetido enquanto espera: o banner novo não entra duas vezes
+      (prev) => (isNew && !prev.some((x) => x.id === b.id) ? [...prev, b] : prev.map((x) => (x.id === b.id ? { ...x, ...b } : x))),
+      seedBanners,
+    )
+    if (!saved) return
     if (isNew) {
-      banners.add(b, 'end')
       audit('criar', `Banner "${b.name}"`, `${pos.label} · ${b.active ? 'ativo' : 'pausado'} · ${periodLabel(b)}`)
       toast.success('Banner criado', { description: `${pos.label} · ${BANNER_STATUS_LABEL[bannerStatus(b, today)]}` })
     } else {
-      banners.update(b.id, b)
       audit('editar', `Banner "${b.name}"`, `${pos.label} · ${periodLabel(b)} · link ${linkLabel(b.link)}`)
       toast.success('Banner salvo', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
     }
@@ -290,7 +298,7 @@ export default function Banners() {
                             style={thumbSize(pos)}
                             aria-label={`Editar ${b.name}`}
                           >
-                            {b.image ? <img src={b.image} alt="" className="h-full w-full object-cover" /> : <ImageOff size={14} className="m-auto text-fg-3" aria-hidden />}
+                            <SafeImage src={b.image} className="h-full w-full object-cover" fallback={<ImageOff size={14} className="m-auto text-fg-3" aria-hidden />} />
                           </button>
                           <div className="min-w-0 flex-1">
                             <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-fg">
@@ -598,13 +606,17 @@ function RotatingBanner({ pos, banners, palette: p, className }: { pos: BannerPo
   const cur = banners[idx]
   return (
     <div className={cn('relative overflow-hidden rounded-md', className)} onMouseEnter={() => setPaused(true)} onMouseLeave={() => setPaused(false)}>
-      {cur.image ? (
-        <img src={cur.image} alt={cur.name} className="block w-full object-cover" style={{ aspectRatio: `${pos.width} / ${pos.height}` }} />
-      ) : (
-        <EmptySlot palette={p} style={{ aspectRatio: `${pos.width} / ${pos.height}` }}>
-          Sem imagem
-        </EmptySlot>
-      )}
+      <SafeImage
+        src={cur.image}
+        alt={cur.name}
+        className="block w-full object-cover"
+        style={{ aspectRatio: `${pos.width} / ${pos.height}` }}
+        fallback={
+          <EmptySlot palette={p} style={{ aspectRatio: `${pos.width} / ${pos.height}` }}>
+            Sem imagem
+          </EmptySlot>
+        }
+      />
       {n > 1 && (
         <>
           <button

@@ -15,11 +15,13 @@ import {
   TextLink,
   useSettingsForm,
 } from '@/components/ui'
+import { isPanelReported } from '@shared/audit'
 import { BrandMark } from '@/components/layout/Brand'
 import { date, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useDb } from '@/lib/store'
-import { useAudit } from '@/domain/session'
+import { isApiMode } from '@/lib/api'
+import { refreshKey, useDb } from '@/lib/store'
+import { KEYS, useAudit } from '@/domain/session'
 import { COMPANY_KEY, DEFAULT_COMPANY, type CompanyState } from '@/domain/system'
 import {
   DESCRIPTION_MAX,
@@ -45,6 +47,10 @@ export default function Empresa() {
     entity: ENTITY,
     successMessage: 'Dados da empresa salvos',
     validate: firstCompanyError,
+    // modo API: o servidor grava a linha "Empresa e licença" na auditoria; traz para a "Última alteração"
+    onSaved: () => {
+      if (isApiMode()) refreshKey(KEYS.audit).catch(() => {})
+    },
   })
   const v = form.values
   const errors = companyErrors(v)
@@ -53,7 +59,8 @@ export default function Empresa() {
   const lic = licenseStatus(v.licenseValidUntil)
   const pending = Object.keys(errors).length
   const [audit] = useAudit()
-  const last = audit.find((a) => a.entity === ENTITY)
+  // gravada pelo servidor ao salvar a chave (linhas antigas: "Dados · Empresa e licença"); relatos do painel não contam
+  const last = audit.find((a) => (a.entity === ENTITY || a.entity === `Dados · ${ENTITY}`) && !isPanelReported(a))
 
   return (
     <>
@@ -86,7 +93,7 @@ export default function Empresa() {
           icon={History}
           tone="neutral"
           value={last ? relative(last.at) : '—'}
-          hint={last ? `por ${last.actorName}` : 'nenhuma alteração pelo painel'}
+          hint={last ? `por ${last.actorName}` : 'nenhuma alteração registrada'}
         />
       </section>
 

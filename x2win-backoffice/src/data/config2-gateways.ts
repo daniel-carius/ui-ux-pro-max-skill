@@ -1,6 +1,9 @@
 // Gateways e contas de pagamento (demonstração). Segredos são valores DEMO.
+// Modo API, sem nada gravado: os gateways integrados sem credencial e desligados, só as contas
+// principais (desligadas) e roteamento vazio. Os valores DEMO nunca vão para o servidor.
 import { GATEWAY_NAMES } from '@/domain/system'
 import { callbackUrlFor, type Gateway, type GatewayAccount, type GatewayId, type RoutingConfig } from '@/domain/config2-gateways'
+import { apiValue } from './demo'
 import { DAY, NOW, iso } from './now'
 
 export const GATEWAY_KEYS = {
@@ -53,9 +56,32 @@ export function seedGatewayAccounts(): GatewayAccount[] {
   ]
 }
 
-export const DEFAULT_ROUTING: RoutingConfig = {
-  deposits: { 'ga-pf-main': 60, 'ga-pf-2': 25, 'ga-pn-main': 15 },
-  fallback: ['ga-pf-main', 'ga-pn-main', 'ga-pf-2'],
-  withdrawalAccountId: 'ga-pf-main',
-  withdrawalFallback: true,
-}
+export const DEFAULT_ROUTING: RoutingConfig = apiValue<RoutingConfig>(
+  {
+    deposits: { 'ga-pf-main': 60, 'ga-pf-2': 25, 'ga-pn-main': 15 },
+    fallback: ['ga-pf-main', 'ga-pn-main', 'ga-pf-2'],
+    withdrawalAccountId: 'ga-pf-main',
+    withdrawalFallback: true,
+  },
+  (): RoutingConfig => ({ deposits: {}, fallback: [], withdrawalAccountId: 'ga-pf-main', withdrawalFallback: true }),
+)
+
+const HOLDER = 'X2Win Entretenimento Digital Ltda.'
+const MAIN_ACCOUNT: Record<GatewayId, string> = { pagflex: 'ga-pf-main', pixnow: 'ga-pn-main', brpay: 'ga-br-main' }
+
+apiValue(seedGateways, (): Gateway[] =>
+  GATEWAY_NAMES.map((name, i) => ({
+    id: IDS[i],
+    name,
+    primary: i === 0,
+    active: false,
+    environment: 'producao' as const,
+    clientId: '',
+    secret: '',
+    webhookSecret: '',
+    updatedAt: iso(NOW),
+    updatedBy: '',
+  })),
+)
+apiValue(seedGatewayAccounts, (): GatewayAccount[] => IDS.map((id) => account(MAIN_ACCOUNT[id], id, 'Conta principal', true, false, 0, HOLDER)))
+

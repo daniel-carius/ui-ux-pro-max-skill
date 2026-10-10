@@ -39,17 +39,42 @@ import {
   SettingsSection,
   Switch,
   confirm,
+  secretFieldError,
   toast,
   useSettingsForm,
 } from '@/components/ui'
-import { dateTime, maskSecret, relative } from '@/lib/format'
+import { dateTime, hasMaskChars, maskSecret, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useDb } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
+import { dbSetAndWait, useDb } from '@/lib/store'
 import { EMAIL_KEYS } from '@/data/config2-email'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { DEFAULT_INTEGRATIONS, INTEGRATIONS_KEY, availableChannels, useIntegrations, type IntegrationsState } from '@/domain/system'
 import { PROVIDER_LABEL, validateIntegrations, validateMailgun, validateSendwork, type MailgunDraft, type SendworkDraft } from '@/domain/config2-email'
-import { useExternalSave } from './_shared-g'
+import { errorTarget, isDestinationChangedError, saveKeyDirect, useExternalSave } from './_shared-g'
+
+/**
+ * Modo API: os segredos chegam mascarados. Trocar servidor, porta, usuário ou TLS do SMTP com a senha ainda
+ * mascarada é recusado (400 "O destino desta credencial mudou"): a senha precisa ser digitada de novo.
+ * Quem não vê Integrações recebe só uma parte da chave (remetente e status das contas): esse valor reduzido
+ * nunca é gravado de volta.
+ */
+const API = isApiMode()
+
+/** Valor completo da chave (não a parte reduzida que Disparos, Jornadas e Templates de e-mail recebem). */
+function isFullValue(s: IntegrationsState) {
+  return typeof (s as Partial<IntegrationsState>).smtp?.host === 'string'
+}
+
+/** O destino da senha do SMTP mudou em relação ao salvo? */
+function smtpDestinationChanged(v: IntegrationsState, saved: IntegrationsState) {
+  return v.smtp.host !== saved.smtp.host || v.smtp.port !== saved.smtp.port || v.smtp.user !== saved.smtp.user || v.smtp.secure !== saved.smtp.secure
+}
+
+/** Modo API: senha salva (máscara) com o destino trocado → precisa digitar de novo. */
+function smtpNeedsNewPassword(v: IntegrationsState, saved: IntegrationsState) {
+  return API && hasMaskChars(saved.smtp.password) && smtpDestinationChanged(v, saved)
+}
 
 interface LastTest {
   at: string
@@ -71,15 +96,59 @@ const USES: { icon: typeof Mail; label: string; detail: string; href?: string }[
 export default function Integracoes() {
   const { canEdit } = usePageAccess()
   const { user } = useSession()
-  const [, setIntegrations] = useIntegrations()
-  const form = useSettingsForm<IntegrationsState>(INTEGRATIONS_KEY, DEFAULT_INTEGRATIONS, {
+  const [stored] = useIntegrations()
+  const merged = useSettingsForm<IntegrationsState>(INTEGRATIONS_KEY, DEFAULT_INTEGRATIONS, {
     entity: 'Integrações',
     successMessage: 'Integrações salvas',
-    validate: validateIntegrations,
+    validate: (x) =>
+      validateIntegrations(x) ?? secretFieldError(x.smtp.password, { requireNew: smtpNeedsNewPassword(x, stored), saved: stored.smtp.password }),
   })
-  const applyNow = useExternalSave(form, setIntegrations)
+  // conectar e desconectar gravam na hora; a auditoria e o aviso só depois de o servidor confirmar
+  const applyNow = useExternalSave(merged, (next) => {
+    if (API && !isFullValue(stored)) {
+      toast.error('Alteração não salva', { description: 'Os dados das integrações não vieram completos. Recarregue a página e tente de novo.' })
+      return Promise.resolve(false)
+    }
+    return dbSetAndWait<IntegrationsState>(INTEGRATIONS_KEY, next, DEFAULT_INTEGRATIONS)
+  })
+  // modo API: salvar grava direto na API para mostrar o 400 do destino junto da senha do SMTP
+  const [savingApi, setSavingApi] = useState(false)
+  const [smtpError, setSmtpError] = useState<string | null>(null)
+  const saveOnServer = async () => {
+    if (savingApi) return
+    if (merged.readOnly) {
+      toast.error('Seu cargo não pode editar esta tela.')
+      return
+    }
+    const x = merged.values
+    const err = validateIntegrations(x) ?? secretFieldError(x.smtp.password, { requireNew: smtpNeedsNewPassword(x, merged.saved), saved: merged.saved.smtp.password })
+    if (err) {
+      toast.error('Revise os campos', { description: err })
+      return
+    }
+    if (!isFullValue(merged.saved)) {
+      toast.error('Alteração não salva', { description: 'Os dados das integrações não vieram completos. Recarregue a página e tente de novo.' })
+      return
+    }
+    setSavingApi(true)
+    setSmtpError(null)
+    const r = await saveKeyDirect<IntegrationsState>(INTEGRATIONS_KEY, merged.saved, x)
+    setSavingApi(false)
+    if (r.ok) {
+      toast.success('Integrações salvas', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
+      return
+    }
+    if (r.conflict) {
+      toast.warning('Outra pessoa alterou estes dados', { description: 'Carregamos a versão mais recente. Confira e faça a sua alteração de novo.', duration: 6000 })
+      return
+    }
+    if (isDestinationChangedError(r.error) && errorTarget(r.error).path.startsWith('smtp')) setSmtpError(r.error!.message)
+    toast.error('Alterações não salvas', { description: r.error?.message ?? 'Erro inesperado ao falar com o servidor. Tente de novo.', duration: 6000 })
+  }
+  const form = API ? { ...merged, save: () => void saveOnServer(), saving: savingApi } : merged
   const v = form.values
   const saved = form.saved
+  const smtpRequireNew = smtpNeedsNewPassword(v, saved)
   const channels = availableChannels(saved)
   const [lastTest, setLastTest] = useDb<LastTest | null>(EMAIL_KEYS.lastTest, null)
   const [testing, setTesting] = useState(false)
@@ -107,13 +176,13 @@ export default function Integracoes() {
     }, 800)
   }
 
-  const connectMailgun = (d: MailgunDraft) => {
-    applyNow((prev) => ({ ...prev, mailgun: { connected: true, domain: d.domain.trim().toLowerCase(), apiKey: d.apiKey.trim(), region: d.region } }))
+  const connectMailgun = async (d: MailgunDraft) => {
+    if (!(await applyNow((prev) => ({ ...prev, mailgun: { connected: true, domain: d.domain.trim().toLowerCase(), apiKey: d.apiKey.trim(), region: d.region } })))) return
     audit('ligar', 'Integração Mailgun', `Conta conectada (domínio ${d.domain.trim().toLowerCase()}, região ${d.region === 'us' ? 'EUA' : 'Europa'})`)
     toast.success('Mailgun conectado', { description: 'Agora você pode escolher o Mailgun como provedor de e-mail.' })
   }
-  const connectSendwork = (d: SendworkDraft) => {
-    applyNow((prev) => ({ ...prev, sendwork: { connected: true, accountId: d.accountId.trim(), apiKey: d.apiKey.trim(), smsSender: d.smsSender.trim(), rcsAgent: d.rcsAgent.trim() } }))
+  const connectSendwork = async (d: SendworkDraft) => {
+    if (!(await applyNow((prev) => ({ ...prev, sendwork: { connected: true, accountId: d.accountId.trim(), apiKey: d.apiKey.trim(), smsSender: d.smsSender.trim(), rcsAgent: d.rcsAgent.trim() } })))) return
     audit('ligar', 'Integração SendWork', `Conta ${d.accountId.trim()} conectada; SMS e RCS liberados em Disparos e Jornadas`)
     toast.success('SendWork conectada', { description: 'SMS e RCS já aparecem em Disparos e Jornadas.' })
   }
@@ -135,11 +204,12 @@ export default function Integracoes() {
       icon: Unplug,
     })
     if (!ok) return
-    applyNow((prev) => ({
+    const done = await applyNow((prev) => ({
       ...prev,
       emailProvider: prev.emailProvider === which ? 'smtp' : prev.emailProvider,
       [which]: which === 'mailgun' ? { ...DEFAULT_INTEGRATIONS.mailgun } : { ...DEFAULT_INTEGRATIONS.sendwork },
     }))
+    if (!done) return
     audit('desligar', `Integração ${name}`, `Conta desconectada${inUse ? '; e-mail voltou para o SMTP da plataforma' : ''}`)
     toast.success(`${name} desconectado`)
   }
@@ -261,7 +331,18 @@ export default function Integracoes() {
               <Field label="Usuário" htmlFor="smtp-user">
                 <Input id="smtp-user" value={v.smtp.user} autoComplete="off" onChange={(e) => setSmtp({ user: e.target.value })} />
               </Field>
-              <SecretField label="Senha" value={v.smtp.password} onChange={(pw) => setSmtp({ password: pw })} />
+              <SecretField
+                label="Senha"
+                value={v.smtp.password}
+                saved={saved.smtp.password}
+                requireNew={smtpRequireNew}
+                error={smtpError}
+                onChange={(pw) => {
+                  setSmtpError(null)
+                  setSmtp({ password: pw })
+                }}
+                hint={API && !smtpRequireNew ? 'Cifrada no servidor. Trocar servidor, porta, usuário ou TLS pede a senha de novo.' : undefined}
+              />
             </FormGrid>
             <Switch label="Conexão segura (TLS)" description={v.smtp.secure ? 'Senha e conteúdo trafegam cifrados.' : 'Sem TLS, a senha trafega aberta. Não recomendado.'} checked={v.smtp.secure} onChange={(on) => setSmtp({ secure: on })} />
           </SettingsSection>

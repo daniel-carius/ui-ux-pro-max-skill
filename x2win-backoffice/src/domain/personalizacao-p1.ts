@@ -351,6 +351,55 @@ export function validateHttpsUrl(v: string): string | null {
   return null
 }
 
+// ---------- Endereços gravados que viram link ou imagem na tela ----------
+// O valor vem da base (pode ter sido gravado antes da validação do servidor, ou por outro
+// caminho). Antes de virar href, window.open ou src, passa por estas listas; o que não passa
+// não vira link nem imagem (a tela mostra o texto ou um espaço neutro).
+
+/** Caminho interno do site: uma barra só no início, sem espaço, aspas, barra invertida ou "<>". */
+const SAFE_INTERNAL_PATH = /^\/(?!\/)[^\s\\"'<>`]*$/
+
+function httpsHref(s: string): string | null {
+  if (!/^https:\/\//i.test(s)) return null
+  try {
+    const u = new URL(s)
+    return u.protocol === 'https:' && !!u.hostname && !u.username && !u.password ? u.href : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Link seguro para href ou window.open: https:// ou página interna (/promocoes). Qualquer outro
+ * esquema (javascript:, data:, http:, //host) volta null.
+ */
+export function safeLinkHref(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim()
+  if (!s) return null
+  if (s.startsWith('/')) return SAFE_INTERNAL_PATH.test(s) ? s : null
+  return httpsHref(s)
+}
+
+/**
+ * Imagens enviadas pelo painel (data URL de imagem, como o servidor aceita; SVG dentro de <img>
+ * não roda script nem carrega nada de fora), blob: de arquivo local, arquivos do próprio painel
+ * (/assets/...) e https://. Em produção a CSP (img-src 'self' data: blob:) bloqueia imagem
+ * externa: a tela mostra um espaço neutro quando a imagem não carrega.
+ */
+const SAFE_DATA_IMAGE = /^data:image\/(png|jpe?g|gif|webp|avif|svg\+xml|x-icon|vnd\.microsoft\.icon)[;,]/i
+
+/** Imagem segura para src (ou null). */
+export function safeImageSrc(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim()
+  if (!s) return null
+  if (SAFE_DATA_IMAGE.test(s)) return s
+  if (/^blob:/i.test(s)) return s
+  if (s.startsWith('/')) return SAFE_INTERNAL_PATH.test(s) ? s : null
+  return httpsHref(s)
+}
+
 // ---------- Banners ----------
 
 export type BannerPositionId = 'hero' | 'login' | 'cadastro' | 'compacto' | 'deposito' | 'promocoes' | 'lateral'

@@ -6,9 +6,10 @@ import type { Affiliate, Player, PlayerStatus } from '@/data/players'
 import type { Block, IdentitySignal, LinkKind, SignalKind, SignalSource } from '@/data/seguranca'
 import { createRng } from '@/lib/random'
 import { brl, pct } from '@/lib/format'
-import { dbGet, dbSet } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
+import { dbGet, dbSet, refreshKey } from '@/lib/store'
 import { audit } from './session'
-import { DEFAULT_ATTACK_MODE, SYSTEM_KEYS, type AttackModeState } from './system'
+import { DEFAULT_ATTACK_MODE, DEMO_BYPASS_TOKEN, SYSTEM_KEYS, type AttackModeState } from './system'
 
 // ---------- Anti-fraude: ligações entre contas ----------
 
@@ -38,10 +39,13 @@ export const REFERRAL_BURST = { accounts: 3, hours: 72 } as const
 export function normalizeEmail(email: string) {
   const [rawUser, rawDomain] = email.trim().toLowerCase().split('@')
   if (!rawDomain) return email.trim().toLowerCase()
-  const domain = rawDomain === 'googlemail.com' ? 'gmail.com' : rawDomain
+  // demonstração: e-mails no domínio reservado .invalid (ana@gmail.com.invalid) seguem as regras do domínio real
+  const fake = rawDomain.endsWith('.invalid')
+  const real = fake ? rawDomain.slice(0, -'.invalid'.length) : rawDomain
+  const domain = real === 'googlemail.com' ? 'gmail.com' : real
   let user = rawUser.split('+')[0]
   if (domain === 'gmail.com') user = user.replace(/\./g, '')
-  return `${user}@${domain}`
+  return `${user}@${fake ? `${domain}.invalid` : domain}`
 }
 
 /** Celular só com dígitos, sem o 55 do Brasil. */
@@ -392,10 +396,12 @@ export function accountFlags(
 
 /** Contas que vão ser bloqueadas ao banir a rede (as que ainda não estão). */
 export function banPlan(members: Player[]) {
-  const toBan = members.filter((m) => m.status !== 'bloqueado')
+  // autoexcluído nunca muda de status pelo painel: incluí-lo faria o servidor recusar a gravação inteira (403)
+  const toBan = members.filter((m) => m.status !== 'bloqueado' && m.status !== 'autoexcluido')
+  const selfExcluded = members.filter((m) => m.status === 'autoexcluido')
   const previous: Record<string, PlayerStatus> = {}
   for (const m of toBan) previous[m.id] = m.status
-  return { toBan, previous }
+  return { toBan, previous, selfExcluded }
 }
 
 // ---------- Tráfego simulado ----------
@@ -546,11 +552,16 @@ export function bypassUrl(token: string) {
   return `${SITE_URL}/?acesso=${encodeURIComponent(token)}`
 }
 
-/** Token novo do link de testes (não reaproveita o anterior). */
-export function newBypassToken(random: () => number = Math.random) {
-  let s = ''
-  for (let i = 0; i < 10; i++) s += '0123456789abcdef'[Math.floor(random() * 16)]
-  return `teste-${s}`
+/** Token novo do link de testes (não reaproveita o anterior): 16 bytes aleatórios do navegador. */
+export function newBypassToken() {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return `teste-${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** Link de testes que não pode ir para o servidor: vazio, o da demonstração ou fraco (menos de 20 caracteres). */
+export function weakBypassToken(token: string | undefined) {
+  return !token || token === DEMO_BYPASS_TOKEN || token.length < 20
 }
 
 export function validateMaintenance(v: { message: string; returnAt: string | null }, now: number) {
@@ -565,16 +576,35 @@ export function validateMaintenance(v: { message: string; returnAt: string | nul
   return errors
 }
 
+/** Modo API: última releitura da chave depois do prazo (no máximo uma a cada 10 s). */
+let lastAutoOffRefresh = 0
+
 /**
  * Desliga o modo de ataque quando o tempo escolhido acabou. Roda no painel inteiro
  * (não só na tela de Modo de ataque). Retorna os minutos configurados quando
- * desligou agora, ou null. No servidor real, isto seria um job agendado.
+ * desligou agora, ou null. Modo API: quem desliga é o servidor (a cada 30 s, em nome
+ * de "Sistema", com a linha na auditoria); passado o prazo, o painel só relê a chave.
  */
 export function runAttackAutoOff(now: number = Date.now()): number | null {
   const cur = dbGet<AttackModeState>(SYSTEM_KEYS.attackMode, DEFAULT_ATTACK_MODE)
   if (!shouldAutoOff(cur, now)) return null
+  if (isApiMode()) {
+    if (now - lastAutoOffRefresh >= 10_000) {
+      lastAutoOffRefresh = now
+      refreshKey(SYSTEM_KEYS.attackMode).catch(() => {})
+    }
+    return null
+  }
   const minutes = cur.autoOffMinutes
   dbSet<AttackModeState>(SYSTEM_KEYS.attackMode, (prev) => ({ ...prev, active: false, since: null, activatedBy: null }), DEFAULT_ATTACK_MODE)
   audit('desligar', 'Modo de ataque', `Desligado automaticamente após ${autoOffLabel(minutes)}`)
   return minutes
+}
+
+/**
+ * Resumo de uma linha gravada pelo servidor sem o nome da chave no começo e sem a versão no fim:
+ * "seguranca.modo-ataque — Ligado com cadastro fechado (v3→v4)" → "Ligado com cadastro fechado".
+ */
+export function serverAuditText(summary: string) {
+  return summary.replace(/^[a-z0-9.-]+ — /i, '').replace(/\s*\(v\d+→v\d+\)$/, '')
 }

@@ -24,8 +24,10 @@ import {
   type MenuEntry,
 } from '@/components/ui'
 import { brl, brlCompact, date, dateTime, num, relative, time } from '@/lib/format'
+import { isApiMode } from '@/lib/api'
+import { dbSetAndWait, refreshKey } from '@/lib/store'
 import { DAY, dayKey, startOfDay } from '@/data/now'
-import { usePlayers, useTransactions } from '@/data/hooks'
+import { DATA_KEYS, usePlayers, useTransactions } from '@/data/hooks'
 import { TRANSACTION_TYPE_LABEL, type Transaction, type TransactionType } from '@/data/finance'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import {
@@ -149,9 +151,17 @@ export default function Transacoes() {
     if (!r.confirmed) return
     const p = players.get(t.playerId)
     const est = buildReversalTx(t, p, r.value, user.name)
-    txs.add(est)
-    if (p) players.update(p.id, walletPatch(t.wallet, est.balanceAfter))
-    audit('estornar', `Transação #${t.id}`, `Estorno de ${brl(amount)} para ${t.playerName} (${est.id}). Motivo: ${r.value}`)
+    if (isApiMode()) {
+      // o servidor confere o estorno, devolve o saldo e audita numa transação (o saldo enviado é ignorado);
+      // recusa: o aviso com o motivo já aparece e nada muda
+      const saved = await dbSetAndWait<Transaction[]>(DATA_KEYS.transactions, (prev) => [est, ...prev])
+      if (!saved) return
+      await refreshKey(DATA_KEYS.players)
+    } else {
+      txs.add(est)
+      if (p) players.update(p.id, walletPatch(t.wallet, est.balanceAfter))
+      audit('estornar', `Transação #${t.id}`, `Estorno de ${brl(amount)} para ${t.playerName} (${est.id}). Motivo: ${r.value}`)
+    }
     toast.success('Estorno lançado', { description: `${est.id} devolveu ${brl(amount)} ao saldo ${t.wallet === 'real' ? 'real' : 'bônus'}.` })
   }
 

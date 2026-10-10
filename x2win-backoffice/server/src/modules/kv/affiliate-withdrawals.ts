@@ -2,14 +2,16 @@
 // é gravada só pelo servidor (PUT pela rota de dados → 403). O painel decide cada
 // pedido por estas rotas, registradas sob /api/kv:
 //
-//   POST /api/kv/afiliados.saques/:id/pay              → paga o pedido
+//   POST /api/kv/afiliados.saques/:id/pay              → registra o pagamento
 //   POST /api/kv/afiliados.saques/:id/reject {reason}  → recusa e devolve o valor
 //
 // Exigem afiliados-saques.aprovar. Cada uma roda numa transação que trava a lista:
 //  - só pedido 'pendente' é decidido (senão 409 ja_decidido);
 //  - valor, afiliado, forma de pagamento e dados bancários são os gravados;
-//  - quem decidiu (decidedBy/decidedById), quando (decidedAt) e a referência do
-//    pagamento são definidos pelo servidor;
+//  - quem decidiu (decidedBy/decidedById), quando (decidedAt) e a referência
+//    interna do pagamento (PIX-…, TED-…, CRED-…) são definidos pelo servidor;
+//  - pagar só registra a decisão: não há gateway integrado nem webhook. O PIX, a
+//    TED ou o crédito no saldo do jogo são feitos fora do painel (a mensagem avisa);
 //  - cargo com teto de aprovação (approvalCeiling > 0) não paga acima do teto
 //    (403 teto_excedido);
 //  - na recusa, motivo de 3 a 300 caracteres e o valor reservado volta para o saldo
@@ -50,10 +52,10 @@ const rejectBody = z.object({
 const alreadyDecided = () => new AppError(409, 'ja_decidido', 'Este pedido já foi decidido.')
 const METHOD_LABEL: Record<string, string> = { pix: 'PIX', ted: 'TED', saldo: 'saldo do jogo' }
 
-/** Referência do pagamento (gerada pelo servidor). */
+/** Referência interna do pagamento (gerada pelo servidor; não é o identificador do PIX nem da TED no banco). */
 export function paymentReference(method: unknown, now: Date): string {
-  const rand = randomBytes(6).toString('hex').toUpperCase()
-  if (method === 'pix') return `E${now.toISOString().slice(0, 10).replace(/-/g, '')}${rand}`
+  const rand = `${now.toISOString().slice(0, 10).replace(/-/g, '')}-${randomBytes(6).toString('hex').toUpperCase()}`
+  if (method === 'pix') return `PIX-${rand}`
   if (method === 'ted') return `TED-${rand}`
   return `CRED-${rand}`
 }
@@ -113,7 +115,7 @@ export function registerAffiliateWithdrawalRoutes(app: FastifyInstance) {
         entity: `Saque de afiliado #${id}`,
         summary: auditSummary(
           AFFILIATE_WITHDRAWALS_KEY,
-          `Pagamento de ${brl(amount)} para ${who(item)} (${method}) · pendente → pago · ref. ${reference}`,
+          `Pagamento de ${brl(amount)} para ${who(item)} (${method}) registrado · pendente → pago · ref. interna ${reference}`,
           row.version,
           saved.version,
         ),
@@ -121,10 +123,16 @@ export function registerAffiliateWithdrawalRoutes(app: FastifyInstance) {
       return { item: next, version: saved.version, amount, method }
     })
     reply.header('cache-control', 'no-store')
-    const how = out.item.method === 'pix' ? 'O PIX foi enviado.' : out.item.method === 'ted' ? 'A TED foi agendada.' : 'O valor entrou no saldo do jogo.'
+    // só a decisão foi gravada: a transferência é feita fora do painel
+    const how =
+      out.item.method === 'pix'
+        ? 'Faça o PIX pelo banco ou gateway da operação.'
+        : out.item.method === 'ted'
+          ? 'Faça a TED pelo banco da operação.'
+          : 'Faça o crédito no saldo do jogo pela plataforma.'
     return {
       ok: true as const,
-      message: `${brl(out.amount)} pagos a ${String(out.item.affiliateName ?? 'afiliado')}. ${how}`,
+      message: `Pagamento de ${brl(out.amount)} a ${String(out.item.affiliateName ?? 'afiliado')} registrado. ${how}`,
       withdrawal: redact(out.item, readPolicy(WITHDRAWALS_RULE, auth.perms)),
       version: out.version,
     }

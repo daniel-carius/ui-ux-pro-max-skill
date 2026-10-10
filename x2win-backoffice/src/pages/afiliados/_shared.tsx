@@ -1,12 +1,14 @@
 // Peças visuais do programa de afiliados, usadas também nas telas de Crescimento
 // (Indicados, Links e Comissões).
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
-import { Crown, Gamepad2, Landmark, Megaphone, QrCode, Sprout, X } from 'lucide-react'
+import { Crown, Eye, EyeOff, Gamepad2, Landmark, Lock, Megaphone, QrCode, Sprout, X } from 'lucide-react'
 import type { SeriesSlot } from '@/components/charts'
-import { Badge, Input, type Tone } from '@/components/ui'
-import type { AffiliateType } from '@/data/players'
+import { Badge, Button, DescriptionList, Input, Mono, toast, type Tone } from '@/components/ui'
+import type { Affiliate, AffiliateType } from '@/data/players'
 import { PAYOUT_METHOD_LABEL, type PayoutMethod } from '@/data/afiliados'
+import { maskAffiliatePixKey, revealAffiliateContact, type AffiliateContactDetails } from '@/domain/afiliados'
+import { maskEmail } from '@/lib/format'
 import { cn } from '@/lib/cn'
 
 export const TYPE_META: Record<AffiliateType, { label: string; icon: LucideIcon; tone: Tone; slot: SeriesSlot; description: string }> = {
@@ -133,5 +135,63 @@ export function StatTile({ label, value, sub, className }: { label: string; valu
       <p className="mt-0.5 truncate font-display text-lg font-bold text-fg tnum">{value}</p>
       {sub && <p className="truncate text-xs text-fg-3">{sub}</p>}
     </div>
+  )
+}
+
+/**
+ * E-mail e chave PIX do afiliado. A lista vem mascarada; quem tem “Ver dados do PIX completos”
+ * revela um afiliado por vez (modo API: o servidor devolve o dado e registra na auditoria).
+ * O dado em claro fica só no estado deste bloco: some ao ocultar ou fechar a gaveta.
+ * Use com key={afiliado.id} para não levar o dado revelado de um afiliado para outro.
+ */
+export function AffiliateContact({ affiliate: a, canReveal }: { affiliate: Affiliate; canReveal: boolean }) {
+  const [clear, setClear] = useState<AffiliateContactDetails | null>(null)
+  const [busy, setBusy] = useState(false)
+  const reveal = async () => {
+    if (!canReveal || busy) return
+    setBusy(true)
+    try {
+      const r = await revealAffiliateContact(a)
+      if (r.ok) setClear(r.data)
+      else toast.error('Não foi possível mostrar os dados', { description: r.message })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <section>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-fg">Contato e pagamento</h3>
+        {clear ? (
+          <Button size="xs" variant="ghost" icon={EyeOff} onClick={() => setClear(null)}>
+            Ocultar
+          </Button>
+        ) : (
+          <Button
+            size="xs"
+            variant="soft"
+            icon={Eye}
+            onClick={reveal}
+            loading={busy}
+            disabled={!canReveal}
+            title={!canReveal ? 'Revelar exige a permissão “Ver dados do PIX completos”' : undefined}
+          >
+            Revelar dados
+          </Button>
+        )}
+      </div>
+      <DescriptionList
+        items={[
+          { label: 'E-mail', value: <span className="break-all">{clear ? clear.email || '—' : maskEmail(a.email)}</span> },
+          { label: 'Chave PIX', value: <Mono className="break-all text-fg">{clear ? clear.pixKey || '—' : maskAffiliatePixKey(a.pixKey)}</Mono> },
+        ]}
+      />
+      {!clear && (
+        <p className="mt-3 flex items-center gap-1.5 text-xs text-fg-3">
+          <Lock size={12} aria-hidden />
+          {canReveal ? 'Revelar fica registrado na auditoria (LGPD).' : 'Seu cargo vê os dados mascarados (LGPD).'}
+        </p>
+      )}
+    </section>
   )
 }

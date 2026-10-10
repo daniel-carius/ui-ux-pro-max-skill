@@ -9,6 +9,7 @@ import type { Mission } from '@/domain/campanhas2-missoes'
 import type { Tournament, TournamentPrize } from '@/domain/campanhas2-torneios'
 import { DAY, HOUR, NOW, dayKey, daysAgo, iso } from './now'
 import { seedPlayers } from './players'
+import { demoRecords } from './demo'
 
 const inDays = (n: number) => new Date(NOW.getTime() + n * DAY)
 
@@ -440,3 +441,6 @@ export function seedTournaments(): Tournament[] {
     },
   ]
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedWheelSpins)

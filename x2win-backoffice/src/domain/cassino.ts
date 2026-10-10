@@ -1,5 +1,9 @@
 // Regras de negócio do módulo Cassino (catálogo, vitrines e agregadores).
 // Funções puras: a tela chama, e a recriação com back-end reaproveita.
+// Exceção: saveCredentialsDirect (modo API), que grava credenciais direto na API para a
+// tela mostrar o erro do servidor junto do campo do segredo.
+import { isDestinationChanged, type ApiError } from '@/lib/api'
+import { hasMaskChars } from '@/lib/format'
 import { createRng } from '@/lib/random'
 import type { Aggregator, Game, GameCategory, Provider } from '@/data/catalog'
 import { gameStatsForPeriod, getDailySeries, sumSeries } from '@/data/metrics'
@@ -199,6 +203,35 @@ export function validatePlatformId(v: string): string | null {
   if (!s) return 'Informe o Platform ID.'
   if (!/^[a-z0-9][a-z0-9-]{2,39}$/i.test(s)) return 'Use de 3 a 40 letras, números ou hífen.'
   return null
+}
+
+// ---------- Credenciais (segredo guardado e destino) ----------
+
+/**
+ * O segredo salvo (a máscara do modo API) só vale para o mesmo destino. Mudou o ambiente, o
+ * Platform ID, a URL base ou a lista de ambientes, o servidor recusa manter o segredo pela
+ * máscara (400 "O destino desta credencial mudou"): o segredo precisa ser digitado de novo.
+ * `apiMode`: só no modo API o valor salvo é a máscara; na demonstração o segredo está no navegador.
+ */
+export function secretNeedsRetype(apiMode: boolean, savedSecret: string, destinationChanged: boolean): boolean {
+  return apiMode && destinationChanged && !!savedSecret && hasMaskChars(savedSecret)
+}
+
+/** Destino do agregador mudou (ambiente atual, Platform ID, URLs dos ambientes)? */
+export function aggregatorDestinationChanged(
+  next: Pick<Aggregator, 'currentEnv' | 'platformId'> & Partial<Pick<Aggregator, 'environments'>>,
+  saved: Pick<Aggregator, 'currentEnv' | 'platformId' | 'environments'>,
+): boolean {
+  if (next.currentEnv !== saved.currentEnv || next.platformId.trim() !== saved.platformId.trim()) return true
+  return !!next.environments && JSON.stringify(next.environments) !== JSON.stringify(saved.environments)
+}
+
+// gravação direta na API (fora da fila do adaptador), com o erro do servidor para a tela mostrar no campo
+export { dbSaveDirect as saveCredentialsDirect, type DirectSaveResult } from '@/lib/store'
+
+/** O 400 de destino de credencial mudado (segredo mantido pela máscara depois de trocar ambiente, Platform ID…). */
+export function isDestinationChangedError(e: ApiError | null): boolean {
+  return isDestinationChanged(e)
 }
 
 export interface ConnectionResult {

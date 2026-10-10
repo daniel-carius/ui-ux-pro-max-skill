@@ -37,11 +37,14 @@ import {
   confirm,
   toast,
 } from '@/components/ui'
+import { isPanelReported } from '@shared/audit'
 import { cn } from '@/lib/cn'
 import { dateTime, duration, num, pct, relative, time } from '@/lib/format'
+import { isApiMode } from '@/lib/api'
+import { dbSetAndWait, refreshKey } from '@/lib/store'
 import { AUDIT_ACTION_LABEL } from '@/data/team'
-import { audit, useAudit, usePageAccess, useSession } from '@/domain/session'
-import { useAttackMode, type AttackModeState } from '@/domain/system'
+import { KEYS, audit, useAudit, usePageAccess, useSession } from '@/domain/session'
+import { DEFAULT_ATTACK_MODE, SYSTEM_KEYS, useAttackMode, type AttackModeState } from '@/domain/system'
 import {
   ATTACK_LIMITS,
   AUTO_OFF_OPTIONS,
@@ -51,6 +54,7 @@ import {
   autoOffLabel,
   operationStatus,
   runAttackAutoOff,
+  serverAuditText,
   simulateTraffic,
   trafficSummary,
 } from '@/domain/seguranca'
@@ -78,6 +82,19 @@ function clock(ms: number) {
 }
 
 const OFF_STATE = { active: false, since: null, activatedBy: null } as const
+
+/**
+ * Modo API: ligar, desligar e mudar as defesas é uma gravação da chave; o servidor define desde quando e quem
+ * ligou (since/activatedBy voltam na resposta) e grava a linha da auditoria. O painel não relata esses eventos.
+ */
+const API = isApiMode()
+
+/** Grava o estado e espera o servidor (modo demonstração: na hora). Modo API: traz a linha nova da auditoria. */
+async function saveAttack(change: (prev: AttackModeState) => AttackModeState) {
+  const ok = await dbSetAndWait<AttackModeState>(SYSTEM_KEYS.attackMode, change, DEFAULT_ATTACK_MODE)
+  if (ok && API) refreshKey(KEYS.audit).catch(() => {})
+  return ok
+}
 
 function EffectsList({ opts }: { opts: Options }) {
   const changes = [
@@ -114,18 +131,37 @@ export default function ModoAtaque() {
   const { user } = useSession()
   const { canEdit } = usePageAccess()
   const [auditLog] = useAudit()
-  const form = useMergedSettingsForm(attack, setAttack, OPTION_KEYS, {
+  const merged = useMergedSettingsForm(attack, setAttack, OPTION_KEYS, {
     entity: 'Modo de ataque',
     successMessage: 'Defesas salvas',
     validate: (v) => (!v.lowerLimits && !v.closeSignups && !v.captcha ? 'Escolha pelo menos uma defesa.' : null),
     describe: (v) => `Defesas: ${attackDefenses(v).join(', ') || 'nenhuma'}; desligamento ${v.autoOffMinutes ? `após ${autoOffLabel(v.autoOffMinutes)}` : 'manual'}`,
   })
+  // modo API: salvar as defesas grava a chave e espera o servidor (ele registra a mudança na auditoria)
+  const [savingApi, setSavingApi] = useState(false)
+  const saveDefenses = async () => {
+    if (!canEdit) {
+      toast.error('Seu cargo não pode editar esta tela.')
+      return
+    }
+    const v = merged.values
+    if (!v.lowerLimits && !v.closeSignups && !v.captcha) {
+      toast.error('Revise os campos', { description: 'Escolha pelo menos uma defesa.' })
+      return
+    }
+    setSavingApi(true)
+    const ok = await saveAttack((prev) => ({ ...prev, ...v }))
+    setSavingApi(false)
+    if (ok) toast.success('Defesas salvas', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
+  }
+  const form = API ? { ...merged, save: () => void saveDefenses(), saving: savingApi } : merged
   const [now, setNow] = useState(() => Date.now())
   const [seed, setSeed] = useState(0)
   const [refreshedAt, setRefreshedAt] = useState(() => Date.now())
   const [refreshing, setRefreshing] = useState(false)
 
   // relógio (cronômetro e contagem regressiva) + desligamento automático
+  // (no modo API, o servidor desliga no prazo; aqui só relê a chave)
   useEffect(() => {
     const tick = () => {
       const t = Date.now()
@@ -161,7 +197,8 @@ export default function ModoAtaque() {
   const elapsed = since ? Math.max(0, now - since) : 0
   const remaining = offAt ? Math.max(0, offAt - now) : null
   const status = operationStatus(attack)
-  const history = auditLog.filter((a) => a.entity === 'Modo de ataque').slice(0, 6)
+  // histórico e "última mudança" só com registros do servidor (relatos do painel não são verificados)
+  const history = auditLog.filter((a) => a.entity === 'Modo de ataque' && !isPanelReported(a)).slice(0, 6)
 
   const turnOn = async () => {
     if (!canEdit) {
@@ -184,10 +221,11 @@ export default function ModoAtaque() {
     })
     if (!ok) return
     const at = new Date().toISOString()
-    setAttack((prev) => ({ ...prev, ...opts, active: true, since: at, activatedBy: user.name }))
+    // modo API: desde quando e quem ligou são definidos pelo servidor (os valores daqui só ocupam a tela até a resposta)
+    if (!(await saveAttack((prev) => ({ ...prev, ...opts, active: true, since: at, activatedBy: user.name })))) return
     setNow(Date.now())
     setRefreshedAt(Date.now())
-    audit('ligar', 'Modo de ataque', `Ligado com ${attackDefenses(opts).join(', ')}; ${opts.autoOffMinutes ? `desliga sozinho após ${autoOffLabel(opts.autoOffMinutes)}` : 'desligamento manual'}`)
+    if (!API) audit('ligar', 'Modo de ataque', `Ligado com ${attackDefenses(opts).join(', ')}; ${opts.autoOffMinutes ? `desliga sozinho após ${autoOffLabel(opts.autoOffMinutes)}` : 'desligamento manual'}`)
     toast.warning('Modo de ataque ligado', { description: 'A equipe vê o aviso vermelho no topo do painel enquanto estiver ligado.' })
   }
 
@@ -204,8 +242,8 @@ export default function ModoAtaque() {
       icon: Power,
     })
     if (!ok) return
-    setAttack((prev) => ({ ...prev, ...OFF_STATE }))
-    audit('desligar', 'Modo de ataque', `Desligado manualmente após ${duration(elapsed)}`)
+    if (!(await saveAttack((prev) => ({ ...prev, ...OFF_STATE })))) return
+    if (!API) audit('desligar', 'Modo de ataque', `Desligado manualmente após ${duration(elapsed)}`)
     toast.success('Modo de ataque desligado', { description: 'A operação voltou ao normal.' })
   }
 
@@ -449,7 +487,7 @@ export default function ModoAtaque() {
                     <li key={h.id} className="flex items-start gap-3 py-2.5 first:pt-0 last:pb-0">
                       <Badge tone={h.action === 'ligar' ? 'danger' : h.action === 'desligar' ? 'success' : 'neutral'}>{AUDIT_ACTION_LABEL[h.action]}</Badge>
                       <div className="min-w-0 flex-1">
-                        <p className="text-[13px] text-fg">{h.summary}</p>
+                        <p className="text-[13px] text-fg">{serverAuditText(h.summary)}</p>
                         <p className="text-xs text-fg-3">
                           {h.actorName} · {dateTime(h.at)}
                         </p>

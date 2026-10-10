@@ -104,8 +104,9 @@ describe('POST /api/withdrawals/:id/approve', () => {
     expect(r.statusCode).toBe(200)
     const body = r.json()
     expect(body.ok).toBe(true)
-    expect(body.message).toContain('aprovado')
-    expect(body.message).toContain('1.234,56')
+    // saque.pago é aviso aos sistemas da operação, não pagamento: a mensagem não diz que o PIX saiu
+    expect(body.message).toBe('Saque de R$ 1.234,56 aprovado. Aviso de pagamento na fila para 1 sistema.')
+    expect(body.queuedDeliveries).toBe(1)
     expect(body.withdrawal).toMatchObject({
       id,
       status: 'aprovado',
@@ -235,6 +236,62 @@ describe('POST /api/withdrawals/:id/approve', () => {
     const csrf = await api(app, 'POST', `/api/withdrawals/${id}/approve`, { cookie: admin.cookie, csrf: false })
     expect(csrf.statusCode).toBe(403)
     expect(csrf.json().error.code).toBe('requisicao_invalida')
+  })
+})
+
+describe('POST /api/withdrawals/:id/approve: a mensagem diz só o que aconteceu', () => {
+  // banco próprio: os outros testes deste arquivo deixam destinos de saque.pago ativos
+  let own: FastifyInstance
+  let cookie: string
+  beforeAll(async () => {
+    own = await createTestApp()
+    cookie = (await loginAs(own, 'superadmin')).cookie
+    await own.db.query(`insert into settings (key, value) values ($1, $2::jsonb)`, [
+      RULES_SETTINGS_KEY,
+      JSON.stringify({ version: 1, rules: { ...DEFAULT_WITHDRAWAL_RULES, maxPerRequest: 100_000, dailyLimit: 1000 } }),
+    ])
+  })
+  afterAll(async () => own.close())
+
+  const approve = async (amount: number) => {
+    const id = await insertWithdrawal(own, { amount })
+    const r = await api(own, 'POST', `/api/withdrawals/${id}/approve`, { cookie })
+    expect(r.statusCode).toBe(200)
+    return { id, body: r.json() as { ok: boolean; message: string; queuedDeliveries: number; withdrawal: { status: string } } }
+  }
+
+  it('sem destino saque.pago ativo: aprova, nada na fila e avisa que o pagamento é manual (nunca "PIX enviado")', async () => {
+    await addDestination(own, 'saque.pago', false) // inativo
+    await addDestination(own, 'saque.rejeitado') // outro evento
+    // destino de demonstração (terceiro) gravado e ativo nunca recebe evento real: não conta
+    await own.db.query(`insert into webhook_destinations (id, event, url, active, secret_enc) values ($1, 'saque.pago', $2, true, $3)`, [
+      newId('wh'),
+      'https://hooks.x2win-crm.com/pix',
+      own.cipher.encrypt('segredo-de-teste'),
+    ])
+    const { id, body } = await approve(250)
+    expect(body.ok).toBe(true)
+    expect(body.withdrawal.status).toBe('aprovado')
+    expect(body.queuedDeliveries).toBe(0)
+    expect(body.message).toBe(
+      'Saque de R$ 250,00 aprovado. Nenhum destino "saque.pago" ativo: o pagamento precisa ser feito pelo financeiro no gateway.',
+    )
+    expect(body.message).not.toMatch(/PIX (foi )?enviado/i)
+    expect((await outboxOf(own, 'saque.pago')).filter((o) => o.payload.data.id === id)).toHaveLength(0)
+  })
+
+  it('com destinos ativos: conta os avisos enfileirados (singular e plural)', async () => {
+    await addDestination(own, 'saque.pago')
+    const one = await approve(10)
+    expect(one.body.queuedDeliveries).toBe(1)
+    expect(one.body.message).toBe('Saque de R$ 10,00 aprovado. Aviso de pagamento na fila para 1 sistema.')
+
+    await addDestination(own, 'saque.pago')
+    const two = await approve(20)
+    expect(two.body.queuedDeliveries).toBe(2)
+    expect(two.body.message).toBe('Saque de R$ 20,00 aprovado. Aviso de pagamento na fila para 2 sistemas.')
+    // o número da resposta é o da fila, na mesma transação
+    expect((await outboxOf(own, 'saque.pago')).filter((o) => o.payload.data.id === two.id)).toHaveLength(2)
   })
 })
 

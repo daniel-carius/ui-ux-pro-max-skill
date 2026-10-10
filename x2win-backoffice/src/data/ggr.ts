@@ -2,6 +2,7 @@
 // distribuído por jogo e somado por provedora, com a taxa devida.
 import { createRng } from '@/lib/random'
 import { seedProviders } from './catalog'
+import { DEMO_STAFF_LABEL, demoRecords } from './demo'
 import { gameStatsForPeriod, getDailySeries, sumSeries } from './metrics'
 import { NOW, DAY } from './now'
 import { aggregateByProvider, dueDateFor, reconcileStats, lastMonths, monthBounds, providerFee, type Settlement } from '@/domain/ggr'
@@ -11,6 +12,8 @@ export const GGR_KEYS = {
 } as const
 
 const r2 = (v: number) => Math.round(v * 100) / 100
+/** autor de fechamento e pagamento: um rótulo genérico (o sorteio continua, para não mudar os demais valores) */
+const DECIDERS = [DEMO_STAFF_LABEL] as const
 
 export function seedSettlements(): Settlement[] {
   const rng = createRng(4401)
@@ -42,12 +45,15 @@ export function seedSettlements(): Settlement[] {
         status,
         dueDate: dueDateFor(month),
         closedAt,
-        closedBy: closedAt ? rng.pick(['Daniel Carius', 'Beatriz Souza']) : null,
+        closedBy: closedAt ? rng.pick(DECIDERS) : null,
         paidAt,
-        paidBy: paidAt ? rng.pick(['Daniel Carius', 'Beatriz Souza']) : null,
+        paidBy: paidAt ? rng.pick(DECIDERS) : null,
         paymentRef: paidAt ? `DEMO-TED-${month.replace('-', '')}-${String(pi + 1).padStart(3, '0')}` : null,
       })
     })
   })
   return out
 }
+
+// modo API: as apurações vêm do servidor (DEMO_DATA grava estas mesmas); sem nada gravado, lista vazia
+demoRecords(seedSettlements)

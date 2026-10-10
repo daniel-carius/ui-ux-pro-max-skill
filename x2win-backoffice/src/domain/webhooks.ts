@@ -4,6 +4,7 @@
 import { createRng, uid } from '@/lib/random'
 import { dbGet, dbSet } from '@/lib/store'
 import { DAY, NOW, iso } from '@/data/now'
+import { demoRecords } from '@/data/demo'
 
 export type WebhookEvent = 'saque.solicitado' | 'saque.pago' | 'saque.rejeitado' | 'saque.expirado' | 'deposito.primeiro'
 
@@ -28,8 +29,10 @@ export interface WebhookDestination {
 export interface WebhookExecution {
   id: string
   at: string
+  /** evento do destino (também nos testes, que saem como webhook.teste) */
   event: WebhookEvent
   destinationId: string
+  /** modo API: sempre com os trechos sensíveis mascarados (para todos); só para exibir, nunca para achar o destino */
   url: string
   status: 'sucesso' | 'falha'
   httpStatus: number
@@ -45,6 +48,23 @@ export const WEBHOOK_KEYS = {
   destinations: 'campanhas.webhooks.destinos',
   executions: 'campanhas.webhooks.execucoes',
 } as const
+
+/**
+ * Evento dos envios de teste (cabeçalho X-X2W-Event e campo "event" do corpo): nunca o
+ * evento real do destino, para quem recebe não tratar um teste como ordem de verdade. A
+ * execução gravada continua no evento do destino, marcada como teste.
+ */
+export const WEBHOOK_TEST_EVENT = 'webhook.teste'
+
+/** Corpo do envio de teste (o mesmo que o servidor assina e envia). */
+export function webhookTestBody(d: Pick<WebhookDestination, 'id' | 'event'>, createdAt: string, id = 'evt_teste') {
+  return { id, event: WEBHOOK_TEST_EVENT, createdAt, test: true, data: { destinationId: d.id, destinationEvent: d.event } }
+}
+
+/** Execução de um envio de teste (botão "Testar"). */
+export function isTestExecution(e: Pick<WebhookExecution, 'test' | 'payload'>) {
+  return e.test === true || e.payload.includes('"test":true')
+}
 
 export function seedWebhookDestinations(): WebhookDestination[] {
   const created = iso(new Date(NOW.getTime() - 90 * DAY))
@@ -85,12 +105,12 @@ export function seedWebhookExecutions(): WebhookExecution[] {
   return out.sort((a, b) => b.at.localeCompare(a.at))
 }
 
-/** Dispara (simulado) o webhook do evento para os destinos ativos. */
-export function emitWebhook(event: WebhookEvent, data: Record<string, unknown>) {
+/** Dispara (simulado) o webhook do evento para os destinos ativos. Devolve quantos avisos saíram. */
+export function emitWebhook(event: WebhookEvent, data: Record<string, unknown>): number {
   const dests = dbGet<WebhookDestination[]>(WEBHOOK_KEYS.destinations, seedWebhookDestinations).filter(
     (d) => d.active && d.event === event,
   )
-  if (!dests.length) return
+  if (!dests.length) return 0
   const now = new Date()
   const execs: WebhookExecution[] = dests.map((d) => ({
     id: uid('ex'),
@@ -104,5 +124,9 @@ export function emitWebhook(event: WebhookEvent, data: Record<string, unknown>) 
     payload: JSON.stringify({ event, at: iso(now), data }),
   }))
   dbSet<WebhookExecution[]>(WEBHOOK_KEYS.executions, (prev) => [...execs, ...prev], seedWebhookExecutions)
+  return dests.length
 }
 
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedWebhookDestinations)
+demoRecords(seedWebhookExecutions)

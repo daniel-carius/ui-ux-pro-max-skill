@@ -1,5 +1,6 @@
 // Regras do módulo Geral (Usuários, Rankings, Transações).
 // Funções puras: a recriação com back-end pode reaproveitar validações e cálculos.
+import { canChangeStatus, isPlayerRequestedReason } from '@shared/players'
 import type { Player, PlayerStatus } from '@/data/players'
 import type { Transaction, TransactionType } from '@/data/finance'
 import { cpf as fmtCpf } from '@/lib/format'
@@ -124,41 +125,67 @@ export const PAUSE_OPTIONS = [
   { days: 30, label: '30 dias' },
 ] as const
 
+/** Ações oferecidas em cada status (a tabela de transições é a de shared/players.ts, a mesma do servidor). */
+const ACTIONS_BY_STATUS: Record<PlayerStatus, StatusAction[]> = {
+  ativo: ['pausar', 'bloquear'],
+  bloqueado: ['desbloquear'],
+  pausa: ['encerrar_pausa', 'bloquear'],
+  autoexcluido: [],
+}
+
+/** Permissões que mudam status: com usuarios.editar, todas as transições da tabela valem. */
+const ALL_STATUS_PERMS: ReadonlySet<string> = new Set(['usuarios.editar'])
+
 /**
- * Ações de status permitidas.
- * - Autoexclusão é decisão do jogador: o painel não reverte.
- * - Pausa pedida pelo jogador só termina no prazo (pausas sem histórico contam como pedidas pelo jogador).
+ * Pausa pedida pelo jogador ainda em vigor (mesma regra do servidor): sem registro da pausa
+ * conta como pedida pelo jogador; com registro, vale até o prazo (sem prazo = em vigor).
  */
-export function statusActions(status: PlayerStatus, lastPause?: StatusEvent | null, now = Date.now()): { action: StatusAction; allowed: boolean; reason?: string }[] {
-  switch (status) {
-    case 'ativo':
-      return [
-        { action: 'pausar', allowed: true },
-        { action: 'bloquear', allowed: true },
-      ]
-    case 'bloqueado':
-      return [{ action: 'desbloquear', allowed: true }]
-    case 'pausa': {
-      const byPlayer = !lastPause || lastPause.byPlayer
-      const ended = !!lastPause?.until && new Date(lastPause.until).getTime() <= now
-      const canEnd = !byPlayer || ended
-      return [
-        {
-          action: 'encerrar_pausa',
-          allowed: canEnd,
-          reason: canEnd ? undefined : 'Pausa pedida pelo jogador só termina no prazo combinado.',
-        },
-        { action: 'bloquear', allowed: true },
-      ]
+export function playerPauseInForce(lastPause: StatusEvent | null | undefined, now = Date.now()): boolean {
+  if (!lastPause) return true
+  const byPlayer = lastPause.byPlayer || isPlayerRequestedReason(lastPause.reason)
+  if (!byPlayer) return false
+  if (!lastPause.until) return true
+  const until = new Date(lastPause.until).getTime()
+  return Number.isNaN(until) || until > now
+}
+
+export interface StatusActionOption {
+  action: StatusAction
+  /** status depois da ação */
+  next: PlayerStatus
+  allowed: boolean
+  reason?: string
+}
+
+/**
+ * Ações de status permitidas, pela tabela compartilhada com o servidor (shared/players.ts).
+ * - Autoexclusão é decisão do jogador: o painel não reverte (nenhuma ação).
+ * - Pausa pedida pelo jogador só termina no prazo (pausas sem histórico contam como pedidas pelo jogador).
+ * - Desbloquear devolve a pausa que estava em vigor antes do bloqueio (o servidor recusa voltar a ativo).
+ * `perms`: permissões da pessoa (padrão: usuarios.editar, que faz todas as transições).
+ */
+export function statusActions(
+  status: PlayerStatus,
+  lastPause?: StatusEvent | null,
+  now = Date.now(),
+  perms: ReadonlySet<string> = ALL_STATUS_PERMS,
+  lastBlock?: StatusEvent | null,
+): StatusActionOption[] {
+  return (ACTIONS_BY_STATUS[status] ?? []).map((action) => {
+    let next = STATUS_ACTION_NEXT[action]
+    let reason: string | undefined
+    if (action === 'encerrar_pausa' && playerPauseInForce(lastPause, now)) {
+      reason = 'Pausa pedida pelo jogador só termina no prazo combinado.'
     }
-    case 'autoexcluido':
-    default:
-      return []
-  }
+    // bloqueio aplicado durante uma pausa do jogador: desbloquear volta para a pausa
+    if (action === 'desbloquear' && lastBlock?.from === 'pausa' && playerPauseInForce(lastPause, now)) next = 'pausa'
+    if (!reason && !canChangeStatus(status, next, perms)) reason = 'Seu cargo não pode fazer esta mudança de status.'
+    return { action, next, allowed: !reason, reason }
+  })
 }
 
 export function isPlayerRequestedPause(reason: string) {
-  return reason.startsWith('Pedido do jogador')
+  return isPlayerRequestedReason(reason)
 }
 
 // ---------- Ajuste manual de saldo ----------

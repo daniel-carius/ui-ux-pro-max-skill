@@ -48,13 +48,12 @@ import {
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import { brl, date, dateTime, num, pct, relative } from '@/lib/format'
-import { useCollection } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { DAY, HOUR } from '@/data/now'
-import { useGames, usePlayers } from '@/data/hooks'
-import type { Player } from '@/data/players'
+import { useGames } from '@/data/hooks'
 import { seedTournaments } from '@/data/campanhas2-seeds'
 import { audit, usePageAccess, useSession } from '@/domain/session'
+import { useCampaignPlayers, type CampaignPlayer } from '@/domain/campanhas-jogadores'
 import { AUDIENCE_LABEL, AUDIENCE_OPTIONS, AUDIENCE_SHORT, C2_KEYS, fromDateTimeInput, timeUntil, toDateTimeInput, type Audience } from '@/domain/campanhas2-common'
 import {
   SCORING_HINT,
@@ -78,7 +77,7 @@ import {
   type TournamentPrizeKind,
   type TournamentStatus,
 } from '@/domain/campanhas2-torneios'
-import { DrawerSection, GamePicker, MiniStat, READ_ONLY_TITLE, confirmDiscard, useCoin, type CoinCtx } from './_shared-c2'
+import { DrawerSection, GamePicker, MiniStat, READ_ONLY_TITLE, confirmDiscard, useCoin, useSavedCollection, type CoinCtx } from './_shared-c2'
 
 const STATUS_TONE: Record<TournamentStatus, Tone> = { agendado: 'info', ao_vivo: 'success', encerrado: 'neutral' }
 type Filter = 'todos' | TournamentStatus
@@ -131,8 +130,11 @@ function StatusBadge({ status, size = 'sm' }: { status: TournamentStatus; size?:
 export default function Torneios() {
   const { canEdit } = usePageAccess()
   const { user } = useSession()
-  const tournaments = useCollection<Tournament>(C2_KEYS.torneios, seedTournaments)
-  const { items: players } = usePlayers()
+  // modo API: inscritos (participants), data de criação e quem encerrou e quando são do servidor;
+  // torneio encerrado não muda nem reabre
+  const tournaments = useSavedCollection<Tournament>(C2_KEYS.torneios, seedTournaments)
+  // ranking ilustrativo: demonstração, a base inteira; modo API, o público de marketing (apelido, sem dado pessoal)
+  const { players } = useCampaignPlayers()
   const { items: games } = useGames()
   const coin = useCoin()
   const now = useNow()
@@ -179,7 +181,8 @@ export default function Torneios() {
     })
     if (!ok) return
     const at = new Date().toISOString()
-    tournaments.update(t.id, { closedAt: at, closedBy: user.name, updatedAt: at })
+    // quem encerrou e quando: o servidor grava os dele e devolve na resposta
+    if (!(await tournaments.updateAndWait(t.id, { closedAt: at, closedBy: user.name, updatedAt: at }))) return
     audit('desligar', `Torneio ${t.name}`, `Encerrado antes do fim por ${user.name}. ${num(paid.length)} prêmios distribuídos (${brl(prizePool(t, coin))}). 1º lugar: ${board[0]?.nick ?? '—'}`)
     toast.success('Torneio encerrado', { description: `${num(paid.length)} prêmios enviados para as posições do ranking.` })
   }
@@ -192,8 +195,7 @@ export default function Torneios() {
       tone: 'danger',
       icon: Trash2,
     })
-    if (!ok) return
-    tournaments.remove(t.id)
+    if (!ok || !(await tournaments.removeAndWait(t.id))) return
     if (detailId === t.id) setDetailId(null)
     audit('excluir', `Torneio ${t.name}`, `Torneio ${TOURNAMENT_STATUS_LABEL[st(t)].toLowerCase()} excluído`)
     toast.success('Torneio excluído')
@@ -220,10 +222,16 @@ export default function Torneios() {
     setEditing({ t: copy, isNew: true })
   }
 
-  const save = (t: Tournament, isNew: boolean) => {
+  const save = async (t: Tournament, isNew: boolean) => {
+    // encerrado enquanto o formulário estava aberto: não muda mais
+    if (!isNew && tournaments.get(t.id)?.closedAt) {
+      toast.error('Torneio encerrado', { description: 'Um torneio encerrado não pode ser alterado nem reaberto. Duplique para criar outro.' })
+      setEditing(null)
+      return
+    }
     const next = { ...t, name: t.name.trim(), description: t.description.trim(), updatedAt: new Date().toISOString() }
-    if (isNew) tournaments.add(next)
-    else tournaments.update(t.id, next)
+    const ok = isNew ? await tournaments.addAndWait(next) : await tournaments.updateAndWait(t.id, next)
+    if (!ok) return
     audit(
       isNew ? 'criar' : 'editar',
       `Torneio ${next.name}`,
@@ -411,7 +419,7 @@ function PositionMark({ position }: { position: number }) {
   )
 }
 
-function LiveCard({ t, players, now, coin, gameName, onOpen }: { t: Tournament; players: Player[]; now: Date; coin: CoinCtx; gameName: Map<string, string>; onOpen: () => void }) {
+function LiveCard({ t, players, now, coin, gameName, onOpen }: { t: Tournament; players: CampaignPlayer[]; now: Date; coin: CoinCtx; gameName: Map<string, string>; onOpen: () => void }) {
   const board = useMemo(() => buildLeaderboard(t, players, now).slice(0, 3), [t, players, now])
   const total = new Date(t.endsAt).getTime() - new Date(t.startsAt).getTime()
   const elapsed = Math.min(1, Math.max(0, (now.getTime() - new Date(t.startsAt).getTime()) / total))
@@ -478,7 +486,7 @@ function DetailDrawer({
   onCloseNow,
 }: {
   t: Tournament
-  players: Player[]
+  players: CampaignPlayer[]
   now: Date
   coin: CoinCtx
   gameName: Map<string, string>
@@ -659,8 +667,9 @@ function PrizeDistribution({ t, coin, pool }: { t: Tournament; coin: CoinCtx; po
 
 // ---------- Formulário ----------
 
-function TournamentDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Tournament; isNew: boolean; coin: CoinCtx; onClose: () => void; onSave: (t: Tournament) => void }) {
+function TournamentDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Tournament; isNew: boolean; coin: CoinCtx; onClose: () => void; onSave: (t: Tournament) => Promise<void> }) {
   const [t, setT] = useState<Tournament>(initial)
+  const [saving, setSaving] = useState(false)
   const [touched, setTouched] = useState(!isNew)
   const live = !isNew && tournamentStatus(initial) === 'ao_vivo'
   const errs = tournamentErrors(t, coin)
@@ -675,13 +684,20 @@ function TournamentDrawer({ initial, isNew, coin, onClose, onSave }: { initial: 
   const close = async () => {
     if (await confirmDiscard(dirty)) onClose()
   }
-  const submit = () => {
+  const submit = async () => {
     setTouched(true)
     if (hasTournamentErrors(errs)) {
       toast.error('Revise o torneio', { description: errs.name ?? errs.games ?? errs.period ?? errs.prizes ?? Object.values(errs.prize)[0] ?? 'Há campos inválidos.' })
       return
     }
-    onSave(t)
+    if (saving) return
+    // espera o servidor: recusado, o drawer fica aberto com o que foi digitado
+    setSaving(true)
+    try {
+      await onSave(t)
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -694,7 +710,7 @@ function TournamentDrawer({ initial, isNew, coin, onClose, onSave }: { initial: 
       footer={
         <>
           <Button onClick={close}>Cancelar</Button>
-          <Button variant="primary" onClick={submit}>
+          <Button variant="primary" onClick={submit} loading={saving}>
             {isNew ? 'Criar torneio' : 'Salvar torneio'}
           </Button>
         </>

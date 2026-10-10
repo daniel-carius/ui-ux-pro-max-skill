@@ -40,7 +40,7 @@ import { BrandMark } from '@/components/layout/Brand'
 import { brl, num, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { NOW, dayKey } from '@/data/now'
-import { usePlayers } from '@/data/hooks'
+import { usePlayerCounts } from '@/domain/config1-metricas'
 import { audit } from '@/domain/session'
 import {
   DEFAULT_SIGNUP,
@@ -84,12 +84,14 @@ export default function Cadastro() {
   })
   const v = form.values
   const risks = signupRisks(v)
-  const { items: players } = usePlayers()
+  // modo API: contagens prontas do servidor (geral.jogadores.metricas); a tela não lê a base
+  const counts = usePlayerCounts()
+  const totalPlayers = counts.total
   const kyc = {
-    ok: players.filter((p) => p.kyc === 'verificado').length,
-    pending: players.filter((p) => p.kyc === 'pendente').length,
-    none: players.filter((p) => p.kyc === 'nao_enviado').length,
-    failed: players.filter((p) => p.kyc === 'reprovado').length,
+    ok: counts.kyc.verificado,
+    pending: counts.kyc.pendente,
+    none: counts.kyc.nao_enviado,
+    failed: counts.kyc.reprovado,
   }
 
   const setRequired = async (f: SignupField, val: boolean) => {
@@ -114,7 +116,7 @@ export default function Cadastro() {
       <PageHeader />
 
       <section aria-label="Situação do KYC dos jogadores" className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="KYC verificado" icon={BadgeCheck} tone="success" value={pct(players.length ? kyc.ok / players.length : 0, 0)} hint={`${num(kyc.ok)} de ${num(players.length)} jogadores`} />
+        <KpiCard label="KYC verificado" icon={BadgeCheck} tone="success" value={pct(totalPlayers ? kyc.ok / totalPlayers : 0, 0)} hint={`${num(kyc.ok)} de ${num(totalPlayers)} jogadores`} />
         <KpiCard label="Em análise" icon={Clock} tone="warning" value={num(kyc.pending)} hint="documentos aguardando revisão" />
         <KpiCard label="Sem documento" icon={FileWarning} tone="neutral" value={num(kyc.none)} hint={`KYC pedido ${MOMENT_LABEL[form.saved.kycMoment]}`} />
         <KpiCard label="Reprovados" icon={ShieldAlert} tone="danger" value={num(kyc.failed)} hint="documento ou selfie recusados" />

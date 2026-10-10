@@ -8,6 +8,7 @@ import { type Audience, type Channel, DEFAULT_AUDIENCE, describeAudience, estima
 import { DEFAULT_LEVELS_CONFIG, levelIndexForXp } from '@/domain/campanhas3-niveis'
 import type { BellNotification, InboxMessage, NotifIcon, Popup, PopupFrequency, SitePage } from '@/domain/campanhas3-mensagens'
 import type { Disparo } from '@/domain/campanhas3-disparos'
+import { demoRecords } from './demo'
 
 const A = (kind: Audience['kind'], p: Partial<Audience> = {}): Audience => ({ ...DEFAULT_AUDIENCE, kind, ...p })
 
@@ -291,3 +292,9 @@ export function cashbackCycles(): CashbackCycle[] {
   }
   return out
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedBellNotifications)
+demoRecords(seedDisparos)
+demoRecords(seedInbox)
+demoRecords(seedPopups)

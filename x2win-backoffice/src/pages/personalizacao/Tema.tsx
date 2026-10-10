@@ -27,6 +27,7 @@ import {
   formatRatio,
   isHex,
   rgba,
+  safeImageSrc,
   sitePalette,
   themeContrastChecks,
   validateTheme,
@@ -35,7 +36,7 @@ import {
   type SiteTheme,
 } from '@/domain/personalizacao-p1'
 import { DEFAULT_THEME, P1_KEYS, SITE_DOMAIN, THEME_PRESETS } from '@/data/personalizacao-p1'
-import { BrowserFrame, EditorLayout, EditorSection, PreviewJumpButton, PreviewPanel, SiteHeaderMock, SiteLogo, useSiteTitle } from './_shared-p1'
+import { BrowserFrame, EditorLayout, EditorSection, PreviewJumpButton, PreviewPanel, SafeImage, SiteHeaderMock, SiteLogo, useSiteTitle } from './_shared-p1'
 
 const COLOR_HINT: Record<keyof SiteColors, string> = {
   primary: 'Botões, links e item ativo do menu.',
@@ -135,7 +136,7 @@ export default function Tema() {
               label="Logotipo do site"
               width={200}
               height={100}
-              value={v.logo}
+              value={safeImageSrc(v.logo)}
               onChange={(url) => form.set('logo', url)}
               disabled={!canEdit}
               previewClassName="max-w-[300px]"
@@ -169,7 +170,7 @@ export default function Tema() {
                 label="Ícone"
                 width={64}
                 height={64}
-                value={v.favicon}
+                value={safeImageSrc(v.favicon)}
                 onChange={(url) => form.set('favicon', url)}
                 disabled={!canEdit}
                 previewClassName="w-28"
@@ -178,7 +179,7 @@ export default function Tema() {
               <div className="min-w-0 flex-1 space-y-2">
                 <p className="text-[13px] font-medium text-fg">Na aba do navegador</p>
                 <div className="flex max-w-[260px] items-center gap-2 rounded-t-lg border border-b-0 border-line bg-surface-2 px-3 py-2">
-                  {v.favicon ? <img src={v.favicon} alt="" className="h-4 w-4 rounded-sm object-contain" /> : <span className="h-4 w-4 rounded-sm bg-line-strong" aria-hidden />}
+                  <SafeImage src={v.favicon} className="h-4 w-4 rounded-sm object-contain" fallback={<span className="h-4 w-4 rounded-sm bg-line-strong" aria-hidden />} />
                   <span className="truncate text-xs text-fg-2">{title}</span>
                 </div>
                 {!v.favicon && <p className="text-xs text-warning">Sem ícone, o navegador mostra um ícone genérico.</p>}
@@ -260,7 +261,7 @@ export default function Tema() {
               label="Imagem"
               width={1200}
               height={630}
-              value={v.shareImage}
+              value={safeImageSrc(v.shareImage)}
               onChange={(url) => form.set('shareImage', url)}
               disabled={!canEdit}
               previewClassName="max-w-[420px]"
@@ -270,11 +271,12 @@ export default function Tema() {
               <p className="mb-1.5 text-[13px] font-medium text-fg">Como aparece numa conversa</p>
               <div className="max-w-[340px] rounded-2xl rounded-tl-sm border border-line bg-surface-2 p-1.5">
                 <div className="overflow-hidden rounded-xl border border-line bg-surface">
-                  {v.shareImage ? (
-                    <img src={v.shareImage} alt="Prévia da imagem de compartilhamento" className="aspect-[1200/630] w-full object-cover" />
-                  ) : (
-                    <div className="flex aspect-[1200/630] w-full items-center justify-center bg-surface-3 text-xs text-fg-3">Sem imagem</div>
-                  )}
+                  <SafeImage
+                    src={v.shareImage}
+                    alt="Prévia da imagem de compartilhamento"
+                    className="aspect-[1200/630] w-full object-cover"
+                    fallback={<div className="flex aspect-[1200/630] w-full items-center justify-center bg-surface-3 text-xs text-fg-3">Sem imagem</div>}
+                  />
                   <div className="space-y-0.5 px-3 py-2">
                     <p className="truncate text-[13px] font-semibold text-fg">{title}</p>
                     <p className="line-clamp-2 text-xs leading-4 text-fg-3">{company.description}</p>

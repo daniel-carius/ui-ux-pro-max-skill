@@ -129,7 +129,7 @@ const PLAYER_READ_PAGES = ['transacoes', 'antifraude', 'rankings', 'indicados', 
  * Telas que leem o público de marketing (geral.jogadores.audiencia): jogadores que podem
  * receber campanhas, com campos mínimos (sem dado pessoal nem saldo).
  */
-const AUDIENCE_READ_PAGES = ['promocoes', 'free-spins', 'cupons', 'torneios', 'niveis', 'disparos', 'notificacoes', 'popups-inbox']
+const AUDIENCE_READ_PAGES = ['promocoes', 'free-spins', 'torneios', 'niveis', 'disparos', 'notificacoes', 'popups-inbox']
 /** Telas que leem as contagens da base (geral.jogadores.metricas): as de público e as que só mostram números. */
 const METRICS_READ_PAGES = ['dashboard', 'cadastro', 'jogo-responsavel', 'textos-legais', 'moeda', 'cashback', ...AUDIENCE_READ_PAGES]
 /** Telas que leem a base de afiliados (além de Afiliados e gerentes). */
@@ -328,7 +328,7 @@ export const KV_RULES: KvRule[] = [
   { prefix: 'cargos.lista', page: 'cargos', read: 'equipe', write: ['cargos.editar'], domain: 'roles' },
   { prefix: 'config.mcp', page: 'mcp', read: 'tela', secrets: true, children: ['chaves', 'uso'], maxBytes: RECORDS },
   { prefix: 'config.seguranca-painel', page: 'seguranca-painel', read: 'tela', readPages: ['equipe'], domain: 'panel-security' },
-  { prefix: 'auditoria.registros', page: 'auditoria', read: 'tela', readPages: ['modo-ataque', 'seguranca-painel', 'equipe'], write: 'servidor', domain: 'audit' },
+  { prefix: 'auditoria.registros', page: 'auditoria', read: 'tela', readPages: ['modo-ataque', 'seguranca-painel', 'equipe', 'manutencao', 'empresa'], write: 'servidor', domain: 'audit' },
 ]
 
 function matches(key: string, prefix: string) {

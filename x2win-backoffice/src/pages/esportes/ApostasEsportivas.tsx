@@ -54,7 +54,7 @@ import { dbGet, refreshKey } from '@/lib/store'
 import { DATA_KEYS, useSportsBets } from '@/data/hooks'
 import { SPORTS_BET_STATUS_LABEL, seedSportsBets, type SportsBet, type SportsBetStatus, type SportsSelection } from '@/data/sports'
 import { BET_TYPE_LABEL, LEG_RESULT_LABEL, betSearchText, exposure, legResults, settleFromFeed, sportsTotals, type LegResult } from '@/domain/esportes'
-import { PlayerDrawer, TableFrame } from '@/pages/geral/_shared'
+import { PlayerDrawer, TableFrame, useCanOpenPlayer } from '@/pages/geral/_shared'
 
 const STATUS_TONE: Record<SportsBetStatus, Tone> = {
   aberta: 'info',
@@ -97,6 +97,7 @@ export default function ApostasEsportivas() {
   const [maxV, setMaxV] = useState('')
   const [openId, setOpenId] = useState<string | null>(null)
   const [playerOpen, setPlayerOpen] = useState<string | null>(null)
+  const canOpenPlayer = useCanOpenPlayer()
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdate, setLastUpdate] = useState(() => new Date())
   const [, setTick] = useState(0)
@@ -405,7 +406,7 @@ export default function ApostasEsportivas() {
             onRowClick={(b) => setOpenId(b.id)}
             rowActions={(b) => [
               { label: 'Ver bilhete', icon: Ticket, onSelect: () => setOpenId(b.id) },
-              { label: 'Ver jogador', icon: UserRound, onSelect: () => setPlayerOpen(b.playerId) },
+              { label: 'Ver jogador', icon: UserRound, disabled: !canOpenPlayer, hint: canOpenPlayer ? undefined : 'só em Usuários', onSelect: () => setPlayerOpen(b.playerId) },
             ]}
             resetKey={`${tab}|${playerQ}|${provider}|${minV}|${maxV}|${range.from.getTime()}`}
             toolbar={

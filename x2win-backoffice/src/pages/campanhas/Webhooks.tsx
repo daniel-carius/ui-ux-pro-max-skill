@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -7,6 +7,7 @@ import {
   ArrowUpFromLine,
   CheckCircle2,
   Clock,
+  Copy,
   Eye,
   Gauge,
   Globe,
@@ -42,6 +43,7 @@ import {
   Modal,
   Mono,
   PageHeader,
+  Segmented,
   Select,
   Switch,
   Tooltip,
@@ -51,16 +53,19 @@ import {
 } from '@/components/ui'
 import type { WebhookTestResponse } from '@shared/api'
 import { cn } from '@/lib/cn'
-import { ApiError, api, isApiMode } from '@/lib/api'
+import { ApiError, api, isApiMode, isVersionConflict } from '@/lib/api'
 import { dateTime, maskSecret, num, pct, relative } from '@/lib/format'
 import { uid } from '@/lib/random'
-import { patchCache, refreshKey } from '@/lib/store'
+import { dbSetAndWait, dbSetAndWaitResult, patchCache, refreshKey } from '@/lib/store'
 import { useWebhookDestinations, useWebhookExecutions } from '@/data/hooks'
 import { audit, usePageAccess } from '@/domain/session'
 import {
   WEBHOOK_EVENT_LABEL,
   WEBHOOK_KEYS,
+  WEBHOOK_TEST_EVENT,
+  isTestExecution,
   seedWebhookExecutions,
+  webhookTestBody,
   type WebhookDestination,
   type WebhookEvent,
   type WebhookExecution,
@@ -72,11 +77,15 @@ import {
   generateDemoSecret,
   hasTokenInUrl,
   hostOf,
+  isDemoWebhookHost,
   lastExecutionFor,
   maskToken,
   maskUrlTokens,
+  MIN_SECRET_LENGTH,
+  needsNewSecret,
   simulateDelivery,
   validateWebhookUrl,
+  webhookSecretError,
 } from '@/domain/campanhas-webhooks'
 import { BlockTitle, CodeBlock, MiniStat } from './_shared-c1'
 
@@ -91,8 +100,20 @@ const TIMEOUT_S = API ? 5 : 10
 /** Execução como o servidor devolve no teste (com o motivo da falha, quando houver). */
 type ServerExecution = WebhookExecution & { test?: boolean; error?: string }
 
-function isTestExecution(e: WebhookExecution) {
-  return (e as ServerExecution).test === true || e.payload.includes('"test":true')
+/**
+ * Grava a lista de destinos e espera a resposta. Modo API: o servidor confere a versão
+ * (0 numa instalação nova; o store envia), valida endereço e segredo e devolve os segredos
+ * mascarados; recusado, a tela volta ao que estava e o aviso mostra a mensagem do servidor.
+ * Cada destino vai com o segredo que veio do servidor (a máscara exata, que mantém o
+ * segredo) ou com um segredo novo inteiro; nunca outro texto com máscara.
+ */
+function saveDestinations(next: (prev: WebhookDestination[]) => WebhookDestination[]) {
+  return dbSetAndWait<WebhookDestination[]>(WEBHOOK_KEYS.destinations, next)
+}
+
+/** 400 do segredo de um destino (details.field 'secret'): a tela mostra no campo do segredo, sem o aviso geral. */
+function isSecretFieldError(e: ApiError) {
+  return e.status === 400 && (e.details as { field?: unknown } | undefined)?.field === 'secret'
 }
 
 function httpLabel(code: number) {
@@ -109,7 +130,7 @@ function newSigningSecret() {
 
 const EVENT_META: Record<WebhookEvent, { icon: LucideIcon; tone: string; description: string }> = {
   'saque.solicitado': { icon: ArrowUpFromLine, tone: 'bg-info/10 text-info', description: 'Jogador pediu um saque.' },
-  'saque.pago': { icon: CheckCircle2, tone: 'bg-success/10 text-success', description: 'Saque aprovado e PIX enviado.' },
+  'saque.pago': { icon: CheckCircle2, tone: 'bg-success/10 text-success', description: 'Saque aprovado (aviso para o sistema que paga).' },
   'saque.rejeitado': { icon: XCircle, tone: 'bg-danger/10 text-danger', description: 'Saque recusado pela equipe.' },
   'saque.expirado': { icon: Clock, tone: 'bg-warning/10 text-warning', description: 'Saque não decidido no prazo.' },
   'deposito.primeiro': { icon: ArrowDownToLine, tone: 'bg-primary/10 text-primary-text', description: 'Primeiro depósito pago (FTD).' },
@@ -121,6 +142,34 @@ interface FormState {
   url: string
   active: boolean
   touched: boolean
+  /** destino como estava ao abrir a edição (endereço e evento) */
+  original: { event: WebhookEvent; url: string } | null
+  /** segredo novo, quando o endereço muda de origem ou o evento muda: gerado aqui ou digitado */
+  secretMode: 'gerar' | 'digitar'
+  secret: string
+  secretTouched: boolean
+  /** o servidor pediu segredo novo (400 no segredo), mesmo sem a tela ver a troca de destino */
+  forceSecret: boolean
+  /** mensagem do servidor para o segredo */
+  secretServerError: string | null
+}
+
+/** Edição que troca a origem do endereço (esquema, host, porta) ou o evento: o segredo atual não vale mais. */
+function formNeedsSecret(f: FormState) {
+  return !!f.id && !!f.original && (f.forceSecret || needsNewSecret(f.original, { event: f.event, url: f.url }))
+}
+
+/** Problema do segredo digitado (só quando a edição pede segredo novo e a pessoa escolheu digitar). */
+function formSecretError(f: FormState) {
+  if (!formNeedsSecret(f) || f.secretMode !== 'digitar') return null
+  return webhookSecretError(f.secret, { rejectDemo: API })
+}
+
+/** Endereço de demonstração em destino novo ou endereço trocado (modo API): o servidor recusa. */
+function demoHostError(f: FormState, url: string) {
+  if (!API || !isDemoWebhookHost(url)) return null
+  if (f.original && f.original.url.trim() === url) return null
+  return `${hostOf(url)} é um endereço de demonstração, não um destino da operação.`
 }
 
 export default function Webhooks() {
@@ -132,6 +181,7 @@ export default function Webhooks() {
   const [detailId, setDetailId] = useState<string | null>(null)
   const [newSecret, setNewSecret] = useState<{ label: string; secret: string } | null>(null)
   const [testing, setTesting] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
 
   const since30 = Date.now() - 30 * 86_400_000
   const stats = useMemo(() => deliveryStats(execs.items, since30), [execs.items, since30])
@@ -140,19 +190,28 @@ export default function Webhooks() {
   const tokenDests = dests.items.filter((d) => hasTokenInUrl(d.url))
   const lockedTitle = !canEdit ? 'Seu cargo pode ver, mas não editar webhooks' : undefined
 
-  const openNew = (event: WebhookEvent = 'saque.solicitado') => setForm({ id: null, event, url: 'https://', active: true, touched: false })
+  const blankSecret = { secretMode: 'gerar' as const, secret: '', secretTouched: false, forceSecret: false, secretServerError: null }
+  const openNew = (event: WebhookEvent = 'saque.solicitado') => setForm({ id: null, event, url: 'https://', active: true, touched: false, original: null, ...blankSecret })
+  // quem edita webhooks recebe do servidor o endereço completo (para poder editá-lo); listas e ficha mostram mascarado
   const openEdit = (d: WebhookDestination) => {
     setDetailId(null)
-    setForm({ id: d.id, event: d.event, url: d.url, active: d.active, touched: false })
+    setForm({ id: d.id, event: d.event, url: d.url, active: d.active, touched: false, original: { event: d.event, url: d.url }, ...blankSecret })
   }
 
   const saveForm = async () => {
     if (!form) return
     const url = form.url.trim()
-    const err = validateWebhookUrl(url) ?? duplicateError(dests.items, form, url)
+    const err = validateWebhookUrl(url) ?? duplicateError(dests.items, form, url) ?? demoHostError(form, url)
     if (err) {
       setForm({ ...form, touched: true })
       toast.error('Revise o endereço', { description: err })
+      return
+    }
+    const rotateSecret = formNeedsSecret(form)
+    const secretErr = formSecretError(form)
+    if (secretErr) {
+      setForm({ ...form, secretTouched: true })
+      toast.error('Revise o segredo', { description: secretErr })
       return
     }
     if (hasTokenInUrl(url)) {
@@ -167,15 +226,33 @@ export default function Webhooks() {
     }
     const label = WEBHOOK_EVENT_LABEL[form.event]
     if (form.id) {
-      const prev = dests.get(form.id)
-      dests.update(form.id, { event: form.event, url, active: form.active })
-      audit('editar', `Webhook ${label}`, prev && prev.url !== url ? `Endereço trocado para ${maskUrlTokens(url)}` : 'Destino atualizado')
-      toast.success('Destino atualizado')
+      const id = form.id
+      const prev = dests.get(id)
+      // origem do endereço ou evento trocados: segredo novo (o antigo fica preso ao destino anterior)
+      const secret = rotateSecret ? (form.secretMode === 'gerar' ? newSigningSecret() : form.secret.trim()) : null
+      const r = await dbSetAndWaitResult<WebhookDestination[]>(
+        WEBHOOK_KEYS.destinations,
+        (list) => list.map((d) => (d.id === id ? { ...d, event: form.event, url, active: form.active, ...(secret ? { secret } : {}) } : d)),
+        undefined,
+        { quiet: isSecretFieldError },
+      )
+      if (!r.ok) {
+        // o servidor recusou o segredo ("O destino mudou: digite um novo segredo."): o formulário pede no próprio campo
+        if (r.error && isSecretFieldError(r.error)) setForm({ ...form, forceSecret: true, secretMode: 'digitar', secretTouched: true, secretServerError: r.error.message })
+        return
+      }
+      audit(
+        'editar',
+        `Webhook ${label}`,
+        `${prev && prev.url !== url ? `Endereço trocado para ${maskUrlTokens(url)}` : 'Destino atualizado'}${secret ? ' · segredo de assinatura novo' : ''}`,
+      )
+      toast.success('Destino atualizado', { description: secret ? 'Atualize o segredo no sistema que recebe.' : undefined })
       setForm(null)
+      if (secret && form.secretMode === 'gerar') setNewSecret({ label, secret })
     } else {
       const secret = newSigningSecret()
       const d: WebhookDestination = { id: uid('wh'), event: form.event, url, active: form.active, secret, createdAt: new Date().toISOString() }
-      dests.add(d, 'end')
+      if (!(await saveDestinations((list) => [...list, d]))) return
       audit('criar', `Webhook ${label}`, `Destino ${maskUrlTokens(url)} criado${form.active ? '' : ' (inativo)'}`)
       toast.success('Destino criado', { description: 'Copie o segredo de assinatura para o sistema que recebe.' })
       setForm(null)
@@ -183,8 +260,19 @@ export default function Webhooks() {
     }
   }
 
-  const toggle = (d: WebhookDestination, on: boolean) => {
-    dests.update(d.id, { active: on })
+  /** espera o servidor: recusado, o formulário fica aberto */
+  const submitForm = async () => {
+    if (saving) return
+    setSaving(true)
+    try {
+      await saveForm()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const toggle = async (d: WebhookDestination, on: boolean) => {
+    if (!(await saveDestinations((list) => list.map((x) => (x.id === d.id ? { ...x, active: on } : x))))) return
     const othersOn = dests.items.some((x) => x.id !== d.id && x.event === d.event && x.active)
     audit(on ? 'ligar' : 'desligar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Destino ${maskUrlTokens(d.url)} ${on ? 'ativado' : 'desativado'}`)
     toast.success(on ? 'Destino ativado' : 'Destino desativado', {
@@ -195,13 +283,13 @@ export default function Webhooks() {
   const remove = async (d: WebhookDestination) => {
     const ok = await confirm({
       title: 'Excluir este destino?',
-      description: `${maskUrlTokens(d.url)} deixa de receber "${WEBHOOK_EVENT_LABEL[d.event]}". O histórico de entregas continua em Estatísticas.`,
+      description: `${maskUrlTokens(d.url)} deixa de receber "${WEBHOOK_EVENT_LABEL[d.event]}". Entregas ainda na fila para ele não saem mais: ficam como falha ("Destino removido"). O histórico de entregas continua em Estatísticas.`,
       confirmLabel: 'Excluir destino',
       tone: 'danger',
       icon: Trash2,
     })
     if (!ok) return
-    dests.remove(d.id)
+    if (!(await saveDestinations((list) => list.filter((x) => x.id !== d.id)))) return
     setDetailId(null)
     audit('excluir', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Destino ${maskUrlTokens(d.url)} excluído`)
     toast.success('Destino excluído')
@@ -217,7 +305,8 @@ export default function Webhooks() {
     })
     if (!ok) return
     const secret = newSigningSecret()
-    dests.update(d.id, { secret })
+    // só mostra o segredo depois que o servidor gravou (recusado, o antigo continua valendo)
+    if (!(await saveDestinations((list) => list.map((x) => (x.id === d.id ? { ...x, secret } : x))))) return
     audit('editar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `Segredo de assinatura trocado (${maskUrlTokens(d.url)})`)
     setNewSecret({ label: WEBHOOK_EVENT_LABEL[d.event], secret })
   }
@@ -232,13 +321,18 @@ export default function Webhooks() {
       patchCache<WebhookExecution[]>(WEBHOOK_KEYS.executions, (prev) => [ex, ...prev.filter((x) => x.id !== ex.id)], seedWebhookExecutions)
       refreshKey(WEBHOOK_KEYS.executions).catch(() => {})
       const timing = `${httpLabel(ex.httpStatus)} em ${num(ex.durationMs)} ms`
-      if (ex.status === 'sucesso') toast.success('Teste entregue', { description: `${timing}.` })
+      if (ex.status === 'sucesso') toast.success('Teste entregue', { description: `${timing}. Enviado como ${WEBHOOK_TEST_EVENT}.` })
       else
         toast.error('O teste falhou', {
           description: ex.error ? `${ex.error}${ex.durationMs ? ` Tempo: ${num(ex.durationMs)} ms.` : ''}` : `O destino respondeu ${timing}.`,
           duration: 6000,
         })
     } catch (e) {
+      // 409 versao_desatualizada (gravações cruzadas): a mensagem do servidor aparece e as listas são relidas
+      if (isVersionConflict(e)) {
+        refreshKey(WEBHOOK_KEYS.destinations).catch(() => {})
+        refreshKey(WEBHOOK_KEYS.executions).catch(() => {})
+      }
       toast.error('Não foi possível testar', { description: e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor. Tente de novo.' })
     } finally {
       setTesting((cur) => (cur === d.id ? null : cur))
@@ -267,10 +361,12 @@ export default function Webhooks() {
         status: res.status,
         httpStatus: res.httpStatus,
         durationMs: res.durationMs,
-        payload: JSON.stringify({ test: true, event: d.event, at: now, data: { id: 'TESTE-0001', amount: 100 } }),
+        // mesmo corpo do servidor: evento webhook.teste; a execução fica no evento do destino
+        payload: JSON.stringify(webhookTestBody(d, now)),
+        test: true,
       })
       audit('testar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, `POST de teste para ${maskUrlTokens(d.url)}: HTTP ${res.httpStatus} em ${res.durationMs} ms`)
-      if (res.status === 'sucesso') toast.success('Teste entregue', { description: `HTTP ${res.httpStatus} em ${num(res.durationMs)} ms.` })
+      if (res.status === 'sucesso') toast.success('Teste entregue', { description: `HTTP ${res.httpStatus} em ${num(res.durationMs)} ms. Enviado como ${WEBHOOK_TEST_EVENT}.` })
       else toast.error('O teste falhou', { description: res.message })
       setTesting(null)
     }, 700)
@@ -388,6 +484,9 @@ export default function Webhooks() {
                 </li>
                 <li>Recuse envios com timestamp mais velho que 5 minutos.</li>
                 <li>Responda 2xx em até {TIMEOUT_S} s. Falhas são tentadas de novo até 5 vezes, com espera crescente.</li>
+                <li>
+                  Testes chegam com <Mono>X-X2W-Event: {WEBHOOK_TEST_EVENT}</Mono> e <Mono>"test": true</Mono>; o evento do destino vem em <Mono>data.destinationEvent</Mono>. Não trate um teste como evento real.
+                </li>
               </ol>
             </CardBody>
           </Card>
@@ -424,10 +523,11 @@ export default function Webhooks() {
         </aside>
       </div>
 
-      {form && <DestinationForm form={form} setForm={setForm} all={dests.items} canEdit={canEdit} onSave={saveForm} />}
+      {form && <DestinationForm form={form} setForm={setForm} all={dests.items} canEdit={canEdit} saving={saving} onSave={submitForm} />}
 
       {detail && (
         <DestinationDrawer
+          key={detail.id}
           d={detail}
           execs={execs.items}
           canEdit={canEdit}
@@ -466,6 +566,10 @@ export default function Webhooks() {
       </Modal>
     </>
   )
+}
+
+function urlOriginChanged(before: string, after: string) {
+  return needsNewSecret({ event: '', url: before }, { event: '', url: after })
 }
 
 function duplicateError(all: WebhookDestination[], f: FormState, url: string) {
@@ -531,7 +635,7 @@ function DestinationRow({
         </button>
       </div>
       <div className="flex shrink-0 items-center gap-1.5 pl-12 sm:pl-0">
-        <Button size="sm" icon={Send} onClick={onTest} loading={testing} disabled={!canEdit} title={!canEdit ? 'Seu cargo não testa webhooks' : 'Envia um POST de teste'}>
+        <Button size="sm" icon={Send} onClick={onTest} loading={testing} disabled={!canEdit} title={!canEdit ? 'Seu cargo não testa webhooks' : `Envia um POST de teste (evento ${WEBHOOK_TEST_EVENT}, assinado com o segredo do destino)`}>
           Testar
         </Button>
         <Menu
@@ -554,18 +658,28 @@ function DestinationForm({
   setForm,
   all,
   canEdit,
+  saving,
   onSave,
 }: {
   form: FormState
   setForm: (f: FormState | null) => void
   all: WebhookDestination[]
   canEdit: boolean
+  saving: boolean
   onSave: () => void
 }) {
   const url = form.url.trim()
-  const error = validateWebhookUrl(url) ?? duplicateError(all, form, url)
+  const error = validateWebhookUrl(url) ?? duplicateError(all, form, url) ?? demoHostError(form, url)
   const showError = form.touched || (url.length > 8 && !!error && url !== 'https://')
   const tokens = !error ? findTokenSegments(url) : []
+  const needsSecret = formNeedsSecret(form)
+  const secretError = formSecretError(form)
+  const showSecretError = form.secretTouched && !!secretError
+  // endereço ou evento trocados: o que estava na fila para este destino não segue o endereço novo
+  const rerouted = !!form.original && (form.original.url.trim() !== url || form.original.event !== form.event)
+  const changed = form.original
+    ? [form.original.event !== form.event && 'o evento mudou', urlOriginChanged(form.original.url, url) && 'o endereço mudou de domínio, protocolo ou porta'].filter(Boolean).join(' e ')
+    : ''
   return (
     <Modal
       open
@@ -577,7 +691,7 @@ function DestinationForm({
       footer={
         <>
           <Button onClick={() => setForm(null)}>Cancelar</Button>
-          <Button variant="primary" onClick={onSave} disabled={!canEdit}>
+          <Button variant="primary" onClick={onSave} loading={saving} disabled={!canEdit}>
             {form.id ? 'Salvar destino' : 'Criar destino'}
           </Button>
         </>
@@ -611,8 +725,55 @@ function DestinationForm({
           {tokens.length > 0 && (
             <Alert tone="warning" icon={ShieldAlert} title="Este endereço parece ter um token">
               {tokens.map((t) => (t.where === 'caminho' ? `Trecho do caminho “${maskToken(t.value)}”` : `Parâmetro “${t.name}”`)).join(', ')} parece um segredo. Tokens na URL ficam gravados em logs. Prefira validar a assinatura{' '}
-              <strong>{SIGNATURE_HEADER}</strong> ou um cabeçalho de autenticação. Se o sistema exigir o token, você pode salvar mesmo assim: ele aparece mascarado no painel.
+              <strong>{SIGNATURE_HEADER}</strong> ou um cabeçalho de autenticação. Se o sistema exigir o token, você pode salvar mesmo assim: ele fica mascarado nas listas, no histórico de envios e para quem não edita webhooks.
             </Alert>
+          )}
+          {needsSecret ? (
+            <div className="space-y-3 rounded-xl border border-warning/40 bg-warning/5 p-4">
+              <div className="flex items-start gap-2.5">
+                <KeyRound size={16} className="mt-0.5 shrink-0 text-warning" aria-hidden />
+                <div className="text-[13px] leading-5">
+                  <p className="font-semibold text-fg">O destino mudou: precisa de um segredo novo</p>
+                  <p className="text-fg-3">
+                    {changed ? `${changed.charAt(0).toUpperCase()}${changed.slice(1)}. ` : ''}O segredo atual fica com o destino anterior e para de valer ao salvar. Entregas ainda na fila não seguem o endereço novo: ficam como falha (“Destino alterado”).
+                  </p>
+                </div>
+              </div>
+              <Segmented
+                ariaLabel="Segredo novo"
+                value={form.secretMode}
+                onChange={(secretMode) => setForm({ ...form, secretMode })}
+                options={[
+                  { value: 'gerar', label: 'Gerar um segredo', icon: RefreshCw },
+                  { value: 'digitar', label: 'Digitar o segredo', icon: KeyRound },
+                ]}
+              />
+              {form.secretMode === 'digitar' ? (
+                <Field
+                  label="Segredo novo"
+                  htmlFor="wh-secret"
+                  required
+                  error={showSecretError ? secretError : form.secretServerError}
+                  hint={`Pelo menos ${MIN_SECRET_LENGTH} caracteres: o mesmo valor configurado no sistema que recebe.`}
+                >
+                  <Input
+                    id="wh-secret"
+                    icon={KeyRound}
+                    value={form.secret}
+                    onChange={(e) => setForm({ ...form, secret: e.target.value, secretServerError: null })}
+                    onBlur={() => setForm({ ...form, secretTouched: true })}
+                    invalid={showSecretError || !!form.secretServerError}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="font-mono"
+                  />
+                </Field>
+              ) : (
+                <p className="text-xs text-fg-3">Ao salvar, geramos o segredo novo e mostramos uma única vez para você copiar.</p>
+              )}
+            </div>
+          ) : (
+            rerouted && <p className="text-xs text-fg-3">Entregas ainda na fila para este destino não seguem o endereço novo: ficam como falha (“Destino alterado”).</p>
           )}
           <Switch label="Destino ativo" description={form.active ? 'Recebe os eventos a partir de agora.' : 'Fica salvo, mas não recebe nada.'} checked={form.active} onChange={(on) => setForm({ ...form, active: on })} />
           {!form.id && <p className="text-xs text-fg-3">Ao criar, geramos um segredo de assinatura e mostramos uma única vez para você copiar.</p>}
@@ -645,17 +806,52 @@ function DestinationDrawer({
   onRemove: () => void
   onToggle: (on: boolean) => void
 }) {
-  const [revealed, setRevealed] = useState(false)
+  /** endereço completo revelado: só nesta tela aberta, nunca guardado */
+  const [revealed, setRevealed] = useState<string | null>(null)
+  const [revealing, setRevealing] = useState(false)
   const list = useMemo(() => execs.filter((e) => e.destinationId === d.id).sort((a, b) => b.at.localeCompare(a.at)), [execs, d.id])
   const st = deliveryStats(list, Date.now() - 30 * 86_400_000)
   const tokens = findTokenSegments(d.url)
-  const reveal = () => {
+  // endereço editado com a ficha aberta: esconde de novo
+  useEffect(() => setRevealed(null), [d.url])
+  /**
+   * Endereço completo. Modo API: pedido ao servidor (POST .../reveal, quem edita webhooks),
+   * que registra na auditoria. Demonstração: o da lista, com o registro local.
+   */
+  const fullUrl = async (): Promise<string | null> => {
     if (!canEdit) {
       toast.error('Seu cargo não pode ver o endereço completo.')
-      return
+      return null
     }
-    setRevealed(true)
-    audit('revelar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, 'Endereço completo do destino exibido (token na URL)')
+    if (!API) {
+      audit('revelar', `Webhook ${WEBHOOK_EVENT_LABEL[d.event]}`, 'Endereço completo do destino exibido (token na URL)')
+      return d.url
+    }
+    setRevealing(true)
+    try {
+      const res = await api<{ url: string }>('POST', `/api/webhooks/destinations/${encodeURIComponent(d.id)}/reveal`)
+      return res.url
+    } catch (e) {
+      toast.error('Não foi possível mostrar o endereço', { description: e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor. Tente de novo.' })
+      return null
+    } finally {
+      setRevealing(false)
+    }
+  }
+  const reveal = async () => {
+    const url = await fullUrl()
+    if (url) setRevealed(url)
+  }
+  const copyFull = async () => {
+    const url = revealed ?? (await fullUrl())
+    if (!url) return
+    try {
+      await navigator.clipboard.writeText(url)
+      toast.success('Endereço completo copiado')
+    } catch {
+      setRevealed(url)
+      toast.error('Não foi possível copiar', { description: 'O endereço aparece na tela: selecione e copie.' })
+    }
   }
   const columns: Column<WebhookExecution>[] = [
     { id: 'at', header: 'Data e hora', sortValue: (e) => e.at, cell: (e) => <span className="text-[13px] text-fg-2 tnum">{dateTime(e.at)}</span> },
@@ -720,13 +916,21 @@ function DestinationDrawer({
               full: true,
               value: (
                 <span className="flex flex-wrap items-center gap-2">
-                  <Mono className="break-all text-fg">{revealed ? d.url : maskUrlTokens(d.url)}</Mono>
+                  <Mono className="break-all text-fg">{revealed ?? maskUrlTokens(d.url)}</Mono>
                   {tokens.length > 0 && !revealed && (
-                    <button type="button" onClick={reveal} className="inline-flex items-center gap-1 text-xs font-semibold text-primary-text hover:underline">
+                    <button type="button" onClick={reveal} disabled={revealing} className="inline-flex items-center gap-1 text-xs font-semibold text-primary-text hover:underline disabled:opacity-60">
                       <Eye size={12} aria-hidden /> Revelar
                     </button>
                   )}
-                  {(!tokens.length || revealed) && <CopyButton value={d.url} label="Copiar endereço" />}
+                  {tokens.length > 0 ? (
+                    canEdit && (
+                      <Button size="xs" variant="soft" icon={Copy} onClick={copyFull} loading={revealing} title="Copia o endereço com o token (fica registrado na auditoria)">
+                        Copiar endereço completo
+                      </Button>
+                    )
+                  ) : (
+                    <CopyButton value={d.url} label="Copiar endereço" />
+                  )}
                 </span>
               ),
             },

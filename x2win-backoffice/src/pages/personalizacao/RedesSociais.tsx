@@ -26,6 +26,7 @@ import { cn } from '@/lib/cn'
 import { useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { useCompany } from '@/domain/system'
+import { safeLinkHref } from '@/domain/personalizacao-p1'
 import {
   DEFAULT_SOCIAL,
   P2_KEYS,
@@ -122,6 +123,8 @@ export default function RedesSociais() {
                     disabled={form.readOnly}
                     render={(l) => {
                       const err = socialUrlError(l.network, l.url)
+                      // só vira link o endereço que passa na regra da rede (https e domínio dela)
+                      const href = err ? null : safeLinkHref(l.url)
                       return (
                         <div className="flex min-w-0 items-center gap-3">
                           <SocialTile network={l.network} />
@@ -139,16 +142,22 @@ export default function RedesSociais() {
                             ariaLabel={`${l.visible ? 'Esconder' : 'Mostrar'} ${SOCIAL_DEFS[l.network].label} no site`}
                             disabled={form.readOnly}
                           />
-                          <a
-                            href={l.url}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="hidden h-8 w-8 items-center justify-center rounded-lg text-fg-2 hover:bg-surface-3 hover:text-fg sm:inline-flex"
-                            aria-label={`Abrir ${SOCIAL_DEFS[l.network].label} em nova aba`}
-                            title="Abrir perfil"
-                          >
-                            <ExternalLink size={15} aria-hidden />
-                          </a>
+                          {href ? (
+                            <a
+                              href={href}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="hidden h-8 w-8 items-center justify-center rounded-lg text-fg-2 hover:bg-surface-3 hover:text-fg sm:inline-flex"
+                              aria-label={`Abrir ${SOCIAL_DEFS[l.network].label} em nova aba`}
+                              title="Abrir perfil"
+                            >
+                              <ExternalLink size={15} aria-hidden />
+                            </a>
+                          ) : (
+                            <span className="hidden h-8 w-8 items-center justify-center rounded-lg text-fg-3 opacity-40 sm:inline-flex" title="Corrija o link para abrir o perfil" aria-hidden>
+                              <ExternalLink size={15} />
+                            </span>
+                          )}
                           <IconButton icon={Pencil} label={`Editar ${SOCIAL_DEFS[l.network].label}`} size="sm" onClick={() => setEditing(l)} disabled={form.readOnly} />
                           <IconButton icon={Trash2} label={`Remover ${SOCIAL_DEFS[l.network].label}`} size="sm" variant="danger" onClick={() => remove(l)} disabled={form.readOnly} />
                         </div>

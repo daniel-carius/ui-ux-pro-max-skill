@@ -67,7 +67,10 @@ import {
   DEFAULT_WITHDRAWAL_RULES,
   WITHDRAWAL_KEYS,
   approveWithdrawal,
+  canDecideWithdrawals,
   checkApprovalCeiling,
+  checkAutoApproveCeiling,
+  outOfRulesKind,
   rejectWithdrawal,
   revealPixKey,
   simulateWithdrawal,
@@ -100,6 +103,12 @@ const REJECT_REASONS = [
 const OPEN: WithdrawalStatus[] = ['criado', 'pendente', 'em_analise']
 
 type Filter = 'todos' | WithdrawalStatus
+
+/** Quem decidiu, com o e-mail (separa pessoas com o mesmo nome). */
+function deciderText(w: Withdrawal) {
+  if (!w.decidedBy) return ''
+  return w.decidedByEmail ? `${w.decidedBy} <${w.decidedByEmail}>` : w.decidedBy
+}
 
 /** Decisão em andamento por saque (modo API: espera a resposta do servidor). */
 type Busy = Record<string, 'approve' | 'reject'>
@@ -184,8 +193,8 @@ function Queue() {
     }
     const ok = await confirm({
       title: `Aprovar saque de ${brl(w.amount)}?`,
-      description: 'O PIX é enviado na hora e não pode ser desfeito.',
-      confirmLabel: 'Aprovar e pagar',
+      description: 'O saque fica aprovado e o aviso de pagamento vai para o sistema que paga (saque.pago). Não pode ser desfeito.',
+      confirmLabel: 'Aprovar saque',
       tone: 'success',
       icon: CheckCircle2,
       details: (
@@ -201,9 +210,31 @@ function Queue() {
       ),
     })
     if (!ok) return
-    const r = await track(w, 'approve', () => approveWithdrawal(w, role, user.name))
-    if (r.ok) toast.success('Saque aprovado', { description: r.message })
-    else toast.error('Não foi possível aprovar', { description: r.message })
+    const r = await track(w, 'approve', () => approveWithdrawal(w, role, { id: user.id, name: user.name, email: user.email }))
+    if (r.ok) {
+      toast.success('Saque aprovado', { description: r.message })
+      return
+    }
+    // regras do servidor: o saque continua aberto (não é conflito de versão); explica o próximo passo
+    if (r.code === 'jogador_bloqueado') {
+      toast.error('Pagamento bloqueado', {
+        description: `${r.message} Para devolver o valor ao saldo do jogador, recuse o saque.`,
+        action: canDecide ? { label: 'Recusar saque', onClick: () => void reject(w) } : undefined,
+        duration: 8000,
+      })
+    } else if (r.code === 'fora_das_regras') {
+      const kind = outOfRulesKind(r.details)
+      toast.error('Fora das regras de saque', {
+        description: `${r.message} ${
+          kind === 'dailyLimit' ? 'Aguarde a janela de 24 horas ou recuse o saque.' : 'Recuse o saque ou revise o valor máximo nas regras de saque.'
+        }`,
+        duration: 8000,
+      })
+    } else if (r.code === 'segregacao_funcoes') {
+      toast.warning('Outra pessoa precisa aprovar', { description: r.message, duration: 8000 })
+    } else {
+      toast.error('Não foi possível aprovar', { description: r.message })
+    }
   }
 
   const reject = async (w: Withdrawal) => {
@@ -217,7 +248,7 @@ function Queue() {
       input: { label: 'Motivo', required: true, options: REJECT_REASONS },
     })
     if (!r.confirmed) return
-    const res = await track(w, 'reject', () => rejectWithdrawal(w, role, user.name, r.value))
+    const res = await track(w, 'reject', () => rejectWithdrawal(w, role, { id: user.id, name: user.name, email: user.email }, r.value))
     if (res.ok) toast.success('Saque recusado', { description: res.message })
     else toast.error('Não foi possível recusar', { description: res.message })
   }
@@ -283,7 +314,7 @@ function Queue() {
       id: 'decision',
       header: 'Decisão',
       pinned: true,
-      csv: (w) => w.decidedBy ?? '',
+      csv: deciderText,
       cell: (w) =>
         OPEN.includes(w.status) ? (
           <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
@@ -302,8 +333,13 @@ function Queue() {
               Recusar
             </Button>
           </div>
+        ) : w.decidedBy ? (
+          <span className="block text-xs text-fg-3">
+            por {w.decidedBy}
+            {w.decidedByEmail && <span className="block text-[11px]">{w.decidedByEmail}</span>}
+          </span>
         ) : (
-          <span className="text-xs text-fg-3">{w.decidedBy ? `por ${w.decidedBy}` : '—'}</span>
+          <span className="text-xs text-fg-3">—</span>
         ),
     },
   ]
@@ -528,7 +564,17 @@ function WithdrawalDrawer({
             <h3 className="mb-3 text-sm font-semibold text-fg">Decisão</h3>
             <DescriptionList
               items={[
-                { label: 'Decidido por', value: w.decidedBy ?? '—' },
+                {
+                  label: 'Decidido por',
+                  value: w.decidedBy ? (
+                    <span>
+                      {w.decidedBy}
+                      {w.decidedByEmail && <span className="block text-xs text-fg-3">{w.decidedByEmail}</span>}
+                    </span>
+                  ) : (
+                    '—'
+                  ),
+                },
                 { label: 'Em', value: dateTime(w.updatedAt) },
                 ...(w.decisionNote ? [{ label: 'Motivo', value: w.decisionNote, full: true }] : []),
               ]}
@@ -541,8 +587,21 @@ function WithdrawalDrawer({
 }
 
 
+/**
+ * Ligar ou mudar a aprovação automática equivale a aprovar saques até esse valor: só quem decide saques, e nunca
+ * acima do próprio teto (o servidor responde 403 teto_excedido). Desligar (0) ou manter o valor salvo vale sempre.
+ */
+function autoApproveError(role: Parameters<typeof checkAutoApproveCeiling>[0], next: number, saved: number) {
+  const c = checkAutoApproveCeiling(role, next, saved)
+  return c.ok ? null : c.message
+}
+
+const isCeilingError = (e: ApiError) => e.status === 403 && e.code === 'teto_excedido'
+
 function Rules() {
   const { canEdit } = usePageAccess()
+  const { role } = useSession()
+  const [savedRules] = useDb<WithdrawalRules>(WITHDRAWAL_KEYS.rules, DEFAULT_WITHDRAWAL_RULES)
   const form = useSettingsForm<WithdrawalRules>(WITHDRAWAL_KEYS.rules, DEFAULT_WITHDRAWAL_RULES, {
     entity: 'Regras de saque',
     successMessage: 'Regras de saque salvas',
@@ -556,11 +615,17 @@ function Rules() {
       rolloverMode: 'modo de contagem',
       rolloverBets: 'apostas que contam',
     },
-    // mesma validação do servidor (shared/withdrawals)
-    validate: validateWithdrawalRules,
+    // mesma validação do servidor (shared/withdrawals): limites, centavos e teto da aprovação automática
+    validate: (r) => validateWithdrawalRules(r) ?? autoApproveError(role, r.autoApproveMax, savedRules.autoApproveMax),
+    // modo API: 403 teto_excedido (cargo no servidor diferente do da sessão) aparece no campo do máximo automático
+    quiet: isCeilingError,
   })
   const v = form.values
   const autoOn = v.autoApproveMax > 0
+  const autoErr = autoApproveError(role, v.autoApproveMax, form.saved.autoApproveMax) ?? (form.error && isCeilingError(form.error) ? form.error.message : null)
+  // sem decidir saques, só dá para desligar ou manter o valor salvo
+  const canTurnOnAuto = canDecideWithdrawals(role)
+  const centsErr = (n: number) => (Math.abs(n * 100 - Math.round(n * 100)) > 1e-6 ? 'Use no máximo 2 casas decimais.' : null)
   const [sim, setSim] = useState({ amount: 150, withdrawalsToday: 0, deposited: 200, wagered: 120 })
   const result = simulateWithdrawal(v, sim)
 
@@ -626,19 +691,34 @@ function Rules() {
 
         <SettingsSection
           title="Aprovação automática"
-          description="Saques até o teto, de risco baixo e que passam em todas as regras, são pagos sem entrar na fila."
+          description="Saques até o teto, de risco baixo e que passam em todas as regras, são aprovados sem entrar na fila."
         >
           <Switch
             label="Aprovar automaticamente saques pequenos"
             description={autoOn ? `Ligada até ${brl(v.autoApproveMax)}.` : 'Desligada: todo saque passa pela fila operacional.'}
             checked={autoOn}
-            onChange={(on) => form.set('autoApproveMax', on ? Math.min(200, v.maxPerRequest) : 0)}
+            disabled={!autoOn && !canTurnOnAuto}
+            title={!autoOn && !canTurnOnAuto ? `O cargo ${role.name} não aprova saques e por isso não liga a aprovação automática.` : undefined}
+            onChange={(on) => {
+              // ao religar, volta ao valor salvo se houver; senão, o menor entre R$ 200,00, o máximo por saque e o teto do cargo
+              const ceiling = role.approvalCeiling ?? Number.POSITIVE_INFINITY
+              const start = form.saved.autoApproveMax > 0 ? form.saved.autoApproveMax : Math.min(200, v.maxPerRequest, ceiling)
+              form.set('autoApproveMax', on ? start : 0)
+            }}
           />
           {autoOn && (
-            <Field label="Máximo automático" htmlFor="r-auto" hint="Recomendado: até R$ 200,00 enquanto o anti-fraude estiver em calibração.">
-              <MoneyInput id="r-auto" value={v.autoApproveMax} onValueChange={(n) => form.set('autoApproveMax', n)} />
+            <Field
+              label="Máximo automático"
+              htmlFor="r-auto"
+              error={autoErr ?? centsErr(v.autoApproveMax)}
+              hint={`Recomendado: até R$ 200,00 enquanto o anti-fraude estiver em calibração.${
+                canTurnOnAuto && role.approvalCeiling !== null ? ` Não passa do teto do seu cargo (${brl(role.approvalCeiling)}).` : ''
+              }`}
+            >
+              <MoneyInput id="r-auto" value={v.autoApproveMax} invalid={!!autoErr} onValueChange={(n) => form.set('autoApproveMax', n)} />
             </Field>
           )}
+          {!canTurnOnAuto && <p className="text-xs text-fg-3">Só quem aprova saques liga ou muda a aprovação automática. Desligar vale para qualquer pessoa que edita as regras.</p>}
         </SettingsSection>
       </FormFieldset>
 

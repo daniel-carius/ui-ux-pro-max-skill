@@ -2,6 +2,7 @@
 import { createRng } from '@/lib/random'
 import { OPEN_INVOICE } from '@/domain/system'
 import { round2, sumItems, type Invoice, type InvoiceItem } from '@/domain/config1-faturas'
+import { demoRecords } from './demo'
 
 const MONTHLY_FEE = 2490
 const GGR_RATE = 0.015
@@ -82,3 +83,6 @@ export function seedInvoices(): Invoice[] {
   }
   return [open, ...past]
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedInvoices)

@@ -187,6 +187,24 @@ export type MdBlock =
   | { kind: 'ul' | 'ol'; items: MdInline[][] }
   | { kind: 'hr' }
 
+/**
+ * Endereço de link do markdown que pode virar href: só https:// (URL válida) ou caminho interno do site
+ * ("/termos", "#/settings/…"). Qualquer outro esquema (javascript:, data:, http:, //host…) vira texto puro.
+ */
+export function safeLinkHref(href: string | undefined): string | null {
+  const h = (href ?? '').trim()
+  if (!h) return null
+  // caminho interno: começa com uma barra só (não "//host") ou com "#/"
+  if (/^\/(?![\/\\])/.test(h) || h.startsWith('#/')) return /\s/.test(h) || [...h].some((c) => c.charCodeAt(0) < 32) ? null : h
+  if (!/^https:\/\//i.test(h)) return null
+  try {
+    const u = new URL(h)
+    return u.protocol === 'https:' && !!u.hostname ? u.href : null
+  } catch {
+    return null
+  }
+}
+
 export function parseInline(s: string): MdInline[] {
   const out: MdInline[] = []
   const re = /\*\*(.+?)\*\*|_(.+?)_|\*(.+?)\*|\[(.+?)\]\((.+?)\)/g

@@ -47,8 +47,8 @@ import {
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import { brl, mult, num, pct } from '@/lib/format'
-import { usePlayers } from '@/data/hooks'
 import { usePageAccess } from '@/domain/session'
+import { refreshPlayerMetrics, useCampaignPlayers } from '@/domain/campanhas-jogadores'
 import {
   BET_CATEGORIES,
   BET_CATEGORY_LABEL,
@@ -81,10 +81,13 @@ export default function Niveis() {
     entity: 'Níveis e XP',
     successMessage: 'Trilha de níveis salva',
     validate: validateLevelsConfig,
+    // modo API: a projeção do cashback por nível (geral.jogadores.metricas) usa os níveis salvos
+    onSaved: refreshPlayerMetrics,
   })
   const v = form.values
   const levels = v.levels
-  const { items: players } = usePlayers()
+  // demonstração: a base inteira; modo API: os jogadores ativos (público do servidor, só o XP) e o tamanho da base
+  const { players, total: baseTotal, reachableOnly } = useCampaignPlayers()
   const errors = useMemo(() => levelErrors(levels), [levels])
   const warnings = useMemo(() => levelWarnings(levels), [levels])
   const sorted = levels.every((l, i) => i === 0 || l.xp > levels[i - 1].xp)
@@ -158,8 +161,8 @@ export default function Niveis() {
             icon={Users}
             tone="info"
             value={num(aboveFirst)}
-            hint={`${pct(players.length ? aboveFirst / players.length : 0, 0)} da base`}
-            formula="Jogadores cujo XP atual alcança o 2º nível ou mais, com as faixas do rascunho."
+            hint={`${pct(baseTotal ? aboveFirst / baseTotal : 0, 0)} da base`}
+            formula={`${reachableOnly ? 'Jogadores ativos' : 'Jogadores'} cujo XP atual alcança o 2º nível ou mais, com as faixas do rascunho.`}
           />
           <KpiCard
             label="XP para o topo"
@@ -169,7 +172,7 @@ export default function Niveis() {
             hint={slotsReais !== null ? `≈ ${brl(slotsReais)} apostados em slots` : 'slots não geram XP'}
             formula={`XP necessário para chegar a ${top?.name}. O valor em reais usa a regra de slots (${v.xp.perTen.slots.toLocaleString('pt-BR')} XP a cada R$ 10).`}
           />
-          <KpiCard label="Com saque prioritário" icon={Zap} tone="success" value={num(priority)} hint="jogadores com o benefício hoje" />
+          <KpiCard label="Com saque prioritário" icon={Zap} tone="success" value={num(priority)} hint={reachableOnly ? 'jogadores ativos com o benefício hoje' : 'jogadores com o benefício hoje'} />
         </section>
 
         {!v.enabled && (
@@ -258,7 +261,11 @@ export default function Niveis() {
             </CardBody>
           </Card>
           <Card>
-            <CardHeader icon={Users} title="Jogadores por nível" description="Com o XP atual de cada jogador e as faixas do rascunho" />
+            <CardHeader
+              icon={Users}
+              title="Jogadores por nível"
+              description={reachableOnly ? 'Jogadores ativos, com o XP atual e as faixas do rascunho' : 'Com o XP atual de cada jogador e as faixas do rascunho'}
+            />
             <CardBody>
               <DistributionBars levels={levels} counts={distribution} total={players.length} />
             </CardBody>

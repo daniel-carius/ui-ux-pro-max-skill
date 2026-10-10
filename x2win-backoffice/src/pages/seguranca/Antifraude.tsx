@@ -170,14 +170,18 @@ export default function Antifraude() {
   const banNetwork = async (n: AccountNetwork) => {
     if (!canBan) return denyBan()
     const members = n.playerIds.map((id) => players.get(id)).filter((p): p is Player => !!p)
-    const { toBan, previous } = banPlan(members)
+    const { toBan, previous, selfExcluded } = banPlan(members)
+    // contas autoexcluídas já não entram e não podem mudar de status pelo painel: ficam como estão
+    const skippedNote = selfExcluded.length ? ` ${plural(selfExcluded.length, 'conta autoexcluída fica', 'contas autoexcluídas ficam')} como está${selfExcluded.length > 1 ? 'o' : ''}.` : ''
     if (!toBan.length) {
-      toast.info('Todas as contas desta rede já estão bloqueadas')
+      toast.info(selfExcluded.length ? 'Nenhuma conta desta rede para bloquear' : 'Todas as contas desta rede já estão bloqueadas', {
+        description: selfExcluded.length ? `As outras já estão bloqueadas.${skippedNote}` : undefined,
+      })
       return
     }
     const r = await confirmWithInput({
       title: `Banir a rede ${n.id}?`,
-      description: `${plural(toBan.length, 'conta é bloqueada', 'contas são bloqueadas')} na hora: não entram, não depositam, não jogam e não sacam. O saldo fica retido até a análise. Dá para desfazer na aba Bloqueios.`,
+      description: `${plural(toBan.length, 'conta é bloqueada', 'contas são bloqueadas')} na hora: não entram, não depositam, não jogam e não sacam. O saldo fica retido até a análise. Dá para desfazer na aba Bloqueios.${skippedNote}`,
       confirmLabel: 'Banir rede inteira',
       tone: 'danger',
       icon: Ban,

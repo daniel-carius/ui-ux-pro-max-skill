@@ -20,8 +20,10 @@ import {
   Smartphone,
 } from 'lucide-react'
 import { Badge, Button, Card, CardBody, CardHeader, IconButton, Modal, Segmented, toast, type SettingsForm } from '@/components/ui'
+import { isApiMode } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { audit, usePageAccess } from '@/domain/session'
+import { safeImageSrc } from '@/domain/personalizacao-p1'
 import type { CompanyState } from '@/domain/system'
 import type { Game } from '@/data/catalog'
 import {
@@ -245,10 +247,12 @@ export function SiteLogo({ name = 'X2Win', size = 28, color = PREVIEW.text }: { 
   )
 }
 
-/** Capa do jogo: imagem enviada ou arte gerada pela cor do jogo. */
+/** Capa do jogo: imagem enviada (endereço seguro e que carrega) ou arte gerada pela cor do jogo. */
 export function GameCover({ game, provider, style, compact }: { game: Game; provider?: string; style?: CSSProperties; compact?: boolean }) {
-  if (game.cover) {
-    return <img src={game.cover} alt={game.name} className="h-full w-full object-cover" style={style} />
+  const cover = safeImageSrc(game.cover)
+  const [failed, setFailed] = useState<string | null>(null)
+  if (cover && failed !== cover) {
+    return <img src={cover} alt={game.name} className="h-full w-full object-cover" style={style} onError={() => setFailed(cover)} />
   }
   return (
     <div
@@ -616,7 +620,8 @@ export function useMergedSettingsForm<S extends object, K extends keyof S>(
       setTimeout(() => {
         setState((s) => ({ ...s, ...next }))
         const changed = keys.filter((k) => JSON.stringify(next[k]) !== JSON.stringify(prev[k]))
-        audit('editar', opts.entity, opts.describe?.(next, prev) ?? (changed.length ? `Campos alterados: ${changed.join(', ')}` : 'Configuração salva'))
+        // modo API: o servidor registra a gravação da chave (Modo de ataque e Manutenção são só dele)
+        if (!isApiMode()) audit('editar', opts.entity, opts.describe?.(next, prev) ?? (changed.length ? `Campos alterados: ${changed.join(', ')}` : 'Configuração salva'))
         setSaving(false)
         toast.success(opts.successMessage ?? 'Alterações salvas', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
       }, 400)

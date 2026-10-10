@@ -18,17 +18,33 @@ import {
   confirm,
   toast,
 } from '@/components/ui'
+import { isPanelReported } from '@shared/audit'
 import { cn } from '@/lib/cn'
 import { dateTime, duration, time } from '@/lib/format'
-import { useDb } from '@/lib/store'
-import { audit, useAudit, usePageAccess } from '@/domain/session'
-import { useCompany, useMaintenance, type MaintenanceState } from '@/domain/system'
-import { MAINTENANCE_MESSAGE_MAX, bypassUrl, newBypassToken, validateMaintenance } from '@/domain/seguranca'
+import { isApiMode } from '@/lib/api'
+import { dbSetAndWait, refreshKey, useDb } from '@/lib/store'
+import { KEYS as SESSION_KEYS, audit, useAudit, usePageAccess } from '@/domain/session'
+import { DEFAULT_MAINTENANCE, SYSTEM_KEYS, useCompany, useMaintenance, type MaintenanceState } from '@/domain/system'
+import { MAINTENANCE_MESSAGE_MAX, bypassUrl, newBypassToken, validateMaintenance, weakBypassToken } from '@/domain/seguranca'
 import { DEFAULT_SOCIAL, P2_KEYS, footerDefaults, type FooterSettings, type SocialSettings } from '@/data/personalizacao2-config'
 import { BrowserFrame, CharCount, DeviceToggle, initialDevice, LivePreview, PREVIEW, SiteLogo, SocialRow, useMergedSettingsForm, type Device } from '../personalizacao/_shared-p2'
 
 const KEYS = ['message', 'returnAt'] as const
 type Draft = Pick<MaintenanceState, (typeof KEYS)[number]>
+
+/**
+ * Modo API: fechar, reabrir, trocar o link e salvar o aviso é uma gravação da chave; o servidor define desde
+ * quando (since volta na resposta) e grava a linha da auditoria. O painel não relata esses eventos.
+ */
+const API = isApiMode()
+
+/**
+ * Valor completo da chave? Sem a tela de Manutenção o servidor manda só {active, message, returnAt, since}
+ * (sem o link de testes): esse valor reduzido nunca é gravado de volta.
+ */
+function isFullValue(m: MaintenanceState) {
+  return typeof (m as Partial<MaintenanceState>).bypassToken === 'string'
+}
 
 /** ISO → valor do campo datetime-local (hora local) */
 function toLocalInput(iso: string | null) {
@@ -74,12 +90,48 @@ export default function Manutencao() {
   const { canEdit } = usePageAccess()
   const [now, setNow] = useState(() => Date.now())
   const [device, setDevice] = useState<Device>(initialDevice)
-  const form = useMergedSettingsForm(maint, setMaint, KEYS, {
+  const merged = useMergedSettingsForm(maint, setMaint, KEYS, {
     entity: 'Manutenção',
     successMessage: 'Aviso de manutenção salvo',
     validate: (v) => Object.values(validateMaintenance(v, Date.now()))[0] ?? null,
     describe: (v) => `Aviso e previsão de volta atualizados (previsão: ${v.returnAt ? dateTime(v.returnAt) : 'sem previsão'})`,
   })
+
+  /** Grava e espera o servidor (modo demonstração: na hora). Modo API: nunca grava o valor reduzido. */
+  const saveMaint = async (change: (prev: MaintenanceState) => MaintenanceState) => {
+    if (API && !isFullValue(maint)) {
+      toast.error('Alteração não salva', { description: 'Os dados da manutenção não vieram completos. Recarregue a página e tente de novo.' })
+      return false
+    }
+    // modo API: sem link de testes gravado (ou com o da demonstração, público no código do painel), grava um novo
+    const withToken = (prev: MaintenanceState) => {
+      const next = change(prev)
+      return API && weakBypassToken(next.bypassToken) ? { ...next, bypassToken: newBypassToken() } : next
+    }
+    const ok = await dbSetAndWait<MaintenanceState>(SYSTEM_KEYS.maintenance, withToken, DEFAULT_MAINTENANCE)
+    // a linha nova da auditoria (gravada pelo servidor) vem na fatia da tela (sem leitura, refreshKey não busca)
+    if (ok && API) refreshKey(SESSION_KEYS.audit).catch(() => {})
+    return ok
+  }
+  // modo API: salvar o aviso grava a chave e espera o servidor (ele registra a mudança na auditoria)
+  const [savingApi, setSavingApi] = useState(false)
+  const saveNotice = async () => {
+    if (!canEdit) {
+      toast.error('Seu cargo não pode editar esta tela.')
+      return
+    }
+    const next = merged.values
+    const first = Object.values(validateMaintenance(next, Date.now()))[0]
+    if (first) {
+      toast.error('Revise os campos', { description: first })
+      return
+    }
+    setSavingApi(true)
+    const ok = await saveMaint((prev) => ({ ...prev, ...next }))
+    setSavingApi(false)
+    if (ok) toast.success('Aviso de manutenção salvo', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
+  }
+  const form = API ? { ...merged, save: () => void saveNotice(), saving: savingApi } : merged
   const v = form.values
   const errors = validateMaintenance(v, now)
 
@@ -92,8 +144,11 @@ export default function Manutencao() {
   const elapsed = since ? Math.max(0, now - since) : 0
   const returnAt = maint.returnAt ? new Date(maint.returnAt).getTime() : null
   const overdue = maint.active && returnAt !== null && returnAt < now
-  const lastOn = auditLog.find((a) => a.entity === 'Manutenção' && a.action === 'ligar')
-  const url = bypassUrl(maint.bypassToken)
+  // quem fechou: só registros do servidor (relatos do painel não são verificados); desde quando vem da chave
+  const lastOn = auditLog.find((a) => a.entity === 'Manutenção' && a.action === 'ligar' && !isPanelReported(a))
+  // modo API: link fraco ou o da demonstração não vale (a próxima gravação troca por um novo)
+  const hasLink = isFullValue(maint) && !(API && weakBypassToken(maint.bypassToken))
+  const url = hasLink ? bypassUrl(maint.bypassToken) : '—'
 
   const turnOn = async () => {
     if (!canEdit) {
@@ -133,8 +188,9 @@ export default function Manutencao() {
     })
     if (!ok) return
     const at = new Date().toISOString()
-    setMaint((prev) => ({ ...prev, ...v, active: true, since: at }))
-    audit('ligar', 'Manutenção', `Site fechado para manutenção. Previsão de volta: ${v.returnAt ? dateTime(v.returnAt) : 'sem previsão'}`)
+    // modo API: o servidor define o "desde" (o valor daqui só ocupa a tela até a resposta)
+    if (!(await saveMaint((prev) => ({ ...prev, ...v, active: true, since: at })))) return
+    if (!API) audit('ligar', 'Manutenção', `Site fechado para manutenção. Previsão de volta: ${v.returnAt ? dateTime(v.returnAt) : 'sem previsão'}`)
     toast.warning('Site em manutenção', { description: 'Os jogadores veem o aviso. A equipe vê o alerta amarelo no topo do painel.' })
   }
 
@@ -151,8 +207,8 @@ export default function Manutencao() {
       icon: Power,
     })
     if (!ok) return
-    setMaint((prev) => ({ ...prev, active: false, since: null }))
-    audit('desligar', 'Manutenção', `Site reaberto após ${since ? duration(Date.now() - since) : 'manutenção'}`)
+    if (!(await saveMaint((prev) => ({ ...prev, active: false, since: null })))) return
+    if (!API) audit('desligar', 'Manutenção', `Site reaberto após ${since ? duration(Date.now() - since) : 'manutenção'}`)
     toast.success('Site reaberto', { description: 'Os jogadores já podem entrar de novo.' })
   }
 
@@ -169,8 +225,8 @@ export default function Manutencao() {
       icon: RefreshCw,
     })
     if (!ok) return
-    setMaint((prev) => ({ ...prev, bypassToken: newBypassToken() }))
-    audit('editar', 'Manutenção', 'Link de acesso para testes trocado; o anterior deixou de valer')
+    if (!(await saveMaint((prev) => ({ ...prev, bypassToken: newBypassToken() })))) return
+    if (!API) audit('editar', 'Manutenção', 'Link de acesso para testes trocado; o anterior deixou de valer')
     toast.success('Novo link gerado', { description: 'Copie e envie só para a equipe.' })
   }
 
@@ -325,8 +381,9 @@ export default function Manutencao() {
                   <Link2 size={14} className="shrink-0 text-fg-3" aria-hidden />
                   <span className="truncate">{url}</span>
                 </div>
-                <CopyButton value={url} label="Copiar link de testes" />
+                {hasLink && <CopyButton value={url} label="Copiar link de testes" />}
               </div>
+              {isFullValue(maint) && !hasLink && <p className="text-xs leading-5 text-fg-3">Ainda sem link. Clique em “Gerar novo link”; ele também é criado ao salvar o aviso ou fechar o site.</p>}
               <p className="text-xs leading-5 text-fg-3">
                 O acesso vale por 24 horas no navegador de quem abriu. Gerar um novo link derruba o anterior. A equipe também entra pelo painel normalmente.
               </p>

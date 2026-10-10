@@ -7,12 +7,18 @@
 //    na mesma entidade. Desde quando está ligado (since) e quem ligou (activatedBy,
 //    no Modo de ataque) vêm do servidor: definidos ao ligar, limpos ao desligar e
 //    mantidos como estão gravados nas demais gravações;
+//  - config.manutencao: o link de testes (bypassToken) ausente, o da demonstração
+//    (público no código do painel) ou fraco (menos de 20 caracteres de [A-Za-z0-9_-])
+//    nunca é gravado: o servidor grava um novo, que volta na resposta;
+//  - seguranca.modo-ataque: o desligamento automático (autoOffMinutes) é do
+//    servidor (attack-auto-off.ts), em nome de "Sistema";
 //  - config.empresa: 'editar' na entidade "Empresa e licença".
 // Uma linha por gravação (a linha genérica "Dados · <tela>" não é gravada junto). O
 // resumo nunca traz valor de campo de segredo (ex.: bypassToken, o link de testes da
 // manutenção): só o nome do campo alterado.
 import { z } from 'zod'
 import type { AuditAction } from '@shared/audit'
+import { randomToken } from '../../lib/crypto'
 import { hasOwn, isPlainObject, setOwn, summarizeChange, type JsonObject } from './json'
 import { parseOr400, type KvValidator } from './validate-util'
 
@@ -100,7 +106,7 @@ const attackMode = toggleValidator({
   off: 'Desligado',
 })
 
-const maintenance = toggleValidator({
+const maintenanceToggle = toggleValidator({
   entity: MAINTENANCE_ENTITY,
   on: (v) => {
     const back = typeof v.returnAt === 'string' ? Date.parse(v.returnAt) : Number.NaN
@@ -108,6 +114,22 @@ const maintenance = toggleValidator({
   },
   off: 'Site reaberto',
 })
+
+/** Link de testes da demonstração (src/domain/system.ts): está no código do painel, nunca vale aqui. */
+export const DEMO_BYPASS_TOKEN = 'teste-9f3a1c'
+const BYPASS_TOKEN_RE = /^[A-Za-z0-9_-]{20,200}$/
+
+/** Link de testes ausente, o da demonstração ou fraco: troca por um novo, gerado aqui. */
+export function withStrongBypassToken(next: unknown): unknown {
+  if (!isPlainObject(next)) return next
+  const token = next.bypassToken
+  if (typeof token === 'string' && token !== DEMO_BYPASS_TOKEN && BYPASS_TOKEN_RE.test(token)) return next
+  const out: JsonObject = { ...next }
+  setOwn(out, 'bypassToken', `teste-${randomToken(18)}`)
+  return out
+}
+
+const maintenance: KvValidator = (input) => maintenanceToggle({ ...input, next: withStrongBypassToken(input.next) })
 
 const company: KvValidator = ({ next }) => ({ value: next, audit: { action: 'editar', entity: COMPANY_ENTITY } })
 

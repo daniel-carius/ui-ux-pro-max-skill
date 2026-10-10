@@ -42,7 +42,9 @@ import {
   validateSeo,
   type SeoSettings,
 } from '@/data/personalizacao2-config'
+import { safeImageSrc } from '@/domain/personalizacao-p1'
 import { CharCount, DeviceToggle, initialDevice, LivePreview, SiteLogo, type Device } from './_shared-p2'
+import { SafeImage } from './_shared-p1'
 
 type PreviewKind = 'google' | 'whatsapp' | 'facebook'
 
@@ -145,12 +147,19 @@ export default function Seo() {
             <CardHeader icon={ImageIcon} title="Imagens" description="Logotipo e ícone usados pelo Google; imagem que aparece ao compartilhar o link." />
             <CardBody className="space-y-5">
               <div className="grid gap-5 sm:grid-cols-2">
-                <ImageUpload label="Logotipo" value={v.logo} onChange={(x) => form.set('logo', x)} disabled={form.readOnly} hint="Quadrado, mínimo 112×112 px." previewClassName="h-32" />
-                <ImageUpload label="Ícone do navegador" value={v.favicon} onChange={(x) => form.set('favicon', x)} disabled={form.readOnly} hint="PNG quadrado, 48×48 px ou maior." previewClassName="h-32" />
+                <ImageUpload label="Logotipo" value={safeImageSrc(v.logo)} onChange={(x) => form.set('logo', x)} disabled={form.readOnly} hint="Quadrado, mínimo 112×112 px." previewClassName="h-32" />
+                <ImageUpload
+                  label="Ícone do navegador"
+                  value={safeImageSrc(v.favicon)}
+                  onChange={(x) => form.set('favicon', x)}
+                  disabled={form.readOnly}
+                  hint="PNG quadrado, 48×48 px ou maior."
+                  previewClassName="h-32"
+                />
               </div>
               <ImageUpload
                 label="Imagem de compartilhamento"
-                value={v.shareImage}
+                value={safeImageSrc(v.shareImage)}
                 onChange={(x) => form.set('shareImage', x)}
                 width={1200}
                 height={630}
@@ -242,7 +251,7 @@ const G = { bg: '#ffffff', title: '#1a0dab', text: '#4d5156', url: '#202124', fa
 function Favicon({ src, size = 26 }: { src: string | null; size?: number }) {
   return (
     <span className="inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full" style={{ width: size, height: size, background: '#f1f3f4', border: `1px solid ${G.line}` }}>
-      {src ? <img src={src} alt="" style={{ width: size * 0.62, height: size * 0.62, objectFit: 'contain' }} /> : <Globe size={size * 0.55} style={{ color: G.faint }} aria-hidden />}
+      <SafeImage src={src} style={{ width: size * 0.62, height: size * 0.62, objectFit: 'contain' }} fallback={<Globe size={size * 0.55} style={{ color: G.faint }} aria-hidden />} />
     </span>
   )
 }
@@ -291,14 +300,15 @@ function GooglePreview({ v, mobile }: { v: SeoSettings; mobile: boolean }) {
 }
 
 function ShareImage({ v, ratio = '1200 / 630' }: { v: SeoSettings; ratio?: string }) {
-  if (v.shareImage) return <img src={v.shareImage} alt="Imagem de compartilhamento" className="block w-full object-cover" style={{ aspectRatio: ratio }} />
-  return (
+  const empty = (
     <div className="flex w-full flex-col items-center justify-center gap-1.5" style={{ aspectRatio: ratio, background: 'repeating-linear-gradient(135deg,#e9edef 0 10px,#f2f4f5 10px 20px)', color: '#667781' }}>
       <ImageOff size={22} aria-hidden />
       <span style={{ fontSize: 12, fontWeight: 600 }}>Sem imagem de compartilhamento</span>
       <span style={{ fontSize: 11 }}>O link aparece sem foto</span>
     </div>
   )
+  // só imagem enviada pelo painel (ou https); se não carregar, a mesma prévia sem foto
+  return <SafeImage src={v.shareImage} alt="Imagem de compartilhamento" className="block w-full object-cover" style={{ aspectRatio: ratio }} fallback={empty} />
 }
 
 function WhatsAppPreview({ v }: { v: SeoSettings }) {
@@ -347,7 +357,7 @@ function FacebookPreview({ v }: { v: SeoSettings }) {
       <div className="overflow-hidden rounded-lg" style={{ background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.12)' }}>
         <div className="flex items-center gap-2.5 p-3">
           <span className="inline-flex h-10 w-10 items-center justify-center overflow-hidden rounded-full" style={{ background: '#0B0A1A' }}>
-            {v.logo ? <img src={v.logo} alt="" className="h-full w-full object-cover" /> : <SiteLogo name="" size={26} />}
+            <SafeImage src={v.logo} className="h-full w-full object-cover" fallback={<SiteLogo name="" size={26} />} />
           </span>
           <div className="leading-tight">
             <p style={{ fontSize: 14, fontWeight: 600, color: '#050505' }}>{v.siteName || host}</p>

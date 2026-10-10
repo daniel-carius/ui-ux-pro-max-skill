@@ -3,6 +3,7 @@ import { createRng } from '@/lib/random'
 import { defaultRules, type Promo, type PromoAccent, type PromoAudience, type PromoChannel, type PromoRules, type PromoType } from '@/domain/campanhas-promocoes'
 import { seedGames } from './catalog'
 import { DAY, NOW, iso } from './now'
+import { demoRecords } from './demo'
 
 export const PROMO_KEY = 'campanhas.promocoes'
 
@@ -280,3 +281,6 @@ export function promoDailySeries(p: Promo): { day: string; value: number }[] {
   }
   return out
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedPromos)

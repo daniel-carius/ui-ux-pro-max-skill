@@ -132,7 +132,7 @@ export type LogoutResult = { ended: true } | { ended: false; error: unknown }
 /**
  * Encerra a sessão no servidor. Só conta como encerrada com a confirmação:
  * 2xx (204) ou 401 (a sessão já não existia). Qualquer outra falha (rede, 5xx,
- * 403 de IP) deixa a sessão valendo no servidor e precisa ser dita à pessoa.
+ * 403) deixa a sessão valendo no servidor e precisa ser dita à pessoa.
  */
 export async function endServerSession(post: () => Promise<unknown>): Promise<LogoutResult> {
   try {
@@ -144,11 +144,12 @@ export async function endServerSession(post: () => Promise<unknown>): Promise<Lo
   }
 }
 
-/** Texto para a pessoa quando a saída não foi confirmada pelo servidor. */
+/**
+ * Texto para a pessoa quando a saída não foi confirmada pelo servidor. A saída não depende
+ * da lista de IPs do painel (o servidor aceita de qualquer rede): sem conexão ou qualquer
+ * outra recusa, a mensagem é uma só.
+ */
 export function logoutFailureText(error: unknown): string {
-  if (statusOf(error) === 403 && codeOf(error) === 'ip_nao_autorizado') {
-    return 'O servidor recusou o pedido porque o seu IP não tem acesso ao painel. A sessão continua aberta: conecte-se pela rede do escritório ou pela VPN e saia de novo.'
-  }
   if (statusOf(error) === 0) return 'Sem conexão com o servidor. A sessão continua aberta: confira a internet e saia de novo.'
   return 'O servidor não confirmou a saída e a sessão continua aberta. Tente sair de novo.'
 }

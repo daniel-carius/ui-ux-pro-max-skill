@@ -1,9 +1,12 @@
 // Públicos de comunicação (sino, inbox, popups, disparos e jornadas).
 // Regras puras: quem entra em cada público, quem nunca recebe marketing
 // (autoexcluídos, em pausa e bloqueados) e quem não deu consentimento.
+// Valem para a base inteira (demonstração) e para o público de marketing que o
+// servidor manda no modo API (geral.jogadores.audiencia, só jogadores ativos).
 import type { Deposit } from '@/data/finance'
 import type { Player } from '@/data/players'
 import { DAY } from '@/data/now'
+import type { CampaignPlayer } from './campanhas-jogadores'
 
 export type AudienceKind = 'todos' | 'depositou' | 'inativos' | 'vip' | 'novos' | 'sem_deposito' | 'nivel' | 'ids'
 
@@ -99,7 +102,7 @@ export interface AudienceContext {
   /** último depósito pago de cada jogador (ms) */
   lastDeposit: Map<string, number>
   /** nível do jogador na trilha atual (1 = primeiro) */
-  levelOf: (p: Player) => number
+  levelOf: (p: Pick<CampaignPlayer, 'xp'>) => number
 }
 
 export function lastDepositMap(deposits: Deposit[]) {
@@ -112,7 +115,17 @@ export function lastDepositMap(deposits: Deposit[]) {
   return m
 }
 
-export function matchesAudience(p: Player, a: Audience, ctx: AudienceContext): boolean {
+/** Último depósito pago a partir do público do servidor (lastDepositAt de cada jogador). */
+export function lastDepositFromPlayers(players: Pick<CampaignPlayer, 'id' | 'lastDepositAt'>[]) {
+  const m = new Map<string, number>()
+  for (const p of players) {
+    const t = p.lastDepositAt ? new Date(p.lastDepositAt).getTime() : Number.NaN
+    if (!Number.isNaN(t)) m.set(p.id, t)
+  }
+  return m
+}
+
+export function matchesAudience(p: CampaignPlayer, a: Audience, ctx: AudienceContext): boolean {
   switch (a.kind) {
     case 'todos':
       return true
@@ -146,11 +159,21 @@ export interface AudienceEstimate {
   noConsent: number
   /** recebem de fato */
   reachable: number
-  /** IDs da lista que não existem na base */
+  /** IDs da lista que não existem na base (modo API: que não estão no público de marketing) */
   invalidIds: string[]
+  /**
+   * Modo API: a lista já vem só com quem pode receber marketing; quantos da base ficam
+   * fora por autoexclusão, pausa ou bloqueio (contagem da base, não do público). null na demonstração.
+   */
+  outsideBase: number | null
 }
 
-export function estimateAudience(players: Player[], a: Audience, ctx: AudienceContext, channel: Channel): AudienceEstimate {
+/** Base inteira no modo API (a lista de jogadores é só o público de marketing). */
+export interface AudienceBase {
+  total: number
+}
+
+export function estimateAudience(players: CampaignPlayer[], a: Audience, ctx: AudienceContext, channel: Channel, base?: AudienceBase): AudienceEstimate {
   let matched = 0
   let blocked = 0
   let noConsent = 0
@@ -170,18 +193,20 @@ export function estimateAudience(players: Player[], a: Audience, ctx: AudienceCo
     }
     reachable++
   }
+  const total = base ? Math.max(base.total, players.length) : players.length
   return {
-    total: players.length,
+    total,
     matched,
     blocked,
     noConsent,
     reachable,
     invalidIds: a.kind === 'ids' ? a.ids.filter((id) => !found.has(id)) : [],
+    outsideBase: base ? total - players.length : null,
   }
 }
 
 /** Primeiro jogador que receberia a mensagem (para a prévia com dados reais). */
-export function sampleRecipient(players: Player[], a: Audience, ctx: AudienceContext, channel: Channel): Player | undefined {
+export function sampleRecipient<P extends CampaignPlayer>(players: P[], a: Audience, ctx: AudienceContext, channel: Channel): P | undefined {
   return players.find((p) => matchesAudience(p, a, ctx) && isReachable(p) && hasConsent(p, channel))
 }
 

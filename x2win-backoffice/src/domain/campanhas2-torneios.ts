@@ -1,7 +1,7 @@
 // Torneios: competição por pontuação, com ranking e prêmios por posição.
 import { brl, mult, num } from '@/lib/format'
 import { createRng } from '@/lib/random'
-import type { Player } from '@/data/players'
+import type { CampaignPlayer } from './campanhas-jogadores'
 import { hashSeed, maskNick, rewardCost, rewardShort, type Audience, type CoinInfo, type RewardKind } from './campanhas2-common'
 
 export type Scoring = 'maior_multiplicador' | 'maior_ganho' | 'volume_apostado'
@@ -113,17 +113,17 @@ export function scoreText(scoring: Scoring, v: number) {
 export interface LeaderboardRow {
   position: number
   playerId: string
-  playerName: string
   nick: string
   score: number
   prize: TournamentPrize | null
 }
 
 /**
- * Ranking do torneio. Gerado de forma determinística a partir dos jogadores
- * (no servidor viria das rodadas). Apelidos mascarados como no site.
+ * Ranking do torneio. Gerado de forma determinística a partir dos jogadores ativos
+ * que já depositaram (no servidor viria das rodadas). Só apelido e ID, mascarado como
+ * no site: serve para a base inteira (demonstração) e para o público do servidor (modo API).
  */
-export function buildLeaderboard(t: Tournament, players: Player[], now: Date = new Date(), limit = 50): LeaderboardRow[] {
+export function buildLeaderboard(t: Tournament, players: Pick<CampaignPlayer, 'id' | 'nickname' | 'status' | 'depositsCount'>[], now: Date = new Date(), limit = 50): LeaderboardRow[] {
   const status = tournamentStatus(t, now)
   if (status === 'agendado' || t.participants <= 0) return []
   const rng = createRng(hashSeed(t.id))
@@ -135,7 +135,7 @@ export function buildLeaderboard(t: Tournament, players: Player[], now: Date = n
     if (t.scoring === 'maior_multiplicador') score = Math.round((1.5 + Math.pow(rng.next(), 4) * 2500) * 100) / 100
     else if (t.scoring === 'maior_ganho') score = rng.money(40, 48000)
     else score = rng.money(300, 180000)
-    return { playerId: p.id, playerName: p.name, nick: maskNick(p.nickname), score }
+    return { playerId: p.id, nick: maskNick(p.nickname), score }
   })
   rows.sort((a, b) => b.score - a.score)
   return rows.map((r, i) => ({ ...r, position: i + 1, prize: t.prizes[i] ?? null }))

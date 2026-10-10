@@ -2,6 +2,7 @@
 import { createRng } from '@/lib/random'
 import type { McpKey, McpUsage } from '@/domain/config2-mcp'
 import { DAY, HOUR, MIN, NOW, iso } from './now'
+import { demoRecords } from './demo'
 
 export const MCP_KEYS = {
   keys: 'config.mcp.chaves',
@@ -151,3 +152,7 @@ export function seedMcpUsage(): McpUsage[] {
   }
   return out
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedMcpKeys)
+demoRecords(seedMcpUsage)

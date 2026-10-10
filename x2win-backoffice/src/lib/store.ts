@@ -8,16 +8,24 @@
 // GET /api/kv/:key (a tela espera com o esqueleto de carregamento via Suspense);
 // gravações são otimistas, com PUT + versão, enfileiradas por chave. Chaves
 // locais (preferências de tela e rascunhos, ver shared/kv-registry.ts) continuam
-// no localStorage, como no modo demonstração. Se a leitura falhar (rede, 5xx,
-// 429), a tela mostra o valor padrão, mas a chave fica só para leitura até
-// carregar de novo (isLoadFailed/useLoadFailed): nada é decidido sobre o padrão.
+// no localStorage, como no modo demonstração.
+//
+// Sem valor do servidor (chave nunca gravada, leitura que falhou ou cargo sem
+// leitura), o modo API nunca mostra os dados de demonstração como se fossem do
+// servidor: lista de registros vira [] e objeto de configuração usa o padrão da
+// tela (ou o valor registrado pelo gerador, ver apiValue em src/data/demo.ts).
+// Chave nunca gravada guarda a versão 0 e a primeira gravação a envia (se outra
+// pessoa gravou antes, o servidor responde 409). Se a leitura falhar (rede, 5xx,
+// 429), a chave fica só para leitura até carregar de novo (isLoadFailed/useLoadFailed):
+// uma gravação é recusada e dispara outra leitura; nada é decidido sobre o padrão.
 
 import { useCallback, useSyncExternalStore } from 'react'
 import type { KvGetResponse, KvPutResponse } from '@shared/api'
 import { isLocalOnlyKey } from '@shared/kv-registry'
 // import direto (e não de '@/components/ui') para não criar ciclo: ui/Page usa este arquivo
 import { toast } from '@/components/ui/Feedback'
-import { ApiError, api, isApiMode } from './api'
+import { apiValueOf } from '@/data/demo'
+import { ApiError, api, isApiMode, isVersionConflict } from './api'
 
 const PREFIX = 'x2w.db.v1.'
 const cache = new Map<string, unknown>()
@@ -180,12 +188,13 @@ export function prefetchKeys(keys: string[]) {
 }
 
 /** Texto para ações bloqueadas porque a chave não carregou do servidor. */
-export const LOAD_FAILED_MESSAGE = 'Estes dados não foram carregados do servidor (o que aparece é o padrão). Recarregue a página e tente de novo.'
+export const LOAD_FAILED_MESSAGE = 'Estes dados não foram carregados do servidor (a tela mostra a lista vazia ou o padrão). Aguarde um instante e tente de novo; se continuar, recarregue a página.'
 
 /**
- * Modo API: true quando a leitura da chave falhou e a tela mostra o valor padrão no lugar
- * do servidor. Gravações ficam bloqueadas; telas de dinheiro mostram erro em vez do padrão.
- * Uma recarga que dê certo (refreshKey) libera a chave. Modo demonstração: sempre false.
+ * Modo API: true quando a leitura da chave falhou e a tela mostra a lista vazia ou o padrão
+ * no lugar do servidor. Gravações ficam bloqueadas (cada recusa tenta ler de novo); telas de
+ * dinheiro mostram erro em vez do padrão. Uma recarga que dê certo (refreshKey) libera a chave.
+ * Modo demonstração: sempre false.
  */
 export function isLoadFailed(key: string): boolean {
   return isRemote(key) && loadFailed.has(key)
@@ -223,8 +232,15 @@ export function patchCache<T>(key: string, next: T | ((prev: T) => T), seed?: T 
 // Adaptador do modo API
 // ---------------------------------------------------------------------------
 
-/** Resultado da leitura no servidor, guardado até a tela informar o valor padrão. */
-type Outcome = { kind: 'ok'; value: unknown; version: number } | { kind: 'missing' } | { kind: 'forbidden' } | { kind: 'failed' }
+/**
+ * Resultado da leitura no servidor, guardado até a tela informar o valor padrão.
+ * missing: nunca gravada (stored:false, com a versão 0 do servidor) ou chave desconhecida (404, versão null).
+ */
+type Outcome =
+  | { kind: 'ok'; value: unknown; version: number }
+  | { kind: 'missing'; version: number | null }
+  | { kind: 'forbidden' }
+  | { kind: 'failed' }
 
 /** Muda a cada resetDb: respostas antigas (de outra sessão) são descartadas. */
 let generation = 0
@@ -265,6 +281,18 @@ function resolveSeed<T>(seed: T | (() => T) | undefined): T {
   return (typeof seed === 'function' ? (seed as () => T)() : seed) as T
 }
 
+/**
+ * Valor sem dado do servidor (nunca gravada, leitura que falhou, cargo sem leitura):
+ * o valor registrado pelo gerador (apiValue); senão lista vazia para listas de registros
+ * e o padrão da tela para objetos de configuração. Nunca registros de demonstração.
+ */
+function fallbackValue(seed: unknown): unknown {
+  const registered = apiValueOf(seed)
+  if (registered.found) return resolveSeed(registered.value)
+  const base = resolveSeed(seed)
+  return Array.isArray(base) ? [] : base
+}
+
 function rememberSeed(key: string, seed: unknown) {
   if (seed !== undefined && !seeds.has(key)) seeds.set(key, seed)
 }
@@ -285,13 +313,14 @@ function notifyLoadError(e: unknown) {
 async function fetchKey(key: string): Promise<Outcome> {
   try {
     const res = await api<KvGetResponse>('GET', kvPath(key))
-    if (res.stored === false) return { kind: 'missing' }
+    // nunca gravada: a versão (0) vai na primeira gravação
+    if (res.stored === false) return { kind: 'missing', version: typeof res.version === 'number' ? res.version : 0 }
     return { kind: 'ok', value: res.value, version: res.version }
   } catch (e) {
     const err = e instanceof ApiError ? e : null
     if (err?.status === 404) {
       if (import.meta.env.DEV && err.code !== 'nao_encontrado') console.warn(`[store] chave sem regra no servidor: ${key} (${err.code})`)
-      return { kind: 'missing' }
+      return { kind: 'missing', version: null }
     }
     if (err?.status === 403) return { kind: 'forbidden' }
     // 401: o portão de login cuida (sessão caiu)
@@ -319,9 +348,8 @@ function materialize(key: string, seed: unknown, keepOnFail = false): boolean {
   }
   // recarga que falhou: o que está na tela continua (valor do servidor, ou o padrão ainda bloqueado)
   if (o.kind === 'failed' && keepOnFail && cache.has(key)) return true
-  const base = resolveSeed(seed)
-  // sem leitura: lista vazia (ou o padrão, para objetos de configuração)
-  const value = o.kind === 'forbidden' && Array.isArray(base) ? [] : base
+  // sem dado do servidor: lista vazia ou o padrão de configuração (nunca registros de demonstração)
+  const value = fallbackValue(seed)
   cache.set(key, value)
   confirmed.set(key, value)
   if (o.kind === 'forbidden') forbidden.add(key)
@@ -329,9 +357,10 @@ function materialize(key: string, seed: unknown, keepOnFail = false): boolean {
   // erro: o valor padrão só ocupa a tela; não é dado do servidor e não pode ser gravado
   if (o.kind === 'failed') loadFailed.add(key)
   else loadFailed.delete(key)
-  // 404/erro: versão desconhecida. Gravar sem versão é aceito só se nada foi gravado;
-  // se já existir valor, o servidor responde 409 e a chave é recarregada.
-  versions.delete(key)
+  // nunca gravada: a primeira gravação envia a versão 0 (se alguém gravou antes, 409 e recarga).
+  // 404/erro/sem leitura: versão desconhecida (a gravação é recusada antes ou pelo servidor).
+  if (o.kind === 'missing' && o.version !== null) versions.set(key, o.version)
+  else versions.delete(key)
   return true
 }
 
@@ -360,7 +389,8 @@ function remoteRead<T>(key: string, seed: T | (() => T)): T {
   rememberSeed(key, seed)
   if (materialize(key, seeds.get(key) ?? seed)) return cache.get(key) as T
   void ensureLoad(key)
-  if (!placeholders.has(key)) placeholders.set(key, resolveSeed(seed))
+  // enquanto carrega: o mesmo valor que a chave teria sem dado do servidor (nunca a demonstração)
+  if (!placeholders.has(key)) placeholders.set(key, fallbackValue(seed))
   return placeholders.get(key) as T
 }
 
@@ -372,32 +402,50 @@ function suspendUntilReady<T>(key: string, seed: T | (() => T)) {
   throw ensureLoad(key)
 }
 
-function remoteSet<T>(key: string, next: T | ((prev: T) => T), seed?: T | (() => T)): Promise<boolean> {
+/** Opções de uma gravação no modo API. */
+export interface WriteOptions {
+  /**
+   * Erros que a tela mostra no próprio campo (ex.: 400 com details.field): sem o aviso
+   * "Alteração desfeita". O valor volta ao confirmado do mesmo jeito.
+   */
+  quiet?: (e: ApiError) => boolean
+}
+
+/** Resultado de uma gravação: error é o erro do servidor (null = recusada antes de enviar, ou descartada). */
+export type WriteResult = { ok: true } | { ok: false; error: ApiError | null }
+
+const WRITE_OK: WriteResult = { ok: true }
+const WRITE_REFUSED: WriteResult = { ok: false, error: null }
+
+function remoteSet<T>(key: string, next: T | ((prev: T) => T), seed?: T | (() => T), opts?: WriteOptions): Promise<WriteResult> {
   rememberSeed(key, seed)
   if (!cache.has(key) && !materialize(key, seeds.get(key))) {
     // ainda carregando: aplica a mudança sobre o valor do servidor, não sobre o padrão
     const gen = generation
-    return ensureLoad(key).then(() => (gen === generation ? remoteSet(key, next, seed) : false))
+    return ensureLoad(key).then(() => (gen === generation ? remoteSet(key, next, seed, opts) : WRITE_REFUSED))
   }
   if (forbidden.has(key)) {
     toast.error('Alteração não salva', { description: 'Seu cargo não tem acesso a estes dados.' })
-    return Promise.resolve(false)
+    return Promise.resolve(WRITE_REFUSED)
   }
   if (loadFailed.has(key)) {
+    // o que está na tela é o padrão, não o valor do servidor: nada é gravado sobre ele; busca de novo
     toast.error('Alteração não salva', { description: LOAD_FAILED_MESSAGE })
-    return Promise.resolve(false)
+    retryLoad(key)
+    return Promise.resolve(WRITE_REFUSED)
   }
   const prev = cache.get(key) as T
   const value = typeof next === 'function' ? (next as (p: T) => T)(prev) : next
-  if (Object.is(value, prev)) return Promise.resolve(true)
+  if (Object.is(value, prev)) return Promise.resolve(WRITE_OK)
   cache.set(key, value)
   emit(key)
-  return enqueueWrite(key, value)
+  return enqueueWrite(key, value, opts)
 }
 
-/** Grava em fila por chave. A promessa diz se o servidor confirmou. */
-function enqueueWrite(key: string, value: unknown): Promise<boolean> {
+/** Grava em fila por chave. A promessa diz se o servidor confirmou e, se não, o erro dele. */
+function enqueueWrite(key: string, value: unknown, opts?: WriteOptions): Promise<WriteResult> {
   let ok = false
+  let error: ApiError | null = null
   const gen = generation
   const epoch = epochs.get(key) ?? 0
   inflight.set(key, (inflight.get(key) ?? 0) + 1)
@@ -420,6 +468,7 @@ function enqueueWrite(key: string, value: unknown): Promise<boolean> {
       if (gen !== generation) return
       epochs.set(key, epoch + 1)
       const err = e instanceof ApiError ? e : null
+      error = err
       if (err?.status === 409 && err.code === 'versao_desatualizada') {
         toast.warning('Outra pessoa alterou estes dados', {
           description: 'Carregamos a versão mais recente. Confira e faça a sua alteração de novo.',
@@ -432,8 +481,8 @@ function enqueueWrite(key: string, value: unknown): Promise<boolean> {
       }
       cache.set(key, confirmed.get(key))
       emit(key)
-      // 401: a sessão caiu e o portão de login já avisa
-      if (err?.status !== 401) {
+      // 401: a sessão caiu e o portão de login já avisa; erro que a tela mostra no campo também não
+      if (err?.status !== 401 && !(err && opts?.quiet?.(err))) {
         toast.error('Alteração desfeita', {
           description: err?.message ?? 'Não foi possível salvar. Tente de novo.',
           duration: 6000,
@@ -444,7 +493,7 @@ function enqueueWrite(key: string, value: unknown): Promise<boolean> {
     }
   })
   queues.set(key, run)
-  return run.then(() => ok)
+  return run.then((): WriteResult => (ok ? WRITE_OK : { ok: false, error }))
 }
 
 async function refetchNow(key: string) {
@@ -454,6 +503,16 @@ async function refetchNow(key: string) {
   outcomes.set(key, o)
   materialize(key, seeds.get(key), true)
   emit(key)
+}
+
+/** recargas de chaves que falharam, pedidas por gravações recusadas (uma por vez por chave) */
+const retrying = new Set<string>()
+
+/** Tenta ler de novo uma chave que falhou. Dando certo, a chave volta a aceitar gravações. */
+function retryLoad(key: string) {
+  if (retrying.has(key)) return
+  retrying.add(key)
+  void refetchNow(key).finally(() => retrying.delete(key))
 }
 
 function resetRemote(notify: boolean, serverDataOnly: boolean) {
@@ -482,7 +541,47 @@ function resetRemote(notify: boolean, serverDataOnly: boolean) {
  * aceitou (false se recusou; a tela já mostrou o motivo). Modo demonstração: true.
  */
 export function dbSetAndWait<T>(key: string, next: T | ((prev: T) => T), seed?: T | (() => T)): Promise<boolean> {
-  if (isRemote(key)) return remoteSet(key, next, seed)
+  if (isRemote(key)) return remoteSet(key, next, seed).then((r) => r.ok)
   dbSet(key, next, seed)
   return Promise.resolve(true)
+}
+
+/**
+ * dbSetAndWait com o erro do servidor, para a tela mostrar um 400/403 junto do campo
+ * (details.field). Com `quiet`, esses erros não viram o aviso "Alteração desfeita".
+ *   const r = await dbSetAndWaitResult(key, next, seed, { quiet: (e) => e.status === 400 })
+ *   if (!r.ok && r.error) setFieldError(r.error.message)
+ * Modo demonstração: sempre { ok: true }.
+ */
+export function dbSetAndWaitResult<T>(key: string, next: T | ((prev: T) => T), seed?: T | (() => T), opts?: WriteOptions): Promise<WriteResult> {
+  if (isRemote(key)) return remoteSet(key, next, seed, opts)
+  dbSet(key, next, seed)
+  return Promise.resolve(WRITE_OK)
+}
+
+export type DirectSaveResult<T> = { ok: true; value: T } | { ok: false; conflict: boolean; error: ApiError | null }
+
+/**
+ * Modo API: grava a chave direto na API (fora da fila do adaptador) e devolve o erro do servidor, sem
+ * aviso nem gravação otimista, para a tela mostrar um 400 junto do campo (ex.: "O destino desta credencial
+ * mudou", com details.path/field). Antes confere se o valor no servidor ainda é o que a tela mostra
+ * (`base`); se outra pessoa mudou, recarrega e não grava (conflict). Use só no modo API.
+ */
+export async function dbSaveDirect<T>(key: string, base: T, next: T): Promise<DirectSaveResult<T>> {
+  const path = kvPath(key)
+  try {
+    const cur = await api<KvGetResponse<T>>('GET', path)
+    if (cur.stored !== false && JSON.stringify(cur.value) !== JSON.stringify(base)) {
+      await refreshKey(key).catch(() => {})
+      return { ok: false, conflict: true, error: null }
+    }
+    const res = await api<KvPutResponse<T>>('PUT', path, { value: next, version: cur.version })
+    patchCache<T>(key, res.value)
+    // traz a versão nova para as próximas gravações pelo adaptador
+    await refreshKey(key).catch(() => {})
+    return { ok: true, value: res.value }
+  } catch (e) {
+    if (isVersionConflict(e)) refreshKey(key).catch(() => {})
+    return { ok: false, conflict: isVersionConflict(e), error: e instanceof ApiError ? e : null }
+  }
 }

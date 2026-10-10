@@ -56,7 +56,9 @@ import { audit, usePageAccess, useSession } from '@/domain/session'
 import {
   WEBHOOK_EVENT_LABEL,
   WEBHOOK_KEYS,
+  WEBHOOK_TEST_EVENT,
   seedWebhookExecutions,
+  webhookTestBody,
   type WebhookDestination,
   type WebhookEvent,
   type WebhookExecution,
@@ -128,7 +130,9 @@ async function confirmProtectedOff(r: Row) {
 }
 
 export default function Templates() {
-  const { canEdit } = usePageAccess()
+  const { canEdit, can } = usePageAccess()
+  // modo API: o teste com destino ativo sai pela rota de teste dos webhooks, que exige editar webhooks
+  const canTestServer = !API || can('webhooks.editar')
   const { user } = useSession()
   const navigate = useNavigate()
   const templates = useCollection<WebhookTemplate>(TEMPLATE_KEY, seedTemplates)
@@ -182,9 +186,10 @@ export default function Templates() {
   }
 
   /** Modo API: um POST de teste de verdade por destino ativo; o servidor grava execução e auditoria. */
-  const runServerTest = async (r: Row, dests: WebhookDestination[]): Promise<{ result: TemplateTest; targets: TestTarget[] }> => {
+  const runServerTest = async (r: Row, dests: WebhookDestination[]): Promise<TestRun | null> => {
     const done: WebhookExecution[] = []
     const targets: TestTarget[] = []
+    let denied: string | null = null
     // um por vez: o servidor limita os testes por minuto
     for (const d of dests) {
       try {
@@ -200,13 +205,24 @@ export default function Templates() {
           message: ex.error ?? (ok ? 'Recebido com sucesso.' : `O destino respondeu HTTP ${ex.httpStatus}.`),
         })
       } catch (e) {
-        targets.push({ url: d.url, ok: false, httpStatus: 0, durationMs: 0, message: e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor.' })
+        const message = e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor.'
+        // sem permissão (403): nada foi enviado; não é falha de entrega
+        if (e instanceof ApiError && e.status === 403) {
+          denied = message
+          break
+        }
+        targets.push({ url: d.url, ok: false, httpStatus: 0, durationMs: 0, message })
       }
     }
     if (done.length) {
       const ids = new Set(done.map((x) => x.id))
       patchCache<WebhookExecution[]>(WEBHOOK_KEYS.executions, (prev) => [...done, ...prev.filter((x) => !ids.has(x.id))], seedWebhookExecutions)
       refreshKey(WEBHOOK_KEYS.executions).catch(() => {})
+    }
+    // recusado por permissão: avisa sem gravar o último teste nem registrar 'testar'
+    if (denied !== null) {
+      toast.error('Teste não enviado', { description: denied })
+      return null
     }
     const allOk = targets.every((t) => t.ok)
     const worst = targets.find((t) => !t.ok) ?? targets[0]
@@ -225,7 +241,7 @@ export default function Templates() {
   }
 
   /** Teste simulado: envia o corpo com dados de exemplo aos destinos ativos (ou à caixa de teste). */
-  const runTest = (r: Row, body: string): Promise<{ result: TemplateTest; targets: TestTarget[] }> => {
+  const runTest = (r: Row, body: string): Promise<TestRun | null> => {
     const active = destFor(r.event).filter((d) => d.active)
     // sem destino ativo o teste vai para a caixa de inspeção (simulada, não grava execução)
     if (API && active.length) return runServerTest(r, active)
@@ -460,6 +476,7 @@ export default function Templates() {
           row={editing}
           destinations={destFor(editing.event)}
           canEdit={canEdit}
+          canTestServer={canTestServer}
           onClose={() => setEditingId(null)}
           onTest={(body) => runTest(editing, body)}
           onSave={(body, on) => {
@@ -476,11 +493,14 @@ export default function Templates() {
 }
 
 type TestTarget = { url: string; ok: boolean; httpStatus: number; durationMs: number; message: string }
+/** Resultado de um envio de teste (null: nada foi enviado). */
+type TestRun = { result: TemplateTest; targets: TestTarget[] }
 
 function TemplateEditor({
   row,
   destinations,
   canEdit,
+  canTestServer,
   onClose,
   onSave,
   onTest,
@@ -488,9 +508,11 @@ function TemplateEditor({
   row: Row
   destinations: WebhookDestination[]
   canEdit: boolean
+  /** modo API: pode usar a rota de teste dos webhooks (editar webhooks) */
+  canTestServer: boolean
   onClose: () => void
   onSave: (body: string, active: boolean) => void
-  onTest: (body: string) => Promise<{ result: TemplateTest; targets: TestTarget[] }>
+  onTest: (body: string) => Promise<TestRun | null>
 }) {
   const [body, setBody] = useState(row.body)
   const [active, setActive] = useState(row.active)
@@ -503,7 +525,11 @@ function TemplateEditor({
   const dirty = body !== row.body || active !== row.active
   const unused = allowed.filter((k) => !check.vars.includes(k))
   const activeDests = destinations.filter((d) => d.active)
+  // modo API: com destino ativo, o teste usa a rota de teste dos webhooks (exige editar webhooks)
+  const testBlocked = API && activeDests.length > 0 && !canTestServer
   const signature = useMemo(() => exampleSignature(activeDests[0]?.secret ?? 'DEMO-hmac-exemplo', 1760020320), [activeDests])
+  // modo API: o teste do servidor não usa este template; sai como webhook.teste, com o evento do destino em data
+  const serverTestBody = useMemo(() => (API && activeDests[0] ? JSON.stringify(webhookTestBody(activeDests[0], new Date().toISOString(), 'evt_…'), null, 2) : null), [activeDests])
 
   const insertVar = (key: string) => {
     const el = ref.current
@@ -537,7 +563,7 @@ function TemplateEditor({
   const test = async () => {
     setTesting(true)
     const r = await onTest(body)
-    setLastRun(r)
+    if (r) setLastRun(r)
     setTesting(false)
   }
 
@@ -696,7 +722,15 @@ function TemplateEditor({
           <BlockTitle
             icon={FlaskConical}
             aside={
-              <Button size="sm" variant="primary" icon={Send} onClick={test} loading={testing} disabled={!check.ok || !canEdit} title={!check.ok ? 'Corrija o JSON para testar' : undefined}>
+              <Button
+                size="sm"
+                variant="primary"
+                icon={Send}
+                onClick={test}
+                loading={testing}
+                disabled={!check.ok || !canEdit || testBlocked}
+                title={!check.ok ? 'Corrija o JSON para testar' : testBlocked ? 'O teste sai pelos destinos de webhook: exige editar webhooks' : undefined}
+              >
                 Enviar teste
               </Button>
             }
@@ -706,10 +740,18 @@ function TemplateEditor({
           <p className="text-[13px] text-fg-3">
             {activeDests.length
               ? API
-                ? `Envia um POST de teste assinado, pelo servidor, para ${activeDests.length} ${activeDests.length === 1 ? 'destino ativo' : 'destinos ativos'}. O corpo é o evento de teste padrão (com "test": true), não a prévia acima.`
+                ? `Envia um POST de teste assinado, pelo servidor, para ${activeDests.length} ${activeDests.length === 1 ? 'destino ativo' : 'destinos ativos'}. O corpo não é a prévia acima: é o evento ${WEBHOOK_TEST_EVENT} (com "test": true e o evento do destino em data.destinationEvent).`
                 : `Envia a prévia acima (com "test": true) para ${activeDests.length} ${activeDests.length === 1 ? 'destino ativo' : 'destinos ativos'}. Usa o corpo da tela, mesmo sem salvar.`
               : 'Este evento não tem destino ativo: o teste vai para a caixa de inspeção da X2Win e não sai para fora.'}
           </p>
+          {serverTestBody && (
+            <>
+              <p className="mb-1.5 mt-3 font-mono text-[11.5px] text-fg-3">X-X2W-Event: {WEBHOOK_TEST_EVENT}</p>
+              <CodeBlock label="Corpo do envio de teste" className="text-[11.5px]">
+                {serverTestBody}
+              </CodeBlock>
+            </>
+          )}
           {lastRun ? (
             <ul className="mt-3 space-y-2" aria-live="polite">
               {lastRun.targets.map((t, i) => (

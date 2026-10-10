@@ -77,6 +77,7 @@ import {
   PreviewJumpButton,
   PreviewPanel,
   ProviderStripMock,
+  SafeImage,
   SiteBlockTitle,
   SiteHeaderMock,
   SiteLogo,
@@ -355,7 +356,7 @@ function BlockMock({
       const hero = heroBanners[0]
       return hero?.image ? (
         <div className="relative overflow-hidden rounded-lg">
-          <img src={hero.image} alt="" className="aspect-[1372/476] w-full object-cover" />
+          <SafeImage src={hero.image} className="aspect-[1372/476] w-full object-cover" />
           <span className="absolute inset-x-0 bottom-1 flex justify-center gap-1" aria-hidden>
             {heroBanners.map((b, i) => (
               <span key={b.id} className="h-1 rounded-full" style={{ width: i === 0 ? 12 : 4, background: i === 0 ? '#FFFFFF' : 'rgba(255,255,255,.5)' }} />

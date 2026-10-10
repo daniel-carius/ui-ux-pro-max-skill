@@ -85,6 +85,7 @@ import {
   type VisitKind,
 } from '@/domain/campanhas3-mensagens'
 import { AUDIENCE_ICON, AudiencePicker, CharCounter, PhoneFrame, RateBar, ScheduleField, SiteHeaderMock, SiteSkeleton, TableFrame, useAudienceContext, useAudienceEstimate, MiniMark } from './_shared-c3'
+import { safeImageSrc } from '@/domain/personalizacao-p1'
 
 const KEY = 'campanhas.popups-inbox'
 
@@ -152,8 +153,9 @@ export default function PopupsInbox() {
 
 function PopupThumb({ p, size = 'sm' }: { p: Pick<Popup, 'image' | 'title'>; size?: 'sm' | 'md' }) {
   const cls = size === 'sm' ? 'h-9 w-14' : 'h-14 w-24'
-  return p.image ? (
-    <img src={p.image} alt="" className={cn('shrink-0 rounded-md border border-line object-cover', cls)} />
+  const image = safeImageSrc(p.image)
+  return image ? (
+    <img src={image} alt="" className={cn('shrink-0 rounded-md border border-line object-cover', cls)} />
   ) : (
     <span className={cn('flex shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-primary/30 to-primary/5 text-primary-text', cls)} aria-hidden>
       <Megaphone size={size === 'sm' ? 15 : 20} />
@@ -493,8 +495,8 @@ function PopupPreview({ popup, page, compact }: { popup: Pick<Popup, 'title' | '
           <span className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-surface/90 text-fg-2 shadow-sm" aria-hidden>
             <X size={13} />
           </span>
-          {popup.image ? (
-            <img src={popup.image} alt="" className="aspect-[2/1] w-full object-cover" />
+          {safeImageSrc(popup.image) ? (
+            <img src={safeImageSrc(popup.image)!} alt="" className="aspect-[2/1] w-full object-cover" />
           ) : (
             <div className="flex aspect-[2/1] w-full items-center justify-center bg-gradient-to-br from-primary/35 via-primary/15 to-transparent">
               <Megaphone size={compact ? 26 : 32} className="text-primary-text" aria-hidden />

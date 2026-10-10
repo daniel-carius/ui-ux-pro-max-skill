@@ -2,7 +2,7 @@
 // prévia ao vivo, moldura de navegador e celular, cabeçalho do site e ícones.
 // As prévias desenham o SITE DO JOGADOR, então usam as cores configuradas da
 // marca (estilos inline). O cromo do painel ao redor usa só tokens de tema.
-import { useEffect, useMemo, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties, type ImgHTMLAttributes, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   CircleUserRound,
@@ -15,6 +15,7 @@ import {
   HeartHandshake,
   House,
   Headset,
+  ImageOff,
   Lock,
   Menu as MenuGlyph,
   Radio,
@@ -38,6 +39,7 @@ import {
   monogram,
   ratioMatches,
   rgba,
+  safeImageSrc,
   sitePalette,
   visibleMenuItems,
   type MenusConfig,
@@ -193,11 +195,11 @@ export function BrowserFrame({
           <span className="h-2 w-2 rounded-full bg-success/70" />
         </div>
         <div className="flex min-w-0 max-w-[230px] flex-1 items-center gap-1.5 rounded-t-lg bg-surface px-2.5 py-1.5">
-          {favicon ? (
-            <img src={favicon} alt="" className="h-3.5 w-3.5 shrink-0 rounded-sm object-contain" />
-          ) : (
-            <span className="h-3.5 w-3.5 shrink-0 rounded-sm bg-line-strong" aria-hidden />
-          )}
+          <SafeImage
+            src={favicon}
+            className="h-3.5 w-3.5 shrink-0 rounded-sm object-contain"
+            fallback={<span className="h-3.5 w-3.5 shrink-0 rounded-sm bg-line-strong" aria-hidden />}
+          />
           <span className="min-w-0 flex-1 truncate text-[10.5px] font-medium text-fg-2">{title}</span>
           <X size={10} className="shrink-0 text-fg-3" aria-hidden />
         </div>
@@ -230,6 +232,39 @@ export function PhoneFrame({ children, className, background }: { children: Reac
 
 // ---------- Peças do site ----------
 
+/**
+ * Imagem gravada (logotipo, banner, avatar, capa): só vira <img> com endereço seguro
+ * (safeImageSrc: imagem enviada pelo painel, blob:, /assets ou https://). Sem imagem segura,
+ * ou se ela não carregar (em produção a CSP bloqueia imagem externa), mostra `fallback` ou um
+ * espaço neutro do mesmo tamanho.
+ */
+export function SafeImage({
+  src,
+  fallback,
+  alt = '',
+  className,
+  style,
+  ...rest
+}: Omit<ImgHTMLAttributes<HTMLImageElement>, 'src' | 'onError'> & { src: string | null | undefined; fallback?: ReactNode }) {
+  const safe = safeImageSrc(src)
+  const [failed, setFailed] = useState<string | null>(null)
+  if (!safe || failed === safe) {
+    if (fallback !== undefined) return <>{fallback}</>
+    return (
+      <span
+        role={alt ? 'img' : undefined}
+        aria-label={alt || undefined}
+        aria-hidden={alt ? undefined : true}
+        className={cn('inline-flex items-center justify-center overflow-hidden bg-surface-3 text-fg-3', className)}
+        style={style}
+      >
+        <ImageOff className="h-1/2 max-h-[24px] w-1/2 max-w-[24px]" aria-hidden />
+      </span>
+    )
+  }
+  return <img {...rest} src={safe} alt={alt} className={className} style={style} onError={() => setFailed(safe)} />
+}
+
 export function SiteLogo({
   src,
   className,
@@ -243,12 +278,13 @@ export function SiteLogo({
   alt?: string
   center?: boolean
 }) {
-  if (src) return <img src={src} alt={alt} className={cn('object-contain', center ? 'object-center' : 'object-left', className)} style={style} />
-  return (
+  const text = (
     <span className={cn('inline-flex items-center font-display text-sm font-extrabold tracking-tight', center && 'justify-center', className)} style={style}>
       X2WIN
     </span>
   )
+  // sem logotipo (ou imagem que não carrega): o nome em texto
+  return <SafeImage src={src} alt={alt} className={cn('object-contain', center ? 'object-center' : 'object-left', className)} style={style} fallback={text} />
 }
 
 /** Cabeçalho do site do jogador, com os itens configurados em Menus do site. */
@@ -450,7 +486,7 @@ export function RatioImageUpload({
     <ImageUpload
       width={width}
       height={height}
-      value={value}
+      value={safeImageSrc(value)}
       onChange={handle}
       disabled={disabled}
       label={label}
@@ -472,7 +508,7 @@ export function useGoogleFonts(families: string[]) {
     const link = document.createElement('link')
     link.id = id
     link.rel = 'stylesheet'
-    link.href = `https://fonts.googleapis.com/css2?${families.map((f) => `family=${f.replace(/ /g, '+')}:wght@400;600;700`).join('&')}&display=swap`
+    link.href = `https://fonts.googleapis.com/css2?${families.map((f) => `family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@400;600;700`).join('&')}&display=swap`
     document.head.appendChild(link)
   }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
 }
@@ -509,11 +545,12 @@ export function ProviderStripMock({
         <div className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
           {shown.map(({ it, prov }) => (
             <div key={prov.id} className="flex min-w-0 flex-col items-center gap-1 rounded-md px-1 py-1.5" style={{ background: p.surface, border: `1px solid ${p.line}` }}>
-              {it.logo ? (
-                <img src={it.logo} alt={prov.name} className="h-5 w-full object-contain" />
-              ) : (
-                <Monogram name={prov.name} hue={prov.logoHue} className="h-5 w-8 rounded text-[8.5px]" />
-              )}
+              <SafeImage
+                src={it.logo}
+                alt={prov.name}
+                className="h-5 w-full object-contain"
+                fallback={<Monogram name={prov.name} hue={prov.logoHue} className="h-5 w-8 rounded text-[8.5px]" />}
+              />
               <span className="w-full truncate text-center text-[8px] font-semibold" style={{ color: p.text }}>
                 {prov.name}
               </span>

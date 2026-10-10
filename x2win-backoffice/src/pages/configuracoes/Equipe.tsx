@@ -3,6 +3,7 @@ import {
   Eye,
   KeyRound,
   Link2,
+  Pencil,
   LogOut,
   MailPlus,
   RefreshCw,
@@ -41,9 +42,10 @@ import {
   type MenuEntry,
   type Tone,
 } from '@/components/ui'
-import type { CreateMemberResponse, InviteMemberResponse } from '@shared/api'
+import type { CreateMemberResponse, InviteMemberResponse, KvGetResponse } from '@shared/api'
+import { AUDIT_SOURCE_LABEL, isPanelReported } from '@shared/audit'
 import { dateTime, num, pct, plural, relative } from '@/lib/format'
-import { ApiError, api, isApiMode } from '@/lib/api'
+import { ApiError, api, isApiMode, isServerBusy, isVersionConflict } from '@/lib/api'
 import { patchCache, refreshKey, useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { MODULES } from '@/nav'
@@ -59,7 +61,9 @@ import {
   canDeactivate,
   generateTempPassword,
   isAdminLevelRole,
+  isGovernedRole,
   nameFromEmail,
+  normalizeName,
   needs2faSetup,
   riskyMembers,
   validateTeamEmail,
@@ -90,6 +94,39 @@ function apiMessage(e: unknown) {
   return e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor. Tente de novo.'
 }
 
+/**
+ * Erro do servidor preso a um campo do formulário (409 nome_em_uso → nome; email_em_uso → e-mail; 400
+ * dados_invalidos do esquema da rota → o primeiro item de details [{ path, message }], já em português).
+ */
+type FieldError = { field: 'name' | 'email' | null; message: string }
+
+function fieldError(e: unknown): FieldError {
+  if (e instanceof ApiError) {
+    if (e.code === 'email_em_uso') return { field: 'email', message: e.message }
+    const field = (e.details as { field?: unknown } | undefined)?.field
+    if (e.code === 'nome_em_uso' || field === 'name') return { field: 'name', message: e.message }
+    if (e.code === 'dados_invalidos' && Array.isArray(e.details)) {
+      const first = (e.details as unknown[]).find((d): d is { path: string; message: string } => {
+        const x = d as { path?: unknown; message?: unknown } | null
+        return typeof x?.path === 'string' && typeof x.message === 'string' && x.message.length > 0
+      })
+      if (first) return { field: first.path === 'name' || first.path === 'email' ? first.path : null, message: first.message }
+    }
+  }
+  return { field: null, message: apiMessage(e) }
+}
+
+/** Espera padrão quando o servidor está ocupado e não diz quanto aguardar (ele manda Retry-After: 2). */
+const BUSY_RETRY_SECONDS = 2
+
+/** Pessoa com governança no cargo: só quem concede cargos reativa ou reenvia o convite (o servidor responde 403). */
+function grantNeededFor(role: Role | undefined) {
+  if (!role || !isGovernedRole(role)) return null
+  return isAdminLevelRole(role)
+    ? 'Só o Superadmin mexe em acessos com cargo administrativo.'
+    : `Só quem pode conceder cargos põe pessoas no cargo ${role.name} (aprova saques ou altera jogo responsável ou países bloqueados).`
+}
+
 /** Modo API: põe na lista a pessoa como o servidor devolveu e recarrega a equipe. */
 function applyMember(member: TeamMember) {
   patchCache<TeamMember[]>(
@@ -98,6 +135,14 @@ function applyMember(member: TeamMember) {
     seedTeam,
   )
   refreshKey(KEYS.team).catch(() => {})
+}
+
+/**
+ * Modo API: 409 versao_desatualizada (outra gravação se cruzou com esta, pode vir sem details.version).
+ * A tela mostra a mensagem do servidor; aqui a equipe é recarregada para a pessoa tentar de novo.
+ */
+function reloadTeamOnConflict(e: unknown) {
+  if (isVersionConflict(e)) refreshKey(KEYS.team).catch(() => {})
 }
 
 /** Modo API: ação sobre uma pessoa da equipe (o servidor confere as regras e grava a auditoria). */
@@ -118,6 +163,7 @@ export default function Equipe() {
   const [filter, setFilter] = useState<Filter>('todos')
   const [modal, setModal] = useState<null | 'convite' | 'direto'>(null)
   const [roleEditId, setRoleEditId] = useState<string | null>(null)
+  const [renameId, setRenameId] = useState<string | null>(null)
   const [openId, setOpenId] = useState<string | null>(null)
   /** modo API: link de convite reenviado, mostrado uma vez */
   const [inviteLink, setInviteLink] = useState<{ email: string; url: string } | null>(null)
@@ -147,6 +193,7 @@ export default function Equipe() {
     try {
       await run()
     } catch (e) {
+      reloadTeamOnConflict(e)
       toast.error(errorTitle, { description: apiMessage(e), duration: 6000 })
     } finally {
       inFlight.current.delete(m.id)
@@ -159,23 +206,13 @@ export default function Equipe() {
       toast.success('Pedido enviado', { description: `${m.name} recebe um e-mail e só continua no painel depois de ativar o 2FA.` })
       return
     }
-    // 2FA já exigido (cargo ou "2FA para todos"): encerrar as sessões obriga o cadastro no próximo acesso
+    // 2FA já exigido (cargo ou "2FA para todos"): o servidor encerra a sessão de quem não tem 2FA na próxima
+    // requisição e o próximo login leva ao cadastro. Nada a gravar (redefinir o 2FA registraria um 2FA desligado).
     if (needs2faSetup(m, roleOf(m), panel.enforce2faForAll)) {
-      if (!m.activeSessions) {
-        toast.info('O 2FA já é exigido', { description: `${m.name} cadastra o 2FA no próximo acesso ao painel.` })
-        return
-      }
-      const ok = await confirm({
-        title: `Exigir o 2FA de ${m.name} agora?`,
-        description: `O 2FA já é obrigatório para esta pessoa. ${m.activeSessions === 1 ? 'A sessão aberta é encerrada' : `As ${num(m.activeSessions)} sessões abertas são encerradas`} e ela cadastra o 2FA ao entrar de novo.`,
-        confirmLabel: 'Encerrar sessões e exigir 2FA',
-        tone: 'warning',
-        icon: ShieldCheck,
-      })
-      if (!ok) return
-      await runOnce(m, 'Não foi possível exigir o 2FA', async () => {
-        await teamAction(m.id, 'reset-2fa')
-        toast.success('2FA exigido', { description: `${m.name} saiu do painel e cadastra o 2FA no próximo acesso.` })
+      toast.info('O 2FA já é exigido', {
+        description: m.activeSessions
+          ? `${m.name} sai do painel na próxima ação e cadastra o 2FA ao entrar de novo.`
+          : `${m.name} cadastra o 2FA no próximo acesso ao painel.`,
       })
       return
     }
@@ -212,7 +249,7 @@ export default function Equipe() {
     }
     const ok = await confirm({
       title: `Exigir 2FA em ${plural(allowed.length, 'cargo', 'cargos')}?`,
-      description: 'Quem estiver sem 2FA precisa ativar no próximo acesso. Sessões abertas continuam até expirar.',
+      description: 'Quem estiver sem 2FA sai do painel na próxima ação e cadastra o 2FA ao entrar de novo.',
       confirmLabel: 'Exigir 2FA',
       icon: ShieldCheck,
       details: (
@@ -237,6 +274,10 @@ export default function Equipe() {
     const check = canDeactivate(m, team, user.id)
     if (!check.ok) {
       toast.error('Não foi possível desativar', { description: check.message })
+      return
+    }
+    if (isAdminLevelRole(roleOf(m)) && !canGrant) {
+      toast.error('Não foi possível desativar', { description: 'Só o Superadmin desativa acessos com cargo administrativo.' })
       return
     }
     const keys = mcpKeys.filter((k) => k.createdById === m.id && !k.revokedAt)
@@ -274,8 +315,9 @@ export default function Equipe() {
 
   const reactivate = async (m: TeamMember) => {
     const role = roleOf(m)
-    if (isAdminLevelRole(role) && !canGrant) {
-      toast.error('Só o Superadmin reativa acessos administrativos.')
+    const locked = canGrant ? null : grantNeededFor(role)
+    if (locked) {
+      toast.error('Não foi possível reativar', { description: locked })
       return
     }
     const ok = await confirm({
@@ -317,6 +359,11 @@ export default function Equipe() {
   }
 
   const resendInvite = async (m: TeamMember) => {
+    const locked = canGrant ? null : grantNeededFor(roleOf(m))
+    if (locked) {
+      toast.error('Convite não reenviado', { description: locked })
+      return
+    }
     const info = invites[m.id]
     if (info && Date.now() - new Date(info.sentAt).getTime() < 60_000) {
       toast.warning('Convite enviado há menos de 1 minuto', { description: 'Aguarde um pouco antes de reenviar.' })
@@ -372,22 +419,52 @@ export default function Equipe() {
 
   const actionsFor = (m: TeamMember): MenuEntry[] => {
     const isMe = m.id === user.id
+    const grantLock = canGrant ? null : grantNeededFor(roleOf(m))
+    const adminLock = !canGrant && isAdminLevelRole(roleOf(m))
     const list: MenuEntry[] = [
       { label: 'Ver detalhes', icon: Eye, onSelect: () => setOpenId(m.id) },
       { label: 'Trocar cargo', icon: UserCog, disabled: !canEdit, onSelect: () => setRoleEditId(m.id) },
+      { label: 'Mudar nome', icon: Pencil, disabled: !canEdit || adminLock, hint: canEdit && adminLock ? 'só Superadmin' : undefined, onSelect: () => setRenameId(m.id) },
     ]
     if (m.status === 'convidado') {
-      list.push({ label: 'Reenviar convite', icon: Send, disabled: !canEdit, onSelect: () => resendInvite(m) })
-      list.push({ divider: true }, { label: 'Cancelar convite', icon: Trash2, danger: true, disabled: !canEdit, onSelect: () => cancelInvite(m) })
+      list.push({
+        label: 'Reenviar convite',
+        icon: Send,
+        disabled: !canEdit || !!grantLock,
+        hint: canEdit && grantLock ? 'só quem concede cargos' : undefined,
+        onSelect: () => resendInvite(m),
+      })
+      list.push({ divider: true }, { label: 'Cancelar convite', icon: Trash2, danger: true, disabled: !canEdit || adminLock, hint: canEdit && adminLock ? 'só Superadmin' : undefined, onSelect: () => cancelInvite(m) })
     }
     if (m.status === 'ativo') {
       if (!m.twoFactor) list.push({ label: 'Pedir ativação do 2FA', icon: ShieldCheck, disabled: !canEdit, onSelect: () => ask2fa(m) })
       // modo API: redefinir o 2FA de outra pessoa; encerrar sessões só existe na demonstração
-      if (API && m.twoFactor && !isMe) list.push({ label: 'Redefinir 2FA', icon: ShieldOff, disabled: !canEdit, onSelect: () => reset2fa(m) })
+      if (API && m.twoFactor && !isMe) list.push({ label: 'Redefinir 2FA', icon: ShieldOff, disabled: !canEdit || adminLock, hint: canEdit && adminLock ? 'só Superadmin' : undefined, onSelect: () => reset2fa(m) })
       if (!API && m.activeSessions > 0 && !isMe) list.push({ label: 'Encerrar sessões', icon: LogOut, disabled: !canEdit, onSelect: () => endSessions(m) })
-      list.push({ divider: true }, { label: isMe ? 'Desativar (é você)' : 'Desativar acesso', icon: UserRoundX, danger: true, disabled: !canEdit || isMe, onSelect: () => deactivate(m) })
+      list.push(
+        { divider: true },
+        {
+          label: isMe ? 'Desativar (é você)' : 'Desativar acesso',
+          icon: UserRoundX,
+          danger: true,
+          disabled: !canEdit || isMe || adminLock,
+          hint: canEdit && !isMe && adminLock ? 'só Superadmin' : undefined,
+          onSelect: () => deactivate(m),
+        },
+      )
     }
-    if (m.status === 'desligado') list.push({ divider: true }, { label: 'Reativar acesso', icon: UserCheck, disabled: !canEdit, onSelect: () => reactivate(m) })
+    if (m.status === 'desligado') {
+      list.push(
+        { divider: true },
+        {
+          label: 'Reativar acesso',
+          icon: UserCheck,
+          disabled: !canEdit || !!grantLock,
+          hint: canEdit && grantLock ? 'só quem concede cargos' : undefined,
+          onSelect: () => reactivate(m),
+        },
+      )
+    }
     return list
   }
 
@@ -466,6 +543,7 @@ export default function Equipe() {
 
   const open = team.find((m) => m.id === openId)
   const roleEdit = team.find((m) => m.id === roleEditId)
+  const renaming = team.find((m) => m.id === renameId)
 
   return (
     <>
@@ -540,7 +618,7 @@ export default function Equipe() {
 
         {panel.enforce2faForAll && (
           <Alert tone="success" icon={ShieldCheck} title="2FA exigido de toda a equipe">
-            Ligado em <a className="link" href="#/settings/seguranca">Segurança do painel</a>. Quem estiver sem 2FA precisa ativar no próximo acesso.
+            Ligado em <a className="link" href="#/settings/seguranca">Segurança do painel</a>. Quem estiver sem 2FA não continua no painel: cadastra o 2FA ao entrar.
           </Alert>
         )}
 
@@ -587,6 +665,7 @@ export default function Equipe() {
       <InviteModal open={modal === 'convite'} onClose={() => setModal(null)} roles={roles} team={team} canGrant={canGrant} onCreated={(m) => setInvites((p) => ({ ...p, [m.id]: { sentAt: m.createdAt, count: 1, by: user.name } }))} />
       <DirectAccessModal open={modal === 'direto'} onClose={() => setModal(null)} roles={roles} team={team} canGrant={canGrant} />
       {roleEdit && <ChangeRoleModal member={roleEdit} onClose={() => setRoleEditId(null)} roles={roles} team={team} canGrant={canGrant} />}
+      {renaming && <RenameMemberModal member={renaming} team={team} onClose={() => setRenameId(null)} />}
       <Modal
         open={!!inviteLink}
         onClose={() => setInviteLink(null)}
@@ -634,17 +713,21 @@ function InviteModal({
 }) {
   const [, setTeam] = useTeam()
   const [email, setEmail] = useState('')
+  const [name, setName] = useState('')
   const [roleId, setRoleId] = useState('')
   const [touched, setTouched] = useState(false)
   // modo API: envio em andamento, erro do servidor e link criado
   const [submitting, setSubmitting] = useState(false)
-  const [serverError, setServerError] = useState<{ field: 'email' | null; message: string } | null>(null)
+  const [serverError, setServerError] = useState<FieldError | null>(null)
   const [created, setCreated] = useState<{ email: string; url: string } | null>(null)
   const emailErr = validateTeamEmail(email, team) ?? (serverError?.field === 'email' ? serverError.message : null)
+  // nome opcional: sem ele, vem do e-mail (o servidor recusa nome que se confunde com o de outra pessoa)
+  const nameErr = (name.trim() && name.trim().length < 3 ? 'Use pelo menos 3 letras.' : localNameConflict(name, team)) ?? (serverError?.field === 'name' ? serverError.message : null)
   const role = roles.find((r) => r.id === roleId)
-  const roleErr = !role ? 'Escolha um cargo.' : isAdminLevelRole(role) && !canGrant ? 'Só o Superadmin concede este cargo.' : null
+  const roleErr = roleError(role, canGrant)
   const close = () => {
     setEmail('')
+    setName('')
     setRoleId('')
     setTouched(false)
     setServerError(null)
@@ -655,28 +738,30 @@ function InviteModal({
     setSubmitting(true)
     setServerError(null)
     try {
-      const res = await api<InviteMemberResponse>('POST', '/api/team/invite', { email: email.trim(), roleId: r.id })
+      const res = await api<InviteMemberResponse>('POST', '/api/team/invite', { email: email.trim(), roleId: r.id, ...(name.trim() ? { name: name.trim() } : {}) })
       const m = res.member as unknown as TeamMember
       applyMember(m)
       onCreated(m)
       setCreated({ email: m.email, url: res.inviteUrl })
     } catch (e) {
-      const conflict = e instanceof ApiError && e.code === 'email_em_uso'
-      setServerError({ field: conflict ? 'email' : null, message: apiMessage(e) })
+      reloadTeamOnConflict(e)
+      const err = fieldError(e)
+      setServerError(err)
+      if (err.field) setTouched(true)
     } finally {
       setSubmitting(false)
     }
   }
   const submit = () => {
     setTouched(true)
-    if (emailErr || roleErr || !role || submitting) return
+    if (emailErr || nameErr || roleErr || !role || submitting) return
     if (API) {
       void submitApi(role)
       return
     }
     const m: TeamMember = {
       id: uid('u'),
-      name: nameFromEmail(email.trim()),
+      name: name.trim() || nameFromEmail(email.trim()),
       email: email.trim().toLowerCase(),
       roleId: role.id,
       status: 'convidado',
@@ -751,6 +836,18 @@ function InviteModal({
               }}
             />
           </Field>
+          <Field label="Nome" htmlFor="inv-name" hint={`Opcional. Sem ele, usamos ${email.includes('@') ? `"${nameFromEmail(email.trim())}"` : 'o começo do e-mail'}.`} error={touched ? nameErr : null}>
+            <Input
+              id="inv-name"
+              value={name}
+              invalid={touched && !!nameErr}
+              placeholder="Nome e sobrenome"
+              onChange={(e) => {
+                setName(e.target.value)
+                if (serverError?.field === 'name') setServerError(null)
+              }}
+            />
+          </Field>
           <RoleSelect id="inv-role" roles={roles} value={roleId} onChange={setRoleId} canGrant={canGrant} error={touched ? roleErr : null} />
         </form>
       )}
@@ -778,13 +875,14 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
   const [roleId, setRoleId] = useState('')
   const [touched, setTouched] = useState(false)
   const [created, setCreated] = useState<{ member: TeamMember; password: string } | null>(null)
-  // modo API: envio em andamento e erro do servidor
+  // modo API: envio em andamento, erro do servidor e espera pedida pelo servidor (fila cheia)
   const [submitting, setSubmitting] = useState(false)
-  const [serverError, setServerError] = useState<{ field: 'email' | null; message: string } | null>(null)
-  const nameErr = name.trim().length < 3 ? 'Informe o nome completo.' : null
+  const [serverError, setServerError] = useState<FieldError | null>(null)
+  const [busy, setBusy] = useState(false)
+  const nameErr = (name.trim().length < 3 ? 'Informe o nome completo.' : localNameConflict(name, team)) ?? (serverError?.field === 'name' ? serverError.message : null)
   const emailErr = validateTeamEmail(email, team) ?? (serverError?.field === 'email' ? serverError.message : null)
   const role = roles.find((r) => r.id === roleId)
-  const roleErr = !role ? 'Escolha um cargo.' : isAdminLevelRole(role) && !canGrant ? 'Só o Superadmin concede este cargo.' : null
+  const roleErr = roleError(role, canGrant)
   const close = () => {
     setName('')
     setEmail('')
@@ -804,15 +902,22 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
       // a senha temporária vem do servidor e só aparece agora
       setCreated({ member: m, password: res.temporaryPassword })
     } catch (e) {
-      const conflict = e instanceof ApiError && e.code === 'email_em_uso'
-      setServerError({ field: conflict ? 'email' : null, message: apiMessage(e) })
+      reloadTeamOnConflict(e)
+      const err = fieldError(e)
+      setServerError(err)
+      if (err.field) setTouched(true)
+      // 503 servidor_ocupado (fila de senhas cheia): nada foi gravado; libera o botão depois do Retry-After
+      if (isServerBusy(e)) {
+        setBusy(true)
+        setTimeout(() => setBusy(false), (e.retryAfter ?? BUSY_RETRY_SECONDS) * 1000)
+      }
     } finally {
       setSubmitting(false)
     }
   }
   const submit = () => {
     setTouched(true)
-    if (nameErr || emailErr || roleErr || !role || submitting) return
+    if (nameErr || emailErr || roleErr || !role || submitting || busy) return
     if (API) {
       void submitApi(role)
       return
@@ -850,8 +955,8 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
         ) : (
           <>
             <Button onClick={close}>Cancelar</Button>
-            <Button variant="primary" icon={UserPlus} onClick={submit} loading={submitting}>
-              Criar acesso
+            <Button variant="primary" icon={UserPlus} onClick={submit} loading={submitting} disabled={busy}>
+              {busy ? 'Aguarde…' : serverError && !serverError.field && isApiMode() ? 'Tentar de novo' : 'Criar acesso'}
             </Button>
           </>
         )
@@ -886,12 +991,21 @@ function DirectAccessModal({ open, onClose, roles, team, canGrant }: { open: boo
           }}
         >
           {serverError && !serverError.field && (
-            <Alert tone="danger" title="Acesso não criado">
+            <Alert tone={busy ? 'warning' : 'danger'} title={busy ? 'Servidor ocupado: nada foi criado' : 'Acesso não criado'}>
               {serverError.message}
             </Alert>
           )}
           <Field label="Nome completo" htmlFor="da-name" required error={touched ? nameErr : null}>
-            <Input id="da-name" data-autofocus value={name} invalid={touched && !!nameErr} onChange={(e) => setName(e.target.value)} />
+            <Input
+              id="da-name"
+              data-autofocus
+              value={name}
+              invalid={touched && !!nameErr}
+              onChange={(e) => {
+                setName(e.target.value)
+                if (serverError?.field === 'name') setServerError(null)
+              }}
+            />
           </Field>
           <Field label="E-mail de acesso" htmlFor="da-email" required error={touched ? emailErr : null}>
             <Input
@@ -946,6 +1060,7 @@ function ChangeRoleModal({ member, onClose, roles, team, canGrant }: { member: T
         toast.success('Cargo alterado', { description: `${member.name} agora é ${to.name}. Vale na próxima ação da pessoa no painel.` })
         onClose()
       } catch (e) {
+        reloadTeamOnConflict(e)
         setServerError(apiMessage(e))
       } finally {
         setSaving(false)
@@ -987,11 +1102,112 @@ function ChangeRoleModal({ member, onClose, roles, team, canGrant }: { member: T
           error={changed && !check.ok ? check.message : serverError}
         />
         {!canGrant && (
-          <Alert tone="info">Cargos administrativos (Superadmin, Administrador e cargos com controle de acesso) só podem ser dados ou retirados pelo Superadmin.</Alert>
+          <Alert tone="info">
+            Cargos administrativos (Superadmin, Administrador e cargos com controle de acesso) só podem ser dados ou retirados pelo Superadmin. Cargos que aprovam
+            saques ou alteram jogo responsável ou países bloqueados só são dados por quem pode conceder cargos.
+          </Alert>
         )}
       </div>
     </Modal>
   )
+}
+
+// ---------- Mudar nome ----------
+
+function RenameMemberModal({ member, team, onClose }: { member: TeamMember; team: TeamMember[]; onClose: () => void }) {
+  const [, setTeam] = useTeam()
+  const [name, setName] = useState(member.name)
+  const [saving, setSaving] = useState(false)
+  const [serverError, setServerError] = useState<FieldError | null>(null)
+  const next = name.trim().replace(/\s+/g, ' ')
+  const changed = next !== member.name
+  const nameErr =
+    (next.length < 3 ? 'Informe o nome completo.' : localNameConflict(next, team, member.id)) ?? (serverError?.field === 'name' ? serverError.message : null)
+  const save = async () => {
+    if (!changed || nameErr || saving) return
+    if (API) {
+      setSaving(true)
+      setServerError(null)
+      try {
+        // grava só a troca de nome, a partir da lista e da versão atuais do servidor
+        const path = `/api/kv/${encodeURIComponent(KEYS.team)}`
+        const cur = await api<KvGetResponse<TeamMember[]>>('GET', path)
+        await api('PUT', path, { value: cur.value.map((m) => (m.id === member.id ? { id: m.id, name: next } : { id: m.id })), version: cur.version })
+        await refreshKey(KEYS.team).catch(() => {})
+        toast.success('Nome alterado', { description: `${member.name} agora aparece como ${next}.` })
+        onClose()
+      } catch (e) {
+        reloadTeamOnConflict(e)
+        setServerError(fieldError(e))
+      } finally {
+        setSaving(false)
+      }
+      return
+    }
+    setTeam((prev) => prev.map((m) => (m.id === member.id ? { ...m, name: next } : m)))
+    audit('editar', `Equipe · ${next}`, `Nome alterado: ${member.name} → ${next}`)
+    toast.success('Nome alterado', { description: `${member.name} agora aparece como ${next}.` })
+    onClose()
+  }
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`Mudar o nome de ${member.name}`}
+      description="O nome aparece na equipe, na auditoria e nas decisões. Use nome e sobrenome para não confundir pessoas."
+      icon={Pencil}
+      size="sm"
+      footer={
+        <>
+          <Button onClick={onClose}>Cancelar</Button>
+          <Button variant="primary" onClick={save} loading={saving} disabled={!changed || !!nameErr}>
+            Salvar nome
+          </Button>
+        </>
+      }
+    >
+      <form
+        className="space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault()
+          void save()
+        }}
+      >
+        {serverError && !serverError.field && (
+          <Alert tone="danger" title="Nome não alterado">
+            {serverError.message}
+          </Alert>
+        )}
+        <Field label="Nome completo" htmlFor="rm-name" required error={changed || serverError ? nameErr : null}>
+          <Input
+            id="rm-name"
+            data-autofocus
+            value={name}
+            invalid={(changed || !!serverError) && !!nameErr}
+            onChange={(e) => {
+              setName(e.target.value)
+              if (serverError) setServerError(null)
+            }}
+          />
+        </Field>
+      </form>
+    </Modal>
+  )
+}
+
+/** Cargo escolhido pode ser dado por quem está logado? (o servidor recusa com 403 se não) */
+function roleError(role: Role | undefined, canGrant: boolean): string | null {
+  if (!role) return 'Escolha um cargo.'
+  if (canGrant || !isGovernedRole(role)) return null
+  return isAdminLevelRole(role) ? 'Só o Superadmin concede este cargo.' : 'Só quem pode conceder cargos dá este cargo (aprova saques ou altera jogo responsável ou países bloqueados).'
+}
+
+/** Nome igual ao de outra pessoa da equipe (qualquer status). O servidor também recusa nomes parecidos (409). */
+function localNameConflict(name: string, team: TeamMember[], ignoreId?: string): string | null {
+  const n = normalizeName(name)
+  if (!n) return null
+  const dup = team.find((m) => m.id !== ignoreId && normalizeName(m.name) === n)
+  return dup ? `${dup.name} (${dup.status}) já usa este nome. Use um nome que identifique a pessoa sem dúvida.` : null
 }
 
 // ---------- Detalhes ----------
@@ -1015,8 +1231,10 @@ function MemberDrawer({
 }) {
   const [entries] = useAudit()
   if (!member) return null
+  // modo API sem auditoria.ver: só as linhas da equipe chegam, e o IP das ações de outras pessoas vem vazio
   const recent = entries.filter((e) => e.actorId === member.id).slice(0, 8)
-  const quick = actions.filter((a): a is Extract<MenuEntry, { label: unknown }> => 'label' in a && !!a.onSelect && a.label !== 'Ver detalhes')
+  // rodapé: as ações principais (mudar nome fica no menu da linha)
+  const quick = actions.filter((a): a is Extract<MenuEntry, { label: unknown }> => 'label' in a && !!a.onSelect && a.label !== 'Ver detalhes' && a.label !== 'Mudar nome')
   return (
     <Drawer
       open
@@ -1100,11 +1318,15 @@ function MemberDrawer({
                 <li key={e.id} className="flex items-start gap-2.5 text-[13px]">
                   <RefreshCw size={13} className="mt-1 shrink-0 text-fg-3" aria-hidden />
                   <div className="min-w-0">
-                    <p className="text-fg">
-                      <span className="font-medium">{AUDIT_ACTION_LABEL[e.action]}</span> · {e.entity}
+                    <p className="flex flex-wrap items-center gap-1.5 text-fg">
+                      <span>
+                        <span className="font-medium">{AUDIT_ACTION_LABEL[e.action]}</span> · {e.entity}
+                      </span>
+                      {isPanelReported(e) && <Badge tone="warning">{AUDIT_SOURCE_LABEL.painel}</Badge>}
                     </p>
                     <p className="truncate text-xs text-fg-3">
-                      {e.summary} · {relative(e.at)} · {e.ip}
+                      {e.summary} · {relative(e.at)}
+                      {e.ip ? ` · ${e.ip}` : ''}
                     </p>
                   </div>
                 </li>

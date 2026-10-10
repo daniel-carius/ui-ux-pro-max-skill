@@ -20,6 +20,7 @@ import type {
 } from '@/domain/personalizacao-p1'
 import { FIRST_NAMES, LAST_NAMES, NICK_PARTS_A, NICK_PARTS_B } from './names'
 import { DAY, NOW, dayKey } from './now'
+import { demoRecords } from './demo'
 
 export const P1_KEYS = {
   tema: 'personalizacao.tema',
@@ -579,3 +580,6 @@ export const DEFAULT_MENUS: MenusConfig = {
     mi('m5', 'Menu', 'menu', '/menu'),
   ],
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedBanners)

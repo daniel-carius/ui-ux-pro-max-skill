@@ -53,11 +53,11 @@ import { brl, dateTime, num, pct, relative } from '@/lib/format'
 import { useCollection, useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { DAY } from '@/data/now'
-import type { Player } from '@/data/players'
 import { seedDisparos } from '@/data/campanhas3-seeds'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { availableChannels, useIntegrations } from '@/domain/system'
 import { type Audience, type AudienceKind, DEFAULT_AUDIENCE, audienceError, describeAudience, hasConsent, isReachable, matchesAudience, supportsRcs } from '@/domain/campanhas3-audience'
+import type { CampaignPlayer } from '@/domain/campanhas-jogadores'
 import {
   DISPARO_CHANNEL_LABEL,
   PRICE,
@@ -79,6 +79,7 @@ import {
 } from '@/domain/campanhas3-disparos'
 import { defaultScheduleAt, scheduleError, scheduleIso, type Schedule } from '@/domain/campanhas3-mensagens'
 import { AudiencePicker, CharCounter, EmailFrame, PhoneFrame, RateBar, ScheduleField, SiteLogo, TableFrame, VarChips, useAudienceContext, useAudienceEstimate, MiniMark } from './_shared-c3'
+import { safeImageSrc } from '@/domain/personalizacao-p1'
 
 const KEY = 'campanhas.disparos'
 
@@ -110,8 +111,12 @@ const CHANNEL_TONE: Record<DisparoChannel, Tone> = { email: 'primary', sms: 'inf
 const STATUS_LABEL: Record<Disparo['status'], string> = { agendado: 'Agendado', enviado: 'Enviado', cancelado: 'Cancelado' }
 const STATUS_TONE: Record<Disparo['status'], Tone> = { agendado: 'info', enviado: 'success', cancelado: 'neutral' }
 
-function sampleVars(p: Player | undefined, levelName: (n: number) => string, levelOf: (p: Player) => number): Record<TemplateVarKey, string> {
-  const name = p?.name ?? 'Mariana Costa'
+/**
+ * Variáveis da prévia com um jogador do público. Modo API o público não traz nome nem
+ * saldo (dado pessoal): a prévia usa o apelido e um saldo de exemplo.
+ */
+function sampleVars(p: CampaignPlayer | undefined, levelName: (n: number) => string, levelOf: (p: Pick<CampaignPlayer, 'xp'>) => number): Record<TemplateVarKey, string> {
+  const name = p ? (p.name ?? p.nickname) : 'Mariana Costa'
   return {
     nome: name,
     primeiro_nome: name.split(' ')[0],
@@ -571,7 +576,7 @@ export default function Disparos() {
             <Card>
               <CardHeader
                 title="Prévia"
-                description={sample ? `Com os dados de ${vars.primeiro_nome} (${vars.nivel})` : 'Com dados de exemplo'}
+                description={sample ? (sample.name ? `Com os dados de ${vars.primeiro_nome} (${vars.nivel})` : `Com o apelido de ${vars.primeiro_nome} (${vars.nivel}) e saldo de exemplo`) : 'Com dados de exemplo'}
                 actions={<Badge tone={CHANNEL_TONE[channel]}>{DISPARO_CHANNEL_LABEL[channel]}</Badge>}
               />
               <CardBody>
@@ -744,8 +749,8 @@ function ChannelPreview({
     >
       <p className="mb-2 text-center text-[10.5px] text-fg-3">Hoje 9:41</p>
       <div className="max-w-[92%] overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
-        {draft.rcs.image ? (
-          <img src={draft.rcs.image} alt="" className="aspect-[2/1] w-full object-cover" />
+        {safeImageSrc(draft.rcs.image) ? (
+          <img src={safeImageSrc(draft.rcs.image)!} alt="" className="aspect-[2/1] w-full object-cover" />
         ) : (
           <div className="flex aspect-[2/1] w-full items-center justify-center bg-gradient-to-br from-primary/35 via-primary/15 to-transparent">
             <SiteLogo size={26} />

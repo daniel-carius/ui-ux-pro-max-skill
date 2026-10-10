@@ -3,7 +3,7 @@
 import { forwardRef, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { Check, Circle, Eye, EyeOff, History, Lock, Moon, ShieldCheck, Sun, Users } from 'lucide-react'
-import { ApiError } from '@/lib/api'
+import { ApiError, isServerBusy } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { useTheme } from '@/lib/theme'
 import { Alert, IconButton, Input, ToastHost, type InputProps } from '@/components/ui'
@@ -161,6 +161,35 @@ function timeLabel(d: Date) {
   return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
 }
 
+/** Espera sugerida pelo servidor ocupado (Retry-After), entre 1 e 30 segundos. */
+function busySeconds(e: ApiError) {
+  return Math.min(30, Math.max(1, Math.ceil(e.retryAfter ?? 2)))
+}
+
+const seconds = (n: number) => `${n} ${n === 1 ? 'segundo' : 'segundos'}`
+
+/** Aviso enquanto espera para tentar de novo sozinho (servidor ocupado). */
+function busyNotice(s: number): AuthErrorView {
+  return { tone: 'warning', title: 'Muitas entradas ao mesmo tempo', message: `O servidor está atendendo muitas entradas agora. Tentando de novo em ${seconds(s)}…` }
+}
+
+/**
+ * Chama `fn`; com o servidor ocupado (503 servidor_ocupado, nada foi gravado), espera o
+ * Retry-After e tenta mais uma vez sozinho. `onWait` mostra o aviso durante a espera.
+ * Se ocupar de novo, o erro sobe e a pessoa tenta pelo botão.
+ */
+export async function withBusyRetry<T>(fn: () => Promise<T>, onWait: (notice: AuthErrorView) => void): Promise<T> {
+  try {
+    return await fn()
+  } catch (e) {
+    if (!isServerBusy(e)) throw e
+    const s = busySeconds(e)
+    onWait(busyNotice(s))
+    await new Promise((r) => setTimeout(r, s * 1000))
+    return fn()
+  }
+}
+
 /** Traduz o erro da API para o aviso mostrado no formulário. */
 export function describeAuthError(e: unknown, context: 'login' | 'code' | 'password' | 'invite'): AuthErrorView {
   if (!(e instanceof ApiError)) return { tone: 'danger', title: 'Algo deu errado', message: 'Tente de novo em instantes.' }
@@ -188,6 +217,9 @@ export function describeAuthError(e: unknown, context: 'login' | 'code' | 'passw
     }
   }
   if (e.status === 429) return { tone: 'warning', title: 'Muitas tentativas seguidas', message: 'Aguarde um minuto e tente de novo.' }
+  if (e.status === 503 && e.code === 'servidor_ocupado') {
+    return { tone: 'warning', title: 'Muitas entradas ao mesmo tempo', message: `Nada foi alterado. Aguarde ${seconds(busySeconds(e))} e tente de novo.` }
+  }
   if (e.status === 401 && e.code === 'credenciais_invalidas') {
     if (context === 'login')
       return {
@@ -403,10 +435,16 @@ export function CodeInput({
   )
 }
 
-/** Código de recuperação no formato XXXXX-XXXXX. */
+/** Tamanho do código de recuperação (letras e números, sem os hífens). */
+export const RECOVERY_CODE_LENGTH = 20
+
+/**
+ * Código de recuperação no formato XXXXX-XXXXX-XXXXX-XXXXX, enquanto a pessoa digita ou cola.
+ * Aceita minúsculas, espaços e hífens em qualquer lugar (o servidor normaliza de novo).
+ */
 export function formatRecoveryCode(raw: string) {
-  const clean = raw.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 10)
-  return clean.length > 5 ? `${clean.slice(0, 5)}-${clean.slice(5)}` : clean
+  const clean = raw.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, RECOVERY_CODE_LENGTH)
+  return clean.match(/.{1,5}/g)?.join('-') ?? ''
 }
 
 /** Rodapé das etapas: com qual conta está entrando + sair. */

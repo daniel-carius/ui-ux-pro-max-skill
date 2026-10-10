@@ -1,5 +1,6 @@
 // Apostas esportivas (sportsbook Betby).
 import { createRng } from '@/lib/random'
+import { demoRecords } from './demo'
 import { HOUR, NOW, iso } from './now'
 import { seedPlayers } from './players'
 
@@ -172,3 +173,6 @@ export function seedSportsBets(): SportsBet[] {
   _bets = out.sort((a, b) => b.at.localeCompare(a.at))
   return _bets
 }
+
+// modo API: as apostas vêm do sportsbook (DEMO_DATA grava estas mesmas); sem nada gravado, lista vazia
+demoRecords(seedSportsBets)

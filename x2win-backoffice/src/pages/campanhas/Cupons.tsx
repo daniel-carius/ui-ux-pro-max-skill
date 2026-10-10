@@ -58,9 +58,9 @@ import { brl, date, dateTime, maskEmail, num, pct } from '@/lib/format'
 import { useCollection } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { DAY } from '@/data/now'
-import { usePlayers } from '@/data/hooks'
 import { seedCouponRedemptions, seedCoupons } from '@/data/campanhas2-seeds'
 import { audit, usePageAccess, useSession } from '@/domain/session'
+import { useDemoPlayers } from '@/domain/campanhas-jogadores'
 import { AUDIENCE_LABEL, AUDIENCE_OPTIONS, AUDIENCE_SHORT, C2_KEYS, fromDateInput, inAudience, timeUntil, toDateInput, type Audience } from '@/domain/campanhas2-common'
 import {
   COUPON_REWARD_LABEL,
@@ -126,7 +126,9 @@ export default function Cupons() {
   const [tab, setTab] = useTabParam('cupons', ['cupons', 'resgates'] as const)
   const coupons = useCollection<Coupon>(C2_KEYS.cupons, seedCoupons)
   const redemptions = useCollection<CouponRedemption>(C2_KEYS.cuponsResgates, seedCouponRedemptions)
-  const players = usePlayers()
+  // simulação de resgate só na demonstração: no modo API os resgates vêm da plataforma
+  // (campanhas.cupons.resgates é gravado só pelo servidor) e a tela não lê a base de jogadores
+  const players = useDemoPlayers()
   const coin = useCoin()
   const [editing, setEditing] = useState<{ coupon: Coupon; isNew: boolean } | null>(null)
   const now = new Date()
@@ -172,7 +174,7 @@ export default function Cupons() {
 
   /** Resgata o cupom com um jogador elegível sorteado (demonstração da regra). */
   const simulate = (c: Coupon) => {
-    if (!canEdit) return
+    if (!canEdit || !players) return
     const st = couponStatus(c, new Date())
     if (st !== 'ativo') {
       toast.error(`Cupom ${COUPON_STATUS_LABEL[st].toLowerCase()}`, { description: st === 'agendado' ? `Começa em ${date(c.startsAt)}.` : 'Resgates só valem com o cupom ativo.' })
@@ -251,10 +253,10 @@ export default function Cupons() {
         coupons.items.length === 0 ? (
           <FirstCoupon onNew={() => startNew()} onTemplate={(t) => startNew(t.patch)} canEdit={canEdit} />
         ) : (
-          <CouponTable coupons={coupons.items} coin={coin} canEdit={canEdit} onEdit={(c) => setEditing({ coupon: structuredClone(c), isNew: false })} onPause={togglePause} onDelete={remove} onSimulate={simulate} />
+          <CouponTable coupons={coupons.items} coin={coin} canEdit={canEdit} onEdit={(c) => setEditing({ coupon: structuredClone(c), isNew: false })} onPause={togglePause} onDelete={remove} onSimulate={players ? simulate : undefined} />
         )
       ) : (
-        <Redemptions redemptions={redemptions.items} coupons={coupons.items} canEdit={canEdit} onSimulate={simulate} onNew={() => startNew()} onGoCoupons={() => setTab('cupons')} />
+        <Redemptions redemptions={redemptions.items} coupons={coupons.items} canEdit={canEdit} onSimulate={players ? simulate : undefined} onNew={() => startNew()} onGoCoupons={() => setTab('cupons')} />
       )}
 
       {editing && <CouponDrawer key={editing.coupon.id} initial={editing.coupon} isNew={editing.isNew} all={coupons.items} coin={coin} onClose={() => setEditing(null)} onSave={(c) => save(c, editing.isNew)} />}
@@ -363,7 +365,8 @@ function CouponTable({
   onEdit: (c: Coupon) => void
   onPause: (c: Coupon) => void
   onDelete: (c: Coupon) => void
-  onSimulate: (c: Coupon) => void
+  /** só na demonstração */
+  onSimulate?: (c: Coupon) => void
 }) {
   const now = new Date()
   const columns: Column<Coupon>[] = [
@@ -473,7 +476,9 @@ function CouponTable({
       rowActions={(c) => {
         const st = couponStatus(c, now)
         return [
-          { label: 'Simular resgate', icon: Shuffle, onSelect: () => onSimulate(c), disabled: !canEdit || st !== 'ativo', hint: st !== 'ativo' ? COUPON_STATUS_LABEL[st].toLowerCase() : undefined },
+          ...(onSimulate
+            ? [{ label: 'Simular resgate', icon: Shuffle, onSelect: () => onSimulate(c), disabled: !canEdit || st !== 'ativo', hint: st !== 'ativo' ? COUPON_STATUS_LABEL[st].toLowerCase() : undefined }]
+            : []),
           { label: 'Editar', icon: Pencil, onSelect: () => onEdit(c), disabled: !canEdit },
           c.paused
             ? { label: 'Retomar', icon: Play, onSelect: () => onPause(c), disabled: !canEdit }
@@ -500,7 +505,8 @@ function Redemptions({
   redemptions: CouponRedemption[]
   coupons: Coupon[]
   canEdit: boolean
-  onSimulate: (c: Coupon) => void
+  /** só na demonstração */
+  onSimulate?: (c: Coupon) => void
   onNew: () => void
   onGoCoupons: () => void
 }) {
@@ -541,7 +547,7 @@ function Redemptions({
         placeholder={activeCoupons.length ? undefined : 'Nenhum cupom ativo'}
         options={activeCoupons.map((c) => ({ value: c.id, label: `${c.code} · ${COUPON_REWARD_LABEL[c.reward]}` }))}
       />
-      <Button size="md" icon={Shuffle} disabled={!canEdit || !chosen} onClick={() => chosen && onSimulate(chosen)} title={!canEdit ? READ_ONLY_TITLE : 'Sorteia um jogador elegível e aplica as regras do cupom'}>
+      <Button size="md" icon={Shuffle} disabled={!canEdit || !chosen} onClick={() => chosen && onSimulate?.(chosen)} title={!canEdit ? READ_ONLY_TITLE : 'Sorteia um jogador elegível e aplica as regras do cupom'}>
         Simular resgate
       </Button>
     </div>
@@ -549,7 +555,7 @@ function Redemptions({
 
   const columns: Column<CouponRedemption>[] = [
     { id: 'at', header: 'Data', sortValue: (r) => r.at, csv: (r) => dateTime(r.at), cell: (r) => <span className="whitespace-nowrap text-[13px] text-fg-2">{dateTime(r.at)}</span> },
-    { id: 'player', header: 'Jogador', minWidth: 200, sortValue: (r) => r.playerName, csv: (r) => `${r.playerName} (${r.playerId})`, cell: (r) => <PersonCell name={r.playerName} sub={maskEmail(r.playerEmail)} /> },
+    { id: 'player', header: 'Jogador', minWidth: 200, sortValue: (r) => r.playerName, csv: (r) => `${r.playerName} (${r.playerId})`, cell: (r) => <PersonCell name={r.playerName} sub={r.playerEmail ? maskEmail(r.playerEmail) : `ID ${r.playerId}`} /> },
     { id: 'code', header: 'Cupom', sortValue: (r) => r.code, cell: (r) => <Mono className="font-semibold text-fg">{r.code}</Mono> },
     { id: 'deposit', header: 'Depósito', align: 'right', sortValue: (r) => r.deposit, cell: (r) => (r.deposit ? <span className="tnum">{brl(r.deposit)}</span> : <span className="text-xs text-fg-3">sem depósito</span>) },
     { id: 'reward', header: 'Recompensa', minWidth: 220, sortValue: (r) => r.reward, cell: (r) => <span className="text-[13px] text-fg-2">{r.reward}</span>, wrap: true },
@@ -559,26 +565,28 @@ function Redemptions({
 
   return (
     <div className="space-y-4">
-      <Card>
-        <CardBody className="flex flex-col gap-3 pt-5 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-start gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary-text">
-              <Shuffle size={17} aria-hidden />
-            </span>
-            <div>
-              <p className="text-sm font-semibold text-fg">Simular um resgate</p>
-              <p className="text-[13px] leading-5 text-fg-3">Sorteia um jogador do público do cupom e aplica as regras: validade, limite por jogador e depósito mínimo.</p>
+      {onSimulate && (
+        <Card>
+          <CardBody className="flex flex-col gap-3 pt-5 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary-text">
+                <Shuffle size={17} aria-hidden />
+              </span>
+              <div>
+                <p className="text-sm font-semibold text-fg">Simular um resgate</p>
+                <p className="text-[13px] leading-5 text-fg-3">Sorteia um jogador do público do cupom e aplica as regras: validade, limite por jogador e depósito mínimo.</p>
+              </div>
             </div>
-          </div>
-          {simulator}
-        </CardBody>
-      </Card>
+            {simulator}
+          </CardBody>
+        </Card>
+      )}
       <DataTable
         caption="Resgates de cupons"
         rows={rows}
         columns={columns}
         rowKey={(r) => r.id}
-        searchText={(r) => `${r.playerName} ${r.playerEmail} ${r.playerId} ${r.code}`}
+        searchText={(r) => `${r.playerName} ${r.playerEmail ?? ''} ${r.playerId} ${r.code}`}
         searchPlaceholder="Buscar jogador ou código"
         initialSort={{ id: 'at', dir: 'desc' }}
         exportName="cupons-resgates"
@@ -596,8 +604,12 @@ function Redemptions({
         empty={{
           icon: TicketCheck,
           title: 'Nenhum resgate ainda',
-          description: activeCoupons.length ? 'Divulgue o código ou use "Simular resgate" para testar as regras.' : 'Nenhum cupom está ativo agora. Retome ou crie um cupom.',
-          action: chosen ? (
+          description: !activeCoupons.length
+            ? 'Nenhum cupom está ativo agora. Retome ou crie um cupom.'
+            : onSimulate
+              ? 'Divulgue o código ou use "Simular resgate" para testar as regras.'
+              : 'Divulgue o código. Cada uso no site aparece aqui.',
+          action: chosen && onSimulate ? (
             <Button size="sm" icon={Shuffle} disabled={!canEdit} onClick={() => onSimulate(chosen)}>
               Simular resgate de {chosen.code}
             </Button>

@@ -49,13 +49,15 @@ import {
   Tabs,
   confirm,
   confirmWithInput,
+  secretFieldError,
   toast,
   useSettingsForm,
   useTabParam,
   type Tone,
 } from '@/components/ui'
-import { dateTime, maskSecret, num, pct, plural, relative, time } from '@/lib/format'
+import { dateTime, hasMaskChars, maskSecret, num, pct, plural, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { ApiError, isApiMode } from '@/lib/api'
 import { useCollection, useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { DEFAULT_ROUTING, GATEWAY_KEYS, seedGatewayAccounts, seedGateways } from '@/data/config2-gateways'
@@ -79,9 +81,30 @@ import {
   type HealthStatus,
   type RoutingConfig,
 } from '@/domain/config2-gateways'
-import { MiniStat, PlatformMark } from './_shared-g'
+import { MiniStat, PlatformMark, errorTarget, isDestinationChangedError, saveKeyDirect } from './_shared-g'
 
 type Tab = 'credenciais' | 'roteamento' | 'saude'
+
+/**
+ * Modo API: os segredos chegam mascarados e a gravação mantém o segredo salvo quando recebe a máscara. Se o
+ * destino da credencial mudar (Client ID, ambiente, callback) com o segredo ainda mascarado, o servidor recusa
+ * (400 "O destino desta credencial mudou"): a tela pede os segredos de novo antes de salvar e mostra o erro
+ * junto do campo. config.gateways só é lida por quem vê ou edita Gateways.
+ */
+const API = isApiMode()
+
+/** Troca de Client ID do cadastro esperando os segredos novos (modo API). */
+interface PendingCredential {
+  clientId: string
+  secret: string
+  webhookSecret: string
+}
+
+const DEST_CHANGED = 'O destino desta credencial mudou: digite o segredo de novo.'
+
+function conflictToast() {
+  toast.warning('Outra pessoa alterou estes dados', { description: 'Carregamos a versão mais recente. Confira e faça a sua alteração de novo.', duration: 6000 })
+}
 
 const GW_SLOT: Record<string, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8> = { pagflex: 7, pixnow: 3, brpay: 2 }
 const ACCOUNT_SLOTS: (1 | 2 | 3 | 4 | 5 | 6 | 7 | 8)[] = [1, 3, 4, 2, 5, 7, 6, 8]
@@ -134,6 +157,71 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
   const { user } = useSession()
   const { gateways, accounts, routing, setRouting } = useGatewayData()
   const [editing, setEditing] = useState<{ gateway: Gateway; account: GatewayAccount | null } | null>(null)
+  // modo API: Client ID trocado esperando os segredos novos, por gateway; erro do servidor por gateway
+  const [pending, setPending] = useState<Record<string, PendingCredential>>({})
+  const [credError, setCredError] = useState<Record<string, string>>({})
+  const [savingCred, setSavingCred] = useState<string | null>(null)
+
+  const setPend = (id: string, p: PendingCredential | null) =>
+    setPending((prev) => {
+      const next = { ...prev }
+      if (p) next[id] = p
+      else delete next[id]
+      return next
+    })
+  /** segredo do cadastro que precisa ser digitado de novo (destino mudou com a máscara salva) */
+  const needsNew = (g: Gateway, field: 'secret' | 'webhookSecret') => !!pending[g.id] && hasMaskChars(g[field])
+  const pendingErrors = (g: Gateway) => {
+    const p = pending[g.id]
+    if (!p) return []
+    return (['secret', 'webhookSecret'] as const)
+      .map((f) => secretFieldError(p[f] || g[f], { requireNew: needsNew(g, f), saved: g[f] }))
+      .filter((x): x is string => !!x)
+  }
+
+  const saveCredential = async (g: Gateway) => {
+    const p = pending[g.id]
+    if (!p || savingCred) return
+    const errs = pendingErrors(g)
+    if (errs.length) {
+      toast.error('Digite os segredos de novo', { description: errs[0] })
+      return
+    }
+    setSavingCred(g.id)
+    setCredError((e) => ({ ...e, [g.id]: '' }))
+    const now = new Date().toISOString()
+    const next = gateways.items.map((x) =>
+      x.id === g.id ? { ...x, clientId: p.clientId, secret: p.secret || x.secret, webhookSecret: p.webhookSecret || x.webhookSecret, updatedAt: now, updatedBy: user.name } : x,
+    )
+    const r = await saveKeyDirect<Gateway[]>(GATEWAY_KEYS.gateways, gateways.items, next)
+    setSavingCred(null)
+    if (r.ok) {
+      setPend(g.id, null)
+      audit('editar', `Gateway ${g.name}`, 'Client ID do cadastro alterado; segredos substituídos')
+      toast.success('Cadastro salvo', { description: 'Client ID e segredos novos já valem para a conta principal.' })
+      return
+    }
+    if (r.conflict) return conflictToast()
+    if (isDestinationChangedError(r.error)) setCredError((e) => ({ ...e, [g.id]: r.error!.message }))
+    toast.error('Cadastro não salvo', { description: r.error?.message ?? 'Erro inesperado ao falar com o servidor. Tente de novo.', duration: 6000 })
+  }
+
+  /** Modo API: grava a conta pela API e devolve o erro para o modal mostrar junto do campo. */
+  const saveAccount = async (a: GatewayAccount, isNew: boolean): Promise<{ ok: boolean; error?: ApiError | null }> => {
+    if (!API) {
+      if (isNew) accounts.add(a, 'end')
+      else accounts.update(a.id, a)
+      return { ok: true }
+    }
+    const next = isNew ? [...accounts.items, a] : accounts.items.map((x) => (x.id === a.id ? a : x))
+    const r = await saveKeyDirect<GatewayAccount[]>(GATEWAY_KEYS.accounts, accounts.items, next)
+    if (r.ok) return { ok: true }
+    if (r.conflict) {
+      conflictToast()
+      return { ok: false, error: null }
+    }
+    return { ok: false, error: r.error }
+  }
 
   const blockedToast = (what: string, reasons: string[]) =>
     toast.error(`Não dá para ${what} agora`, {
@@ -166,6 +254,12 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
   }
 
   const replaceSecret = (g: Gateway, field: 'secret' | 'webhookSecret', value: string) => {
+    // Client ID trocado esperando os segredos: o segredo novo entra no mesmo salvamento
+    if (pending[g.id]) {
+      setPend(g.id, { ...pending[g.id], [field]: value })
+      setCredError((e) => ({ ...e, [g.id]: '' }))
+      return
+    }
     gateways.update(g.id, { [field]: value, updatedAt: new Date().toISOString(), updatedBy: user.name })
     audit('editar', `Gateway ${g.name}`, field === 'secret' ? 'Segredo do cadastro substituído' : 'Segredo do webhook substituído')
     toast.success('Segredo substituído', { description: 'O valor novo foi cifrado e já vale para a conta principal.' })
@@ -181,6 +275,12 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
     if (!r.confirmed || r.value === g.clientId) return
     if (!/^[A-Za-z0-9_-]{6,64}$/.test(r.value)) {
       toast.error('Client ID inválido', { description: 'Use de 6 a 64 letras, números, hífen ou sublinhado.' })
+      return
+    }
+    // modo API: com os segredos mascarados, o Client ID novo só é salvo junto com os segredos digitados de novo
+    if (API && (hasMaskChars(g.secret) || hasMaskChars(g.webhookSecret))) {
+      setPend(g.id, { clientId: r.value, secret: '', webhookSecret: '' })
+      toast.info('Digite os segredos de novo', { description: 'O Client ID mudou: o segredo e o segredo do webhook precisam ser informados de novo para salvar.' })
       return
     }
     gateways.update(g.id, { clientId: r.value, updatedAt: new Date().toISOString(), updatedBy: user.name })
@@ -232,6 +332,8 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
 
       {gateways.items.map((g) => {
         const list = accounts.items.filter((a) => a.gatewayId === g.id)
+        const pend = pending[g.id]
+        const shownClientId = pend?.clientId ?? g.clientId
         return (
           <Card key={g.id} className={cn('min-w-0', !g.active && 'bg-surface-2/50')}>
             <div className="flex flex-wrap items-start gap-3 px-5 pb-3 pt-4">
@@ -244,9 +346,12 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
                     {g.active ? 'Ligado' : 'Desligado'}
                   </Badge>
                   <Badge>{g.environment === 'producao' ? 'Produção' : 'Sandbox'}</Badge>
+                  {!g.clientId && <Badge tone="warning">Não configurado</Badge>}
                 </div>
                 <p className="mt-0.5 text-xs text-fg-3">
-                  {plural(list.length, 'conta', 'contas')} · cadastro alterado {relative(g.updatedAt)} por {g.updatedBy}
+                  {plural(list.length, 'conta', 'contas')}
+                  {/* modo API sem nada gravado: cadastro ainda sem autor */}
+                  {g.updatedBy && ` · cadastro alterado ${relative(g.updatedAt)} por ${g.updatedBy}`}
                 </p>
               </div>
               <Switch checked={g.active} onChange={(on) => toggleGateway(g, on)} disabled={!canEdit} ariaLabel={`Ligar gateway ${g.name}`} />
@@ -258,18 +363,55 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
                   <p className="text-[13px] font-semibold text-fg">Cadastro do gateway</p>
                   <span className="text-xs text-fg-3">usado pela conta principal</span>
                 </div>
-                <Field label="Client ID">
+                <Field label="Client ID" hint={pend ? `${g.clientId ? `Antes: ${g.clientId}. ` : ''}Ainda não salvo.` : undefined}>
                   <div className="flex gap-2">
-                    <div className="input-base flex min-w-0 items-center bg-surface-2">
-                      <Mono className="truncate text-fg">{g.clientId}</Mono>
+                    <div className={cn('input-base flex min-w-0 items-center bg-surface-2', pend && 'border-warning')}>
+                      {shownClientId ? <Mono className="truncate text-fg">{shownClientId}</Mono> : <span className="text-[13px] text-fg-3">Não configurado</span>}
                     </div>
-                    <Button icon={Pencil} onClick={() => editClientId(g)} disabled={!canEdit}>
+                    <Button icon={Pencil} onClick={() => editClientId({ ...g, clientId: shownClientId })} disabled={!canEdit || !!pend}>
                       Trocar
                     </Button>
                   </div>
                 </Field>
-                <SecretField label="Segredo (client secret)" value={g.secret} disabled={!canEdit} onChange={(v) => replaceSecret(g, 'secret', v)} />
-                <SecretField label="Segredo do webhook" value={g.webhookSecret} disabled={!canEdit} onChange={(v) => replaceSecret(g, 'webhookSecret', v)} hint="Valida a assinatura dos callbacks. Cifrado no servidor." />
+                <SecretField
+                  label="Segredo (client secret)"
+                  value={pend?.secret || g.secret}
+                  saved={g.secret}
+                  requireNew={needsNew(g, 'secret')}
+                  error={credError[g.id] || null}
+                  disabled={!canEdit}
+                  onChange={(v) => replaceSecret(g, 'secret', v)}
+                />
+                <SecretField
+                  label="Segredo do webhook"
+                  value={pend?.webhookSecret || g.webhookSecret}
+                  saved={g.webhookSecret}
+                  requireNew={needsNew(g, 'webhookSecret')}
+                  error={credError[g.id] || null}
+                  disabled={!canEdit}
+                  onChange={(v) => replaceSecret(g, 'webhookSecret', v)}
+                  hint="Valida a assinatura dos callbacks. Cifrado no servidor."
+                />
+                {pend && (
+                  <div className="md:col-span-2 flex flex-col gap-3 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-[13px] text-fg-2">Client ID trocado. Digite o segredo e o segredo do webhook de novo para salvar o cadastro.</p>
+                    <div className="flex shrink-0 gap-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setPend(g.id, null)
+                          setCredError((e) => ({ ...e, [g.id]: '' }))
+                        }}
+                      >
+                        Descartar
+                      </Button>
+                      <Button size="sm" variant="primary" onClick={() => saveCredential(g)} loading={savingCred === g.id} disabled={!canEdit || pendingErrors(g).length > 0}>
+                        Salvar cadastro
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 <Field label="Callback da conta principal" hint="Cadastre este endereço no painel do gateway.">
                   <div className="flex items-center gap-1 rounded-lg border border-line bg-surface-2 py-1 pl-3 pr-1">
                     <Mono className="min-w-0 flex-1 truncate text-left [direction:rtl]">{callbackUrlFor(g.id, '', true)}</Mono>
@@ -334,7 +476,7 @@ function Credentials({ goRouting }: { goRouting: () => void }) {
         )
       })}
 
-      {editing && <AccountModal gateway={editing.gateway} account={editing.account} siblings={accounts.items.filter((a) => a.gatewayId === editing.gateway.id)} onClose={() => setEditing(null)} onSave={(a, isNew) => (isNew ? accounts.add(a, 'end') : accounts.update(a.id, a))} />}
+      {editing && <AccountModal gateway={editing.gateway} account={editing.account} siblings={accounts.items.filter((a) => a.gatewayId === editing.gateway.id)} onClose={() => setEditing(null)} onSave={saveAccount} />}
     </div>
   )
 }
@@ -350,18 +492,24 @@ function AccountModal({
   account: GatewayAccount | null
   siblings: GatewayAccount[]
   onClose: () => void
-  onSave: (a: GatewayAccount, isNew: boolean) => void
+  onSave: (a: GatewayAccount, isNew: boolean) => Promise<{ ok: boolean; error?: ApiError | null }>
 }) {
   const isNew = !account
   const [id] = useState(() => account?.id ?? uid(`ga-${gateway.id.slice(0, 2)}-`))
   const main = !!account?.main
   const [draft, setDraft] = useState({ name: account?.name ?? '', clientId: account?.clientId ?? '', secret: '', holder: account?.holder ?? 'X2Win Entretenimento Digital Ltda.', active: account?.active ?? true })
   const [touched, setTouched] = useState(false)
-  const errors = validateAccount(draft, { isNew, main, siblings, ignoreId: account?.id })
+  const [saving, setSaving] = useState(false)
+  const [serverSecretError, setServerSecretError] = useState<string | null>(null)
+  // modo API: Client ID trocado com o segredo salvo mascarado → o segredo precisa ser digitado de novo
+  const requireNew = API && !isNew && !main && !!account && hasMaskChars(account.secret) && draft.clientId.trim() !== account.clientId
+  const secretRule = !isNew && !main && account ? secretFieldError(draft.secret.trim() || account.secret, { requireNew, saved: account.secret }) : null
+  const errors: Record<string, string> = { ...validateAccount(draft, { isNew, main, siblings, ignoreId: account?.id }) }
+  if (!errors.secret && secretRule) errors.secret = secretRule
   const callback = account?.callbackUrl ?? callbackUrlFor(gateway.id, id, false)
-  const save = () => {
+  const save = async () => {
     setTouched(true)
-    if (Object.keys(errors).length) return
+    if (Object.keys(errors).length || saving) return
     const next: GatewayAccount = {
       id,
       gatewayId: gateway.id,
@@ -374,7 +522,16 @@ function AccountModal({
       createdAt: account?.createdAt ?? new Date().toISOString(),
       holder: draft.holder.trim(),
     }
-    onSave(next, isNew)
+    setSaving(true)
+    setServerSecretError(null)
+    const r = await onSave(next, isNew)
+    setSaving(false)
+    if (!r.ok) {
+      // o destino mudou com o segredo mascarado: o erro fica junto do campo do segredo
+      if (isDestinationChangedError(r.error ?? null) || errorTarget(r.error ?? null).field === 'secret') setServerSecretError(r.error!.message)
+      if (r.error) toast.error(isNew ? 'Conta não adicionada' : 'Conta não salva', { description: r.error.message, duration: 6000 })
+      return
+    }
     const parts = [isNew ? 'Conta extra criada com credencial própria' : 'Conta editada']
     if (!isNew && draft.secret) parts.push('segredo substituído')
     audit(isNew ? 'criar' : 'editar', `Conta ${gateway.name} · ${next.name}`, parts.join('; '))
@@ -393,7 +550,7 @@ function AccountModal({
       footer={
         <>
           <Button onClick={onClose}>Cancelar</Button>
-          <Button variant="primary" onClick={save}>
+          <Button variant="primary" onClick={save} loading={saving}>
             {isNew ? 'Adicionar conta' : 'Salvar conta'}
           </Button>
         </>
@@ -419,16 +576,43 @@ function AccountModal({
         ) : (
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Client ID da conta" htmlFor="acc-client" required error={e('clientId')}>
-              <Input id="acc-client" value={draft.clientId} invalid={!!e('clientId')} className="font-mono" autoComplete="off" onChange={(x) => setDraft((d) => ({ ...d, clientId: x.target.value }))} />
+              <Input
+                id="acc-client"
+                value={draft.clientId}
+                invalid={!!e('clientId')}
+                className="font-mono"
+                autoComplete="off"
+                onChange={(x) => {
+                  setServerSecretError(null)
+                  setDraft((d) => ({ ...d, clientId: x.target.value }))
+                }}
+              />
             </Field>
             <Field
               label={isNew ? 'Segredo da conta' : 'Novo segredo'}
               htmlFor="acc-secret"
-              required={isNew}
-              error={e('secret')}
-              hint={isNew ? 'Cifrado ao salvar. Não aparece de novo.' : `Atual: ${maskSecret(account?.secret ?? '')}. Deixe em branco para manter.`}
+              required={isNew || requireNew}
+              error={serverSecretError ?? (requireNew && !draft.secret.trim() ? DEST_CHANGED : e('secret'))}
+              hint={
+                isNew
+                  ? 'Cifrado ao salvar. Não aparece de novo.'
+                  : requireNew
+                    ? 'O Client ID mudou: o segredo atual não vale mais para esta conta.'
+                    : `Atual: ${API ? account?.secret ?? '' : maskSecret(account?.secret ?? '')}. Deixe em branco para manter.`
+              }
             >
-              <Input id="acc-secret" type="password" autoComplete="new-password" value={draft.secret} invalid={!!e('secret')} placeholder="DEMO-..." onChange={(x) => setDraft((d) => ({ ...d, secret: x.target.value }))} />
+              <Input
+                id="acc-secret"
+                type="password"
+                autoComplete="new-password"
+                value={draft.secret}
+                invalid={!!serverSecretError || !!e('secret') || (requireNew && !draft.secret.trim())}
+                placeholder="DEMO-..."
+                onChange={(x) => {
+                  setServerSecretError(null)
+                  setDraft((d) => ({ ...d, secret: x.target.value }))
+                }}
+              />
             </Field>
           </div>
         )}

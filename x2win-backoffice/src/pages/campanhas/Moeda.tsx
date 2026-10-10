@@ -49,7 +49,7 @@ import {
 import { cn } from '@/lib/cn'
 import { brl, brlCompact, dateShort, num, numCompact, pct } from '@/lib/format'
 import { NOW, dayKey } from '@/data/now'
-import { usePlayers } from '@/data/hooks'
+import { useCoinStats } from '@/domain/campanhas-jogadores'
 import { seedCoinFlow, type CoinFlowDay } from '@/data/campanhas2-seeds'
 import { C2_KEYS } from '@/domain/campanhas2-common'
 import {
@@ -105,10 +105,8 @@ export default function Moeda() {
   const v = form.values
   const saved = form.saved
   const errs = coinConfigErrors(v)
-  const { items: players } = usePlayers()
-
-  const circulation = useMemo(() => players.reduce((s, p) => s + p.coins, 0), [players])
-  const holders = useMemo(() => players.filter((p) => p.coins > 0).length, [players])
+  // demonstração: somado da lista de jogadores; modo API: contagem pronta do servidor (geral.jogadores.metricas)
+  const { circulation, holders } = useCoinStats()
   const flow = useMemo(() => seedCoinFlow(), [])
   const { cur, prev, sum } = useMemo(() => monthTotals(flow), [flow])
   const emitted = sum(cur, 'emitted')

@@ -98,6 +98,53 @@ function safeDecode(s: string) {
   }
 }
 
+/** Hosts dos destinos de demonstração (terceiros): o servidor recusa destino novo ou endereço trocado para eles. */
+export const DEMO_WEBHOOK_HOSTS = ['hooks.x2win-crm.com', 'api.leadflow.app'] as const
+/** Segredos de demonstração (públicos no código do painel): o servidor recusa. */
+export const DEMO_SECRET_PATTERN = /^DEMO-hmac-/i
+/** Tamanho mínimo de um segredo digitado (o mesmo do servidor). */
+export const MIN_SECRET_LENGTH = 8
+
+/** Endereço aponta para um host de demonstração (ou subdomínio dele)? */
+export function isDemoWebhookHost(url: string): boolean {
+  let host: string
+  try {
+    host = new URL(url.trim()).hostname.toLowerCase().replace(/\.$/, '')
+  } catch {
+    return false
+  }
+  return DEMO_WEBHOOK_HOSTS.some((d) => host === d || host.endsWith(`.${d}`))
+}
+
+/** Origem do endereço (esquema, host e porta), ou null se não for URL. */
+export function urlOrigin(url: string): string | null {
+  try {
+    return new URL(url.trim()).origin
+  } catch {
+    return null
+  }
+}
+
+/**
+ * O segredo de assinatura fica preso ao destino: trocar a origem do endereço (esquema,
+ * host ou porta) ou o evento pede um segredo novo (o servidor recusa manter o antigo).
+ */
+export function needsNewSecret(before: { event: string; url: string }, after: { event: string; url: string }): boolean {
+  const from = urlOrigin(before.url)
+  return before.event !== after.event || from === null || from !== urlOrigin(after.url)
+}
+
+/** Segredo digitado: retorna o problema ou null (mesmas regras do servidor). */
+export function webhookSecretError(raw: string, opts: { rejectDemo: boolean }): string | null {
+  const s = raw.trim()
+  if (!s) return 'Digite o segredo novo ou gere um.'
+  if (s.includes('•') || s.includes('***')) return 'O segredo não pode ter caracteres de máscara (*** ou •). Digite o segredo completo.'
+  if (s.length < MIN_SECRET_LENGTH) return `O segredo precisa de pelo menos ${MIN_SECRET_LENGTH} caracteres.`
+  if (s.length > 500) return 'Segredo longo demais (máximo de 500 caracteres).'
+  if (opts.rejectDemo && DEMO_SECRET_PATTERN.test(s)) return 'Este é um segredo de demonstração. Gere um segredo novo para o destino.'
+  return null
+}
+
 export function hostOf(url: string) {
   try {
     return new URL(url).host

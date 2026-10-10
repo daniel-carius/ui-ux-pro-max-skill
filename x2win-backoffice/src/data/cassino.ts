@@ -2,6 +2,7 @@
 // vitrines da home, selos de jogos, regras de sincronização dos agregadores.
 import type { AggregatorId, GameBadge, Showcase, SyncRules } from '@/domain/cassino'
 import { seedGames, seedProviders } from './catalog'
+import { apiValue, demoRecords } from './demo'
 import { DAY, NOW, iso } from './now'
 
 export const CASSINO_KEYS = {
@@ -110,3 +111,9 @@ export function defaultSyncRules(): SyncRules {
     autoSyncHour: 4,
   }
 }
+
+// modo API, sem nada gravado: nenhum selo (os jogos vêm do servidor)
+apiValue(seedGameBadges, () => ({}))
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedShowcases)

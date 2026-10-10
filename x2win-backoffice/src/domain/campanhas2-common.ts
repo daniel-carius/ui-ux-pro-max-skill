@@ -3,7 +3,7 @@
 // servidor, estas mesmas regras devem rodar no back-end.
 import { brl, num } from '@/lib/format'
 import { DAY, NOW, dayKey } from '@/data/now'
-import type { Player } from '@/data/players'
+import type { CampaignPlayer } from './campanhas-jogadores'
 
 /** Chaves persistidas das telas (padrão 'campanhas.<tela>[.<coisa>]'). */
 export const C2_KEYS = {
@@ -43,7 +43,7 @@ export const AUDIENCE_SHORT: Record<Audience, string> = {
 export const AUDIENCE_OPTIONS = (Object.keys(AUDIENCE_LABEL) as Audience[]).map((a) => ({ value: a, label: AUDIENCE_LABEL[a] }))
 
 /** O jogador faz parte do público? */
-export function inAudience(p: Player, a: Audience, now: Date = NOW): boolean {
+export function inAudience(p: Pick<CampaignPlayer, 'createdAt' | 'lastAccess' | 'tags' | 'depositsCount'>, a: Audience, now: Date = NOW): boolean {
   switch (a) {
     case 'todos':
       return true

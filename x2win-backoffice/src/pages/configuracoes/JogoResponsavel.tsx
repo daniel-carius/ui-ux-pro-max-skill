@@ -39,7 +39,7 @@ import {
 } from '@/components/ui'
 import { brl, dateTime, num, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { usePlayers } from '@/data/hooks'
+import { usePlayerCounts } from '@/domain/config1-metricas'
 import {
   DEFAULT_RG,
   EXCLUSION_OPTIONS,
@@ -67,8 +67,7 @@ export default function JogoResponsavel() {
     validate: validateRg,
   })
   const v = form.values
-  const { items: players } = usePlayers()
-  const st = rgPlayerStats(players)
+  const st = rgPlayerStats(usePlayerCounts())
   const setLimit = (kind: 'deposit' | 'loss', p: Period, key: keyof LimitPair, n: number) =>
     form.setValues((prev) => ({ ...prev, [kind]: { ...prev[kind], [p]: { ...prev[kind][p], [key]: n } } }))
   const setMsg = (i: number, text: string) => form.setValues((p) => ({ ...p, messages: { ...p.messages, items: p.messages.items.map((m, j) => (j === i ? text : m)) } }))
@@ -90,11 +89,21 @@ export default function JogoResponsavel() {
           label="Com limite ativo"
           icon={Gauge}
           tone="success"
-          value={num(st.withLimit)}
-          hint={`${pct(st.depositors ? st.withLimit / st.depositors : 0, 0)} de quem já depositou`}
-          formula="Jogadores ativos com ao menos um limite de depósito, perda ou tempo definido por eles. Simulado nesta demonstração."
+          value={st.withLimit === null ? 'Indisponível' : num(st.withLimit)}
+          hint={st.withLimit === null ? 'o servidor ainda não informa os limites' : `${pct(st.depositors ? st.withLimit / st.depositors : 0, 0)} de quem já depositou`}
+          formula={
+            st.withLimit === null
+              ? 'Jogadores ativos com ao menos um limite de depósito, perda ou tempo definido por eles. O servidor ainda não envia esta contagem.'
+              : 'Jogadores ativos com ao menos um limite de depósito, perda ou tempo definido por eles. Simulado nesta demonstração.'
+          }
         />
-        <KpiCard label="Aumentos em espera" icon={Hourglass} tone="info" value={num(st.waitingIncrease)} hint={`prazo de ${form.saved.coolingOffHours} h antes de valer`} />
+        <KpiCard
+          label="Aumentos em espera"
+          icon={Hourglass}
+          tone="info"
+          value={st.waitingIncrease === null ? 'Indisponível' : num(st.waitingIncrease)}
+          hint={st.waitingIncrease === null ? 'o servidor ainda não informa os pedidos' : `prazo de ${form.saved.coolingOffHours} h antes de valer`}
+        />
       </section>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">

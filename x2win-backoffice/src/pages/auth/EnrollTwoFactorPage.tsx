@@ -222,11 +222,12 @@ export function RecoveryCodes({ codes, email, onContinue }: { codes: string[]; e
       title="Guarde os códigos de recuperação"
       description="O 2FA está ligado. Se você perder o celular, entre com um destes códigos. Cada um funciona uma única vez e eles não serão mostrados de novo."
     >
-      <ol className="grid grid-cols-2 gap-2 rounded-xl border border-line bg-surface-2 p-3" aria-label="Códigos de recuperação">
+      {/* um código por linha: XXXXX-XXXXX-XXXXX-XXXXX não cabe em duas colunas */}
+      <ol className="grid gap-1.5 rounded-xl border border-line bg-surface-2 p-3" aria-label="Códigos de recuperação">
         {codes.map((c, i) => (
-          <li key={c} className="flex items-center gap-2 rounded-lg bg-surface px-2.5 py-2 ring-1 ring-inset ring-line">
+          <li key={c} className="flex items-center gap-2.5 rounded-lg bg-surface px-3 py-2 ring-1 ring-inset ring-line">
             <span className="w-4 shrink-0 text-right text-[11px] font-medium text-fg-3 tnum">{i + 1}</span>
-            <code className="min-w-0 truncate font-mono text-[13px] font-semibold tracking-wide text-fg">{c}</code>
+            <code className="min-w-0 break-all font-mono text-[13px] font-semibold tracking-wide text-fg">{c}</code>
           </li>
         ))}
       </ol>

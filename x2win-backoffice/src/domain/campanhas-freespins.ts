@@ -1,7 +1,7 @@
 // Free spins: campanhas de giros, custo estimado e concessões (automáticas e manuais).
 import { brl, num } from '@/lib/format'
 import type { Game } from '@/data/catalog'
-import type { Player } from '@/data/players'
+import type { CampaignPlayer } from './campanhas-jogadores'
 
 export type FsTrigger = 'deposito' | 'cadastro' | 'manual' | 'cupom'
 export type FsCampaignStatus = 'agendada' | 'ativa' | 'pausada' | 'encerrada'
@@ -38,7 +38,8 @@ export interface FreeSpinGrant {
   campaignName: string
   playerId: string
   playerName: string
-  playerEmail: string
+  /** preenchido pelo servidor a partir da base (mascarado para quem não vê dados pessoais); o painel não envia */
+  playerEmail?: string
   gameId: string
   spins: number
   spinValue: number
@@ -133,7 +134,7 @@ export function fsEstimate(c: Pick<FreeSpinCampaign, 'spins' | 'spinValue' | 'wi
 }
 
 /** Sugestão de público: quantos jogadores podem disparar o gatilho agora. */
-export function fsEligibleSuggestion(c: Pick<FreeSpinCampaign, 'trigger' | 'depositNumber'>, players: Player[], now: Date = new Date()): { count: number; text: string } | null {
+export function fsEligibleSuggestion(c: Pick<FreeSpinCampaign, 'trigger' | 'depositNumber'>, players: Pick<CampaignPlayer, 'status' | 'depositsCount' | 'createdAt'>[], now: Date = new Date()): { count: number; text: string } | null {
   const ok = players.filter((p) => p.status === 'ativo')
   if (c.trigger === 'deposito') {
     const n = ok.filter((p) => p.depositsCount === c.depositNumber - 1).length
@@ -190,7 +191,7 @@ export function grantStatus(g: Pick<FreeSpinGrant, 'status' | 'used' | 'spins' |
 }
 
 /** Pode conceder giros desta campanha a este jogador? */
-export function canGrant(player: Player | null, campaign: FreeSpinCampaign | undefined, grants: FreeSpinGrant[], spins: number): { ok: boolean; reason: string | null } {
+export function canGrant(player: Pick<CampaignPlayer, 'id' | 'status'> | null, campaign: FreeSpinCampaign | undefined, grants: FreeSpinGrant[], spins: number): { ok: boolean; reason: string | null } {
   if (!player) return { ok: false, reason: 'Escolha o jogador.' }
   if (!campaign) return { ok: false, reason: 'Escolha a campanha.' }
   if (player.status === 'autoexcluido') return { ok: false, reason: 'Jogador autoexcluído não pode receber giros (Lei 14.790/2023).' }

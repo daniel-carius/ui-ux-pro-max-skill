@@ -63,12 +63,13 @@ import {
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import { brl, dateShort, dateTime, maskEmail, num } from '@/lib/format'
-import { useCollection, type Collection } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
 import { uid } from '@/lib/random'
 import { DAY, NOW, dayKey, daysAgo } from '@/data/now'
-import { useGames, usePlayers } from '@/data/hooks'
+import { useGames } from '@/data/hooks'
 import { seedShopItems, seedShopPurchases } from '@/data/campanhas2-seeds'
 import { audit, usePageAccess } from '@/domain/session'
+import { useDemoPlayers } from '@/domain/campanhas-jogadores'
 import { C2_KEYS, FREE_SPIN_VALUE, type CoinInfo } from '@/domain/campanhas2-common'
 import {
   LIMIT_PERIOD_LABEL,
@@ -87,7 +88,15 @@ import {
   type ShopKind,
   type ShopPurchase,
 } from '@/domain/campanhas2-loja'
-import { CoinAmount, CoinGlyph, DrawerSection, type CoinCtx, PlayerPreview, READ_ONLY_TITLE, confirmDiscard, useCoin, useGameName } from './_shared-c2'
+import { CoinAmount, CoinGlyph, DrawerSection, type CoinCtx, PlayerPreview, READ_ONLY_TITLE, confirmDiscard, useCoin, useGameName, useSavedCollection, type SavedCollection } from './_shared-c2'
+import { safeImageSrc } from '@/domain/personalizacao-p1'
+
+/**
+ * Modo API: compras vêm da plataforma e o painel só muda o status (pendente → entregue ou
+ * estornada, entregue → estornada); vendidos (sold) e a data de criação dos itens são do
+ * servidor. A devolução das moedas não é feita por esta tela.
+ */
+const API = isApiMode()
 
 const ICONS: Record<ShopIcon, LucideIcon> = { gift: Gift, sparkles: Sparkles, percent: Percent, ticket: Ticket, crown: Crown, zap: Zap, star: Star, gem: Gem }
 const ICON_LABEL: Record<ShopIcon, string> = { gift: 'Presente', sparkles: 'Brilho', percent: 'Percentual', ticket: 'Bilhete', crown: 'Coroa', zap: 'Raio', star: 'Estrela', gem: 'Joia' }
@@ -148,8 +157,8 @@ function blankItem(): ShopItem {
 export default function Loja() {
   const { canEdit } = usePageAccess()
   const [tab, setTab] = useTabParam('itens', ['itens', 'compras'] as const)
-  const items = useCollection<ShopItem>(C2_KEYS.loja, seedShopItems)
-  const purchases = useCollection<ShopPurchase>(C2_KEYS.lojaCompras, seedShopPurchases)
+  const items = useSavedCollection<ShopItem>(C2_KEYS.loja, seedShopItems)
+  const purchases = useSavedCollection<ShopPurchase>(C2_KEYS.lojaCompras, seedShopPurchases)
   const coin = useCoin()
   const [editing, setEditing] = useState<{ item: ShopItem; isNew: boolean } | null>(null)
 
@@ -159,10 +168,11 @@ export default function Loja() {
   const activeCount = items.items.filter((i) => i.active && !isSoldOut(i)).length
   const soldOut = items.items.filter(isSoldOut).length
 
-  const save = (item: ShopItem, isNew: boolean) => {
+  const save = async (item: ShopItem, isNew: boolean) => {
     const next = { ...item, name: item.name.trim(), description: item.description.trim(), updatedAt: new Date().toISOString() }
-    if (isNew) items.add(next)
-    else items.update(item.id, next)
+    // recusado pelo servidor (regra do item, estoque abaixo do vendido): o drawer fica aberto
+    const ok = isNew ? await items.addAndWait(next) : await items.updateAndWait(item.id, next)
+    if (!ok) return
     audit(isNew ? 'criar' : 'editar', `Loja · ${next.name}`, `${SHOP_KIND_LABEL[next.kind]} por ${num(next.price)} ${coin.symbol} · estoque ${next.stock == null ? 'ilimitado' : num(next.stock)}${next.active ? '' : ' · pausado'}`)
     toast.success(isNew ? 'Item criado' : 'Item salvo', { description: next.active ? 'Já aparece na loja do site.' : 'Está pausado e não aparece na loja.' })
     setEditing(null)
@@ -210,18 +220,18 @@ export default function Loja() {
             canEdit={canEdit}
             onNew={() => setEditing({ item: blankItem(), isNew: true })}
             onEdit={(it) => setEditing({ item: structuredClone(it), isNew: false })}
-            onToggle={(it, on) => {
-              items.update(it.id, { active: on, updatedAt: new Date().toISOString() })
+            onToggle={async (it, on) => {
+              if (!(await items.updateAndWait(it.id, { active: on, updatedAt: new Date().toISOString() }))) return
               audit(on ? 'ligar' : 'desligar', `Loja · ${it.name}`, on ? 'Item voltou para a loja' : 'Item pausado')
               toast.success(on ? 'Item ativado' : 'Item pausado', {
                 description: on ? 'Voltou a aparecer na loja.' : 'Saiu da loja. Quem já comprou mantém o prêmio.',
                 action: { label: 'Desfazer', onClick: () => items.update(it.id, { active: !on }) },
               })
             }}
-            onDuplicate={(it) => {
+            onDuplicate={async (it) => {
               const now = new Date().toISOString()
               const copy: ShopItem = { ...it, id: uid('lj'), name: `${it.name} (cópia)`, sold: 0, active: false, featured: false, createdAt: now, updatedAt: now }
-              items.add(copy)
+              if (!(await items.addAndWait(copy))) return
               audit('criar', `Loja · ${copy.name}`, `Cópia de ${it.name}, criada pausada`)
               toast.success('Item duplicado', { description: 'A cópia começa pausada.' })
             }}
@@ -239,7 +249,7 @@ export default function Loja() {
                 toast.error('Quantidade inválida', { description: 'Informe um número inteiro maior que zero.' })
                 return
               }
-              items.update(it.id, { stock: (it.stock ?? 0) + n, updatedAt: new Date().toISOString() })
+              if (!(await items.updateAndWait(it.id, { stock: (it.stock ?? 0) + n, updatedAt: new Date().toISOString() }))) return
               audit('editar', `Loja · ${it.name}`, `Estoque reposto: +${n} (total ${num((it.stock ?? 0) + n)})`)
               toast.success('Estoque reposto', { description: `+${num(n)} unidades.` })
             }}
@@ -251,8 +261,7 @@ export default function Loja() {
                 tone: 'danger',
                 icon: Trash2,
               })
-              if (!ok) return
-              items.remove(it.id)
+              if (!ok || !(await items.removeAndWait(it.id))) return
               audit('excluir', `Loja · ${it.name}`, `Item excluído (${num(it.sold)} vendidos)`)
               toast.success('Item excluído')
             }}
@@ -395,10 +404,11 @@ function ItemsGrid({
 
 function ItemVisual({ item, className, iconSize = 30 }: { item: Pick<ShopItem, 'icon' | 'image' | 'name'>; className?: string; iconSize?: number }) {
   const Icon = ICONS[item.icon]
+  const image = safeImageSrc(item.image)
   return (
     <div className={cn('relative flex items-center justify-center overflow-hidden bg-gradient-to-br from-primary/15 via-primary/5 to-gold/15', className)}>
-      {item.image ? (
-        <img src={item.image} alt={`Imagem de ${item.name || 'item'}`} className="h-full w-full object-cover" />
+      {image ? (
+        <img src={image} alt={`Imagem de ${item.name || 'item'}`} className="h-full w-full object-cover" />
       ) : (
         <span className="flex h-16 w-16 items-center justify-center rounded-2xl bg-surface text-primary-text shadow-card ring-1 ring-line">
           <Icon size={iconSize} aria-hidden />
@@ -529,13 +539,14 @@ function Purchases({
   coin,
   canEdit,
 }: {
-  purchases: Collection<ShopPurchase>
-  items: Collection<ShopItem>
+  purchases: SavedCollection<ShopPurchase>
+  items: SavedCollection<ShopItem>
   coin: CoinCtx
   canEdit: boolean
 }) {
   const [filter, setFilter] = useState<'todas' | PurchaseStatus>('todas')
-  const players = usePlayers()
+  // demonstração: a tela faz o papel da plataforma e devolve as moedas e o estoque no estorno
+  const players = useDemoPlayers()
 
   const daily = useMemo(() => {
     const map = new Map<string, { vendas: number; moedas: number }>()
@@ -568,28 +579,33 @@ function Purchases({
   const refund = async (p: ShopPurchase) => {
     const ok = await confirm({
       title: `Estornar compra de ${p.playerName}?`,
-      description: `Devolve ${num(p.price)} ${coin.symbol} ao jogador e cancela o prêmio "${p.itemName}". O item volta ao estoque.`,
+      description: API
+        ? `Cancela o prêmio "${p.itemName}" e marca a compra como estornada. As ${num(p.price)} ${coin.symbol} e o estoque são devolvidos pela loja do site, não por esta tela.`
+        : `Devolve ${num(p.price)} ${coin.symbol} ao jogador e cancela o prêmio "${p.itemName}". O item volta ao estoque.`,
       confirmLabel: 'Estornar compra',
       tone: 'danger',
       icon: Undo2,
     })
     if (!ok) return
-    purchases.update(p.id, { status: 'estornada' })
-    players.update(p.playerId, (pl) => ({ ...pl, coins: pl.coins + p.price }))
-    items.update(p.itemId, (it) => ({ ...it, sold: Math.max(0, it.sold - 1) }))
-    audit('editar', `Loja · compra ${p.id}`, `Compra estornada: ${num(p.price)} ${coin.symbol} devolvidas a ${p.playerName} (#${p.playerId})`)
-    toast.success('Compra estornada', { description: `${num(p.price)} ${coin.symbol} voltaram para o saldo do jogador.` })
+    // modo API: só o status muda; recusado (compra já estornada por outra pessoa), a mensagem do servidor aparece
+    if (!(await purchases.updateAndWait(p.id, { status: 'estornada' }))) return
+    if (players) {
+      players.update(p.playerId, (pl) => ({ ...pl, coins: pl.coins + p.price }))
+      items.update(p.itemId, (it) => ({ ...it, sold: Math.max(0, it.sold - 1) }))
+    }
+    audit('editar', `Loja · compra ${p.id}`, API ? `Compra estornada: ${p.playerName} (#${p.playerId}), ${num(p.price)} ${coin.symbol}` : `Compra estornada: ${num(p.price)} ${coin.symbol} devolvidas a ${p.playerName} (#${p.playerId})`)
+    toast.success('Compra estornada', { description: API ? 'O prêmio foi cancelado.' : `${num(p.price)} ${coin.symbol} voltaram para o saldo do jogador.` })
   }
 
-  const deliver = (p: ShopPurchase) => {
-    purchases.update(p.id, { status: 'entregue' })
+  const deliver = async (p: ShopPurchase) => {
+    if (!(await purchases.updateAndWait(p.id, { status: 'entregue' }))) return
     audit('aprovar', `Loja · compra ${p.id}`, `Entrega do prêmio "${p.itemName}" confirmada para ${p.playerName}`)
     toast.success('Entrega confirmada', { description: 'O prêmio foi creditado ao jogador.' })
   }
 
   const columns: Column<ShopPurchase>[] = [
     { id: 'at', header: 'Data', sortValue: (p) => p.at, csv: (p) => dateTime(p.at), cell: (p) => <span className="whitespace-nowrap text-[13px] text-fg-2">{dateTime(p.at)}</span> },
-    { id: 'player', header: 'Jogador', minWidth: 200, sortValue: (p) => p.playerName, csv: (p) => `${p.playerName} (${p.playerId})`, cell: (p) => <PersonCell name={p.playerName} sub={maskEmail(p.playerEmail)} /> },
+    { id: 'player', header: 'Jogador', minWidth: 200, sortValue: (p) => p.playerName, csv: (p) => `${p.playerName} (${p.playerId})`, cell: (p) => <PersonCell name={p.playerName} sub={p.playerEmail ? maskEmail(p.playerEmail) : `ID ${p.playerId}`} /> },
     {
       id: 'item',
       header: 'Item',
@@ -664,7 +680,7 @@ function Purchases({
         rows={rows}
         columns={columns}
         rowKey={(p) => p.id}
-        searchText={(p) => `${p.id} ${p.playerName} ${p.playerEmail} ${p.playerId} ${p.itemName}`}
+        searchText={(p) => `${p.id} ${p.playerName} ${p.playerEmail ?? ''} ${p.playerId} ${p.itemName}`}
         searchPlaceholder="Buscar jogador, e-mail ou item"
         initialSort={{ id: 'at', dir: 'desc' }}
         exportName="loja-compras"
@@ -709,7 +725,7 @@ function ItemDrawer({
   all: ShopItem[]
   coin: CoinCtx
   onClose: () => void
-  onSave: (it: ShopItem) => void
+  onSave: (it: ShopItem) => Promise<void>
 }) {
   const [it, setIt] = useState<ShopItem>(initial)
   const [touched, setTouched] = useState(!isNew)
@@ -736,7 +752,8 @@ function ItemDrawer({
   const close = async () => {
     if (await confirmDiscard(dirty)) onClose()
   }
-  const submit = () => {
+  const [saving, setSaving] = useState(false)
+  const submit = async () => {
     setTouched(true)
     const e = shopItemErrors(it, all)
     const first = Object.values(e)[0]
@@ -744,7 +761,13 @@ function ItemDrawer({
       toast.error('Revise o item', { description: first })
       return
     }
-    onSave(it)
+    if (saving) return
+    setSaving(true)
+    try {
+      await onSave(it)
+    } finally {
+      setSaving(false)
+    }
   }
 
   const left = stockLeft(it)
@@ -759,7 +782,7 @@ function ItemDrawer({
       footer={
         <>
           <Button onClick={close}>Cancelar</Button>
-          <Button variant="primary" onClick={submit}>
+          <Button variant="primary" onClick={submit} loading={saving}>
             {isNew ? 'Criar item' : 'Salvar item'}
           </Button>
         </>

@@ -2,6 +2,7 @@
 import { createRng } from '@/lib/random'
 import { defaultTemplateBody, type TemplateEventDef, type TemplateField, type WebhookTemplate } from '@/domain/campanhas-templates'
 import { DAY, HOUR, NOW, iso } from './now'
+import { demoRecords } from './demo'
 
 export const TEMPLATE_KEY = 'campanhas.templates'
 
@@ -21,7 +22,7 @@ export const TEMPLATE_EVENTS: TemplateEventDef[] = [
   { key: 'deposito.confirmado', label: 'Depósito confirmado', category: 'Depósito', description: 'Qualquer PIX de depósito pago.', fields: base(...DEPOSIT, f('deposit.count', 'Nº do depósito do jogador', 3, 'numero')) },
   { key: 'deposito.expirado', label: 'Depósito expirado', category: 'Depósito', description: 'PIX gerado e não pago no prazo.', fields: base(...DEPOSIT, f('deposit.expired_after_min', 'Expirou após (min)', 30, 'numero')) },
   { key: 'saque.solicitado', label: 'Saque solicitado', category: 'Saque', description: 'Jogador pediu um saque.', fields: base(...WITHDRAWAL, f('withdrawal.pix_key_type', 'Tipo de chave PIX', 'CPF')) },
-  { key: 'saque.pago', label: 'Saque pago', category: 'Saque', description: 'Saque aprovado e PIX enviado.', fields: base(...WITHDRAWAL, f('withdrawal.fee', 'Taxa', 0, 'numero'), f('withdrawal.approved_by', 'Aprovado por', 'Equipe financeira')) },
+  { key: 'saque.pago', label: 'Saque pago', category: 'Saque', description: 'Saque aprovado (aviso para o sistema que paga).', fields: base(...WITHDRAWAL, f('withdrawal.fee', 'Taxa', 0, 'numero'), f('withdrawal.approved_by', 'Aprovado por', 'Equipe financeira')) },
   { key: 'saque.rejeitado', label: 'Saque rejeitado', category: 'Saque', description: 'Saque recusado pela equipe.', fields: base(...WITHDRAWAL, f('withdrawal.reason', 'Motivo', 'Rollover não cumprido')) },
   { key: 'saque.expirado', label: 'Saque expirado', category: 'Saque', description: 'Saque não decidido dentro do prazo.', fields: base(...WITHDRAWAL, f('withdrawal.expired_after_h', 'Expirou após (h)', 72, 'numero')) },
   { key: 'saque.cancelado', label: 'Saque cancelado', category: 'Saque', description: 'Jogador cancelou o pedido de saque.', fields: base(...WITHDRAWAL) },
@@ -70,3 +71,6 @@ export function seedTemplates(): WebhookTemplate[] {
     }
   }).map((t) => (t.lastTest && !t.lastTest.ok ? { ...t, lastTest: { ...t.lastTest, httpStatus: 502 } } : t))
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedTemplates)

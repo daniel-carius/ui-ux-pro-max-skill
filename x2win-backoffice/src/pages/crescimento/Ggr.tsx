@@ -52,7 +52,8 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, date, dateShort, dateTime, num, numCompact, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useCollection } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
+import { dbSetAndWait, useCollection } from '@/lib/store'
 import { useGames, useProviders } from '@/data/hooks'
 import { GAME_CATEGORY_LABEL, type GameCategory } from '@/data/catalog'
 import { gameStatsForPeriod, getDailySeries, sumSeries, type GameStat } from '@/data/metrics'
@@ -546,8 +547,20 @@ function GamesTab({ range, stats }: { range: DateRange; stats: GameStat[] }) {
 
 const ST_TONE: Record<SettlementStatus, Tone> = { aberta: 'info', fechada: 'warning', paga: 'success' }
 
+/** sem nada gravado no servidor: lista vazia (o mesmo valor sempre, para o store não ver mudança) */
+const NO_SETTLEMENTS = (): Settlement[] => []
+
+/**
+ * Grava a mudança e diz se valeu. Modo API: espera o servidor, que só aceita aberta → fechada → paga
+ * (nada é reaberto, reescrito, removido nem criado já fechado ou pago), congela a taxa, define quem
+ * fechou/pagou e audita; recusa (400/403/409) já aparece no aviso com o motivo e a tela volta ao gravado.
+ */
+function commitSettlements(next: (prev: Settlement[]) => Settlement[]) {
+  return dbSetAndWait<Settlement[]>(GGR_KEYS.settlements, next, isApiMode() ? NO_SETTLEMENTS : seedSettlements)
+}
+
 function Settlements() {
-  const settlements = useCollection<Settlement>(GGR_KEYS.settlements, seedSettlements)
+  const settlements = useCollection<Settlement>(GGR_KEYS.settlements, isApiMode() ? NO_SETTLEMENTS : seedSettlements)
   const { items: providers } = useProviders()
   const { can, user, role } = useSession()
   const allowed = can(SETTLEMENT_PERMISSION)
@@ -575,6 +588,17 @@ function Settlements() {
   const monthOpenEnded = month && monthEnded(month, now) ? inMonth.filter((s) => s.status === 'aberta') : []
 
   const noPerm = `Fechar e pagar apurações exige a permissão de aprovar pagamentos. Seu cargo (${role.name}) não tem.`
+  // uma ação por vez: a próxima parte do que o servidor já gravou
+  const [busy, setBusy] = useState(false)
+  const run = async (fn: () => Promise<unknown>) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await fn()
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const close = async (s: Settlement) => {
     if (!allowed) return toast.error(noPerm)
@@ -599,8 +623,13 @@ function Settlements() {
       ),
     })
     if (!ok) return
-    settlements.update(s.id, { status: 'fechada', feePct: v.feePct, feeDue: v.feeDue, closedAt: new Date().toISOString(), closedBy: user.name })
-    audit('aprovar', `Apuração ${s.providerName} ${monthLabel(s.month, 'short')}`, `Apuração fechada: GGR ${brl(s.ggr)} × ${v.feePct}% = ${brl(v.feeDue)} a pagar até ${date(s.dueDate)}`)
+    const closedAt = new Date().toISOString()
+    // só a aberta muda; o servidor recalcula a taxa devida e define quem fechou
+    const saved = await commitSettlements((prev) =>
+      prev.map((x) => (x.id === s.id && x.status === 'aberta' ? { ...x, status: 'fechada' as const, feePct: v.feePct, feeDue: v.feeDue, closedAt, closedBy: user.name } : x)),
+    )
+    if (!saved) return
+    if (!isApiMode()) audit('aprovar', `Apuração ${s.providerName} ${monthLabel(s.month, 'short')}`, `Apuração fechada: GGR ${brl(s.ggr)} × ${v.feePct}% = ${brl(v.feeDue)} a pagar até ${date(s.dueDate)}`)
     toast.success('Apuração fechada', { description: `${s.providerName}: ${brl(v.feeDue)} a pagar até ${date(s.dueDate)}.` })
   }
 
@@ -626,14 +655,16 @@ function Settlements() {
     })
     if (!ok) return
     const at = new Date().toISOString()
-    settlements.replace(
-      settlements.items.map((s) => {
-        if (!list.some((x) => x.id === s.id)) return s
+    const ids = new Set(list.map((x) => x.id))
+    const saved = await commitSettlements((prev) =>
+      prev.map((s) => {
+        if (!ids.has(s.id) || s.status !== 'aberta') return s
         const v = view(s)
         return { ...s, status: 'fechada' as const, feePct: v.feePct, feeDue: v.feeDue, closedAt: at, closedBy: user.name }
       }),
     )
-    audit('aprovar', `Apurações ${monthLabel(month, 'short')}`, `${list.length} apurações fechadas; total de taxas ${brl(total)}`)
+    if (!saved) return
+    if (!isApiMode()) audit('aprovar', `Apurações ${monthLabel(month, 'short')}`, `${list.length} apurações fechadas; total de taxas ${brl(total)}`)
     toast.success(`${list.length} apurações fechadas`, { description: `Total de ${brl(total)} em taxas de ${monthLabel(month)}.` })
   }
 
@@ -652,8 +683,13 @@ function Settlements() {
     if (!r.confirmed) return
     const err = validatePaymentRef(r.value)
     if (err) return toast.error('Referência inválida', { description: err })
-    settlements.update(s.id, { status: 'paga', paidAt: new Date().toISOString(), paidBy: user.name, paymentRef: r.value })
-    audit('editar', `Apuração ${s.providerName} ${monthLabel(s.month, 'short')}`, `Marcada como paga: ${brl(s.feeDue)} (ref. ${r.value})`)
+    const paidAt = new Date().toISOString()
+    // só a fechada vira paga; o servidor define quem pagou e quando
+    const saved = await commitSettlements((prev) =>
+      prev.map((x) => (x.id === s.id && x.status === 'fechada' ? { ...x, status: 'paga' as const, paidAt, paidBy: user.name, paymentRef: r.value.trim() } : x)),
+    )
+    if (!saved) return
+    if (!isApiMode()) audit('editar', `Apuração ${s.providerName} ${monthLabel(s.month, 'short')}`, `Marcada como paga: ${brl(s.feeDue)} (ref. ${r.value})`)
     toast.success('Pagamento registrado', { description: `${s.providerName} · ${brl(s.feeDue)}` })
   }
 
@@ -661,14 +697,22 @@ function Settlements() {
     if (s.status === 'aberta') {
       const b = closeBlocker(s, now)
       return (
-        <Button size={size} icon={Lock} onClick={() => close(s)} disabled={!allowed || !!b} title={!allowed ? noPerm : b ?? undefined}>
+        <Button size={size} icon={Lock} onClick={() => run(() => close(s))} disabled={!allowed || !!b || busy} title={!allowed ? noPerm : b ?? undefined}>
           Fechar
         </Button>
       )
     }
     if (s.status === 'fechada')
       return (
-        <Button size={size} variant={size === 'md' ? 'success' : 'secondary'} icon={Banknote} onClick={() => pay(s)} disabled={!allowed} title={!allowed ? noPerm : undefined} className={size === 'sm' ? 'text-success' : undefined}>
+        <Button
+          size={size}
+          variant={size === 'md' ? 'success' : 'secondary'}
+          icon={Banknote}
+          onClick={() => run(() => pay(s))}
+          disabled={!allowed || busy}
+          title={!allowed ? noPerm : undefined}
+          className={size === 'sm' ? 'text-success' : undefined}
+        >
           Marcar como paga
         </Button>
       )
@@ -779,7 +823,7 @@ function Settlements() {
         }
         toolbarRight={
           monthOpenEnded.length > 0 ? (
-            <Button size="sm" variant="primary" icon={Lock} onClick={closeAll} disabled={!allowed} title={!allowed ? noPerm : undefined}>
+            <Button size="sm" variant="primary" icon={Lock} onClick={() => run(closeAll)} disabled={!allowed || busy} title={!allowed ? noPerm : undefined}>
               Fechar {monthOpenEnded.length} de {monthLabel(month, 'short')}
             </Button>
           ) : undefined

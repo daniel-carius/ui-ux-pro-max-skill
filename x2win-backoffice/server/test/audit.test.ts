@@ -898,6 +898,10 @@ describe('regressão r1-exposure-4: auditoria.registros por fatia da tela', () =
     expect(auditSliceWhere(new Set(['modo-ataque.editar']))).toContain('Modo de ataque')
     expect(auditSliceWhere(new Set(['equipe.ver', 'seguranca-painel.ver']))).toMatch(/Equipe.*Segurança do painel|Segurança do painel.*Equipe/s)
     expect(auditSliceWhere(new Set(['financeiro.ver']))).toBe('false')
+    // Manutenção e Empresa mostram quem fechou o site e a última alteração sem a Auditoria
+    expect(auditSliceWhere(new Set(['manutencao.ver']))).toBe(`((entity = 'Manutenção'))`)
+    expect(auditSliceWhere(new Set(['empresa.editar']))).toContain(`entity = 'Empresa e licença'`)
+    expect(auditSliceWhere(new Set(['empresa.editar']))).not.toContain('Manutenção')
   })
 })
 

@@ -17,6 +17,7 @@ import {
   type ReactNode,
 } from 'react'
 import type { AuditEventRequest, MeResponse } from '@shared/api'
+import { panelAuditDecision } from '@shared/audit'
 import { seedAudit, seedTeam, type AuditAction, type AuditEntry, type TeamMember } from '@/data/team'
 import { api, isApiMode, onUnauthorized } from '@/lib/api'
 import { dbGet, dbSet, prefetchKeys, refreshKey, resetDb, useDb } from '@/lib/store'
@@ -59,28 +60,35 @@ interface SessionState {
 
 const DEFAULT_SESSION: SessionState = { userId: 'u1', viewAsRoleId: null }
 
+// modo API: equipe, cargos e auditoria vêm só do servidor (sem leitura: lista vazia, nunca a demonstração)
+const NO_TEAM: TeamMember[] = []
+const NO_ROLES: Role[] = []
+const NO_AUDIT: AuditEntry[] = []
+
 export function useTeam() {
-  return useDb<TeamMember[]>(KEYS.team, seedTeam)
+  return useDb<TeamMember[]>(KEYS.team, isApiMode() ? NO_TEAM : seedTeam)
 }
 
 export function useRoles() {
-  return useDb<Role[]>(KEYS.roles, seedRoles)
+  return useDb<Role[]>(KEYS.roles, isApiMode() ? NO_ROLES : seedRoles)
 }
 
 export function useAudit() {
-  return useDb<AuditEntry[]>(KEYS.audit, seedAudit)
+  return useDb<AuditEntry[]>(KEYS.audit, isApiMode() ? NO_AUDIT : seedAudit)
 }
 
 /**
  * Registra uma ação na auditoria (quem, quando, IP).
  *   audit('aprovar', 'Saque #SQ73001', 'Saque de R$ 500,00 aprovado')
- * No modo API vira POST /api/audit/events (quem, quando e IP vêm do servidor).
+ * No modo API vira POST /api/audit/events (quem, quando e IP vêm do servidor). Eventos que só o
+ * servidor registra (login, decisões, telas gravadas por ele, como Manutenção) não são enviados:
+ * o servidor já gravou a linha ao salvar, e o POST seria recusado.
  */
 export function audit(action: AuditAction, entity: string, summary: string) {
   if (isApiMode()) {
-    // login é registrado só pelo servidor
-    if (action === 'login') return
     const body: AuditEventRequest = { action, entity: entity.slice(0, 200), summary: summary.slice(0, 1000) }
+    // mesma regra do servidor (shared/audit.ts): o que ele recusaria nem sai do painel
+    if (!panelAuditDecision(body.action, body.entity).ok) return
     void api<{ id: string }>('POST', '/api/audit/events', body)
       .then(() => refreshKey(KEYS.audit))
       .catch(() => {

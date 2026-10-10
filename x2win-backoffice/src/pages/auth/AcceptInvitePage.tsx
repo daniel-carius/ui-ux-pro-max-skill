@@ -1,10 +1,11 @@
-// Rota pública #/convite?token=... : a pessoa convidada cria o acesso (nome e senha).
+// Rota pública #/convite?token=... : a pessoa convidada cria a senha de acesso.
+// O nome na equipe é o que quem convidou cadastrou (o servidor não aceita outro).
 import { useRef, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { CircleCheck, LogIn, Unlink, UserPlus, UserRound } from 'lucide-react'
+import { CircleCheck, LogIn, Unlink, UserPlus } from 'lucide-react'
 import type { AcceptInviteRequest } from '@shared/api'
 import { api } from '@/lib/api'
-import { Button, Field, Input } from '@/components/ui'
+import { Button, Field } from '@/components/ui'
 import {
   AuthCard,
   AuthErrorAlert,
@@ -13,6 +14,7 @@ import {
   PasswordStrength,
   describeAuthError,
   passwordProblem,
+  withBusyRetry,
   type AuthErrorView,
 } from './_shared'
 
@@ -20,14 +22,12 @@ export default function AcceptInvitePage() {
   const [params] = useSearchParams()
   const token = (params.get('token') ?? '').trim()
   const navigate = useNavigate()
-  const [name, setName] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
-  const [fieldErrors, setFieldErrors] = useState<{ name?: string; password?: string; confirm?: string }>({})
+  const [fieldErrors, setFieldErrors] = useState<{ password?: string; confirm?: string }>({})
   const [error, setError] = useState<AuthErrorView | null>(null)
   const [busy, setBusy] = useState(false)
   const [done, setDone] = useState(false)
-  const nameRef = useRef<HTMLInputElement>(null)
   const passwordRef = useRef<HTMLInputElement>(null)
   const confirmRef = useRef<HTMLInputElement>(null)
 
@@ -37,21 +37,20 @@ export default function AcceptInvitePage() {
     e.preventDefault()
     if (busy) return
     const errs: typeof fieldErrors = {}
-    const cleanName = name.trim().replace(/\s+/g, ' ')
-    if (cleanName.length < 3) errs.name = 'Informe o seu nome completo.'
     const problem = passwordProblem(password)
     if (problem) errs.password = problem
     else if (confirm !== password) errs.confirm = 'As senhas não são iguais.'
     setFieldErrors(errs)
-    if (errs.name) return nameRef.current?.focus()
     if (errs.password) return passwordRef.current?.focus()
     if (errs.confirm) return confirmRef.current?.focus()
 
     setBusy(true)
     setError(null)
     try {
-      const body: AcceptInviteRequest = { token, name: cleanName, password }
-      await api<{ ok: true }>('POST', '/api/team/invites/accept', body)
+      const body: AcceptInviteRequest = { token, password }
+      // servidor ocupado (503): nada foi gravado e o convite continua valendo; espera e tenta de novo sozinho
+      await withBusyRetry(() => api<{ ok: true }>('POST', '/api/team/invites/accept', body), setError)
+      setError(null)
       setDone(true)
     } catch (err) {
       setError(describeAuthError(err, 'invite'))
@@ -92,7 +91,7 @@ export default function AcceptInvitePage() {
       <AuthCard
         icon={UserPlus}
         title="Aceitar convite"
-        description="Você foi convidado para a equipe do painel X2Win. Informe o seu nome e crie uma senha para entrar."
+        description="Você foi convidado para a equipe do painel X2Win. Crie uma senha para entrar."
         footer={
           <p>
             Já tem acesso?{' '}
@@ -104,20 +103,6 @@ export default function AcceptInvitePage() {
       >
         <form onSubmit={submit} noValidate className="space-y-4">
           <AuthErrorAlert error={error} />
-          <Field label="Nome completo" htmlFor="invite-name" error={fieldErrors.name} required>
-            <Input
-              ref={nameRef}
-              id="invite-name"
-              icon={UserRound}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoComplete="name"
-              maxLength={80}
-              placeholder="Como você quer aparecer na equipe"
-              invalid={!!fieldErrors.name}
-              autoFocus
-            />
-          </Field>
           <Field label="Senha" htmlFor="invite-password" error={fieldErrors.password} required>
             <PasswordInput
               ref={passwordRef}
@@ -127,6 +112,7 @@ export default function AcceptInvitePage() {
               autoComplete="new-password"
               invalid={!!fieldErrors.password}
               aria-describedby="invite-strength"
+              autoFocus
             />
           </Field>
           <Field label="Confirme a senha" htmlFor="invite-confirm" error={fieldErrors.confirm} required>

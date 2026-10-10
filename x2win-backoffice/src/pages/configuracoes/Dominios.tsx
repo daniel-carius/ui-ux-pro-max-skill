@@ -20,7 +20,8 @@ import {
 } from '@/components/ui'
 import { date, dateTime, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useDb } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
+import { dbSetAndWait, useDb } from '@/lib/store'
 import { ACCESS_HOSTS, DOMAIN_CHECKS_KEY, MAIN_DOMAIN, seedDomainChecks, simulateCheck, type AccessHost, type DomainCheck, type HostResult } from '@/data/config1-dominios'
 import { audit, useSession } from '@/domain/session'
 import { SLOW_MS, daysLeft, hostLevel, sslState, type HostLevel } from '@/domain/config1-dominios'
@@ -31,8 +32,15 @@ const SSL_TERM_DAYS = 90
 
 type Row = AccessHost & { result?: HostResult }
 
+/**
+ * Modo API: o histórico vem só do servidor (sem verificações de demonstração). A tela inclui a verificação nova
+ * no começo da lista gravada ([nova, ...gravadas].slice(0, 12)); o servidor define id, data e autor e recusa
+ * trocar ou apagar as anteriores.
+ */
+const CHECKS_SEED: () => DomainCheck[] = isApiMode() ? () => [] : seedDomainChecks
+
 export default function Dominios() {
-  const [checks, setChecks] = useDb<DomainCheck[]>(DOMAIN_CHECKS_KEY, seedDomainChecks)
+  const [checks] = useDb<DomainCheck[]>(DOMAIN_CHECKS_KEY, CHECKS_SEED)
   const { user } = useSession()
   const [running, setRunning] = useState(false)
   const last = checks[0]
@@ -42,10 +50,15 @@ export default function Dominios() {
 
   const runCheck = () => {
     setRunning(true)
-    setTimeout(() => {
+    setTimeout(async () => {
       const now = new Date()
       const c = simulateCheck(now.getTime() % 100_000, now, user.name)
-      setChecks((prev) => [c, ...prev].slice(0, 12))
+      // espera o servidor (modo demonstração: na hora); recusada, o motivo já apareceu
+      const ok = await dbSetAndWait<DomainCheck[]>(DOMAIN_CHECKS_KEY, (prev) => [c, ...prev].slice(0, 12), CHECKS_SEED)
+      if (!ok) {
+        setRunning(false)
+        return
+      }
       const up = c.results.filter((r) => hostLevel(r) !== 'fora').length
       const slow = c.results.filter((r) => hostLevel(r) === 'lento').length
       audit('testar', 'Domínios', `Verificação de DNS e SSL: ${up} de ${c.results.length} endereços no ar${slow ? `, ${slow} lento(s)` : ''}`)

@@ -24,7 +24,9 @@ import {
 } from '@/domain/auth-state'
 import { csvCell as panelCsvCell, toCsv } from '@/lib/csv-format'
 import { seedAffiliateWithdrawals } from '@/data/afiliados'
+import { seedSportsbookCredentials } from '@/data/catalog'
 import { seedAffiliates } from '@/data/players'
+import { seedSportsBets } from '@/data/sports'
 import { findKvRule } from '@shared/kv-registry'
 import { SECURITY } from '../src/config'
 import { totpCode } from '../src/lib/totp'
@@ -35,7 +37,7 @@ import { api as call, createTestApp, createUser, sessionCookie } from './helpers
 // Importados em tempo de execução (especificador em variável): o tsc do servidor não tem os
 // tipos do navegador (DOM, import.meta.env) que estes arquivos usam.
 interface StoreModule {
-  dbGet<T>(key: string, seed: T): T
+  dbGet<T>(key: string, seed: T | (() => T)): T
   prefetchKeys(keys: string[]): void
   refreshKey(key: string): Promise<void>
   dbSet<T>(key: string, next: T, seed?: T): void
@@ -63,11 +65,14 @@ let dropRequest: ((method: string, url: string) => boolean) | null = null
 let failRequest: ((method: string, url: string) => number | null) | null = null
 /** pedidos que o "navegador" enviou (método e caminho) */
 const sent: string[] = []
+/** corpos dos PUT que o "navegador" enviou (caminho e corpo JSON) */
+const puts: { url: string; body: unknown }[] = []
 
 async function browserFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
   const url = String(input)
   const method = (init.method ?? 'GET').toUpperCase() as 'GET' | 'POST' | 'PUT' | 'DELETE'
   sent.push(`${method} ${url}`)
+  if (method === 'PUT' && typeof init.body === 'string') puts.push({ url, body: JSON.parse(init.body) as unknown })
   if (dropRequest?.(method, url)) throw new TypeError('Failed to fetch')
   const forced = failRequest?.(method, url)
   if (forced) {
@@ -132,7 +137,7 @@ function openTab(keys: string[], storage: FlagStorage | null = null, mounted: st
 }
 
 /** Primeira leitura de uma chave como a tela faz (sem nada em memória): busca e espera o servidor. */
-async function loadFresh<T>(key: string, seed: T): Promise<T> {
+async function loadFresh<T>(key: string, seed: T | (() => T)): Promise<T> {
   store.dbGet(key, seed)
   await store.refreshKey(key) // chave ainda não materializada: só espera a leitura em andamento
   return store.dbGet(key, seed)
@@ -160,6 +165,7 @@ beforeEach(() => {
   dropRequest = null
   failRequest = null
   sent.length = 0
+  puts.length = 0
   store.resetDb()
 })
 
@@ -360,7 +366,7 @@ describe('sessão do painel: sair só com a confirmação do servidor', () => {
     expect((await call(app, 'GET', '/api/auth/me', { cookie })).statusCode).toBe(401)
   })
 
-  it('só 2xx e 401 contam como saída; 5xx e 403 de IP deixam a sessão aberta', async () => {
+  it('só 2xx e 401 contam como saída; 5xx e 403 deixam a sessão aberta', async () => {
     const storage = new MemoryStorage()
     const fail = (status: number, code: string) => () => Promise.reject(Object.assign(new Error(code), { status, code }))
     expect(await requestLogout({ postLogout: fail(401, 'nao_autenticado'), storage })).toEqual({ ended: true })
@@ -375,7 +381,12 @@ describe('sessão do painel: sair só com a confirmação do servidor', () => {
       expect(r.ended, `${status} ${code}`).toBe(false)
       expect(isLogoutPending(storage)).toBe(true)
     }
-    expect(logoutFailureText({ status: 403, code: 'ip_nao_autorizado' })).toContain('IP')
+    // a saída não depende da lista de IPs do painel: nenhuma recusa manda "conectar pela rede do escritório"
+    for (const error of [{ status: 403, code: 'ip_nao_autorizado' }, { status: 403, code: 'requisicao_invalida' }, { status: 500, code: 'erro_interno' }]) {
+      expect(logoutFailureText(error)).toContain('continua aberta')
+      expect(logoutFailureText(error)).not.toMatch(/escritório|VPN|IP/)
+    }
+    expect(logoutFailureText({ status: 0, code: 'sem_conexao' })).toContain('Sem conexão')
   })
 })
 
@@ -439,20 +450,23 @@ describe('saques de afiliados: decisão só com a confirmação do servidor', ()
     expect(await auditOf(target.id)).toEqual([{ action: 'aprovar', source: 'servidor' }])
     expect(sent.filter((r) => r.startsWith('PUT ') || r === 'POST /api/audit/events')).toEqual([])
 
-    // 2) a página recarrega e GET /api/kv/afiliados.saques dá 503 uma vez: a tela tem o padrão (pedido "pendente")
+    // 2) a página recarrega e GET /api/kv/afiliados.saques dá 503: a lista fica vazia (nunca a demonstração)
+    // e só leitura; a linha que a pessoa ainda tinha na tela (pedido "pendente") não decide nada
     store.resetDb()
     failRequest = (method, url) => (method === 'GET' && url === `/api/kv/${WKEY}` ? 503 : null)
-    const stale = (await loadFresh<W[]>(WKEY, seed)).find((w) => w.id === target.id)!
-    expect(stale.status).toBe('pendente')
+    expect(await loadFresh<W[]>(WKEY, seed)).toEqual([])
     expect(store.isLoadFailed(WKEY)).toBe(true)
+    const stale = { ...target }
+    expect(stale.status).toBe('pendente')
     sent.length = 0
     const again = await afiliados.payAffiliateWithdrawal(stale, role, op.name)
     expect(again.ok).toBe(false)
     expect(again.message).toMatch(/não foram carregados/)
     expect((await afiliados.rejectAffiliateWithdrawal(stale, role, op.name, 'Outro motivo')).ok).toBe(false)
-    // nenhuma gravação sobre o padrão, por qualquer caminho
+    // nenhuma gravação sobre o padrão, por qualquer caminho (a gravação recusada só tenta ler de novo)
     expect(await store.dbSetAndWait<W[]>(WKEY, (prev) => prev.map((w) => (w.id === stale.id ? { ...w, status: 'pago' } : w)))).toBe(false)
-    expect(sent).toEqual([])
+    expect(sent.filter((r) => !r.startsWith('GET '))).toEqual([])
+    expect(sent).toContain(`GET /api/kv/${WKEY}`)
     expect(await auditOf(target.id)).toEqual([{ action: 'aprovar', source: 'servidor' }])
 
     // 3) o servidor volta: "tentar de novo" carrega a lista real e libera a chave
@@ -493,6 +507,88 @@ describe('saques de afiliados: decisão só com a confirmação do servidor', ()
     expect((await stored<W>(WKEY)).find((w) => w.id === toFail.id)?.status).toBe('pendente')
     expect(await auditOf(toFail.id)).toEqual([])
     expect(sent.filter((r) => r.startsWith('PUT ') || r === 'POST /api/audit/events')).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// r2 api-mode-seed-fallback: sem nada gravado no servidor, o modo API mostrava (e gravava) os dados
+// de demonstração do painel como se fossem do servidor, e a primeira gravação ia sem versão
+// ---------------------------------------------------------------------------
+
+describe('modo API: o que o servidor não gravou nunca aparece como dado de demonstração', () => {
+  it('stored:false: lista vazia (nunca os registros de demonstração); configuração com o padrão; versão 0 guardada', async () => {
+    const u = await createUser(app, { roleId: 'superadmin' })
+    jar = await sessionCookie(app, u.id, 'active')
+    expect((await call(app, 'GET', '/api/kv/campanhas.promocoes', { cookie: jar })).json()).toMatchObject({ stored: false, version: 0 })
+
+    // lista de registros passada como valor ou como gerador (como as telas fazem): vazia
+    expect(await loadFresh('campanhas.promocoes', [{ id: 'promo-demo', name: 'Promoção de demonstração' }])).toEqual([])
+    expect(await loadFresh('campanhas.jornadas', () => [{ id: 'jornada-demo' }])).toEqual([])
+    // chave que o servidor só semeia com DEMO_DATA (instalação sem demonstração): vazia, não o gerador do painel
+    expect(await loadFresh('esportes.apostas', seedSportsBets)).toEqual([])
+    // objeto de configuração: o padrão da tela vale
+    const defaults = { enabled: true, horario: '08:00-22:00' }
+    expect(await loadFresh('config.suporte', defaults)).toEqual(defaults)
+    // configuração cuja demonstração tem segredos DEMO: o valor limpo registrado pelo gerador
+    const creds = await loadFresh('cassino.sportsbook-credenciais', seedSportsbookCredentials)
+    expect(creds).toMatchObject({ platformId: '', publicKey: '', privateKey: '', webhookSecret: '' })
+    expect(JSON.stringify(creds)).not.toContain('DEMO')
+    // nada foi gravado só por ler
+    expect(puts).toEqual([])
+  })
+
+  it('a primeira gravação envia a versão 0: grava se ninguém gravou antes; se alguém gravou, 409 e nada é sobrescrito', async () => {
+    const u = await createUser(app, { roleId: 'superadmin' })
+    const other = await createUser(app, { roleId: 'superadmin', name: 'Outra pessoa' })
+    jar = await sessionCookie(app, u.id, 'active')
+
+    // ninguém gravou: o PUT leva a versão 0 e grava a versão 1
+    const KEY = 'campanhas.jornadas'
+    expect(await loadFresh(KEY, [])).toEqual([])
+    expect(await store.dbSetAndWait<{ id: string }[]>(KEY, (prev) => [...prev, { id: 'j1' }])).toBe(true)
+    expect(puts).toEqual([{ url: `/api/kv/${KEY}`, body: { value: [{ id: 'j1' }], version: 0 } }])
+    expect((await call(app, 'GET', `/api/kv/${KEY}`, { cookie: jar })).json()).toMatchObject({ stored: true, version: 1, value: [{ id: 'j1' }] })
+
+    // a tela leu "nunca gravada" (versão 0); outra pessoa grava antes; a gravação desta tela é recusada
+    const RACE = 'cassino.vitrines'
+    expect(await loadFresh(RACE, [{ id: 'vt-demo' }])).toEqual([])
+    const theirs = [{ id: 'vt-real', name: 'Gravada por outra pessoa' }]
+    const otherCookie = await sessionCookie(app, other.id, 'active')
+    expect((await call(app, 'PUT', `/api/kv/${RACE}`, { cookie: otherCookie, body: { value: theirs, version: 0 } })).statusCode).toBe(200)
+    puts.length = 0
+    expect(await store.dbSetAndWait<{ id: string }[]>(RACE, (prev) => [...prev, { id: 'vt-mine' }])).toBe(false)
+    expect(puts).toEqual([{ url: `/api/kv/${RACE}`, body: { value: [{ id: 'vt-mine' }], version: 0 } }])
+    // o valor do servidor continua o da outra pessoa, e a tela recarregou para ele
+    expect((await call(app, 'GET', `/api/kv/${RACE}`, { cookie: jar })).json()).toMatchObject({ version: 1, value: theirs })
+    expect(store.dbGet(RACE, [])).toEqual(theirs)
+  })
+
+  it('leitura que falhou: lista vazia e só leitura; a gravação recusada lê de novo e, com o servidor de volta, libera a chave', async () => {
+    const u = await createUser(app, { roleId: 'superadmin' })
+    jar = await sessionCookie(app, u.id, 'active')
+    const KEY = 'campanhas.popups-inbox.inbox'
+    failRequest = (method, url) => (method === 'GET' && url === `/api/kv/${KEY}` ? 503 : null)
+    expect(await loadFresh(KEY, [{ id: 'msg-demo', title: 'Mensagem de demonstração' }])).toEqual([])
+    expect(store.isLoadFailed(KEY)).toBe(true)
+
+    // nada é gravado sobre o padrão: nem atualização, nem valor inteiro; cada recusa tenta ler de novo
+    sent.length = 0
+    expect(await store.dbSetAndWait<{ id: string }[]>(KEY, (prev) => [...prev, { id: 'msg-1' }])).toBe(false)
+    expect(await store.dbSetAndWait(KEY, [{ id: 'msg-2' }])).toBe(false)
+    store.dbSet(KEY, [{ id: 'msg-3' }])
+    expect(puts).toEqual([])
+    expect(sent.filter((r) => !r.startsWith('GET '))).toEqual([])
+    expect(sent).toContain(`GET /api/kv/${KEY}`)
+    await store.refreshKey(KEY) // a leitura pedida pela recusa ainda dá 503
+    expect(store.isLoadFailed(KEY)).toBe(true)
+    expect(store.dbGet(KEY, [])).toEqual([])
+
+    // o servidor volta: a leitura dá certo e a chave aceita gravar (versão 0: nunca gravada)
+    failRequest = null
+    await store.refreshKey(KEY)
+    expect(store.isLoadFailed(KEY)).toBe(false)
+    expect(await store.dbSetAndWait<{ id: string }[]>(KEY, (prev) => [...prev, { id: 'msg-4' }])).toBe(true)
+    expect(puts).toEqual([{ url: `/api/kv/${KEY}`, body: { value: [{ id: 'msg-4' }], version: 0 } }])
   })
 })
 

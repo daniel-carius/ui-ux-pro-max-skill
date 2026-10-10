@@ -4,17 +4,18 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { AlertTriangle, Lock, ShieldCheck, ShieldOff } from 'lucide-react'
 import { Badge, CopyButton, Field, Select, type SettingsForm } from '@/components/ui'
+import { isDestinationChanged, type ApiError } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import type { Role } from '@/domain/roles'
 import { ceilingLabel } from '@/domain/roles'
-import { isAdminLevelRole, namesLookAlike, roleColorVar } from '@/domain/config2-access'
+import { isAdminLevelRole, isGovernedRole, namesLookAlike, roleColorVar } from '@/domain/config2-access'
 
 /**
  * Ações imediatas (conectar conta, adicionar IP) gravam direto no valor salvo.
  * O useSettingsForm reinicia o rascunho quando o salvo muda; este ajudante
  * reaplica o rascunho com a mesma mudança, para não perder o que não foi salvo.
  */
-export function useExternalSave<T>(form: SettingsForm<T>, setSaved: (v: T) => void) {
+export function useExternalSave<T, R = void>(form: SettingsForm<T>, setSaved: (v: T) => R) {
   const pending = useRef<T | null>(null)
   const savedStr = JSON.stringify(form.saved)
   useEffect(() => {
@@ -24,11 +25,25 @@ export function useExternalSave<T>(form: SettingsForm<T>, setSaved: (v: T) => vo
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedStr])
-  return (change: (prev: T) => T) => {
+  return (change: (prev: T) => T): R => {
     const nextSaved = change(form.saved)
     pending.current = form.dirty ? change(form.values) : null
-    setSaved(nextSaved)
+    return setSaved(nextSaved)
   }
+}
+
+// gravação direta na API (fora da fila do adaptador), com o erro do servidor para a tela mostrar no campo
+export { dbSaveDirect as saveKeyDirect, type DirectSaveResult } from '@/lib/store'
+
+/** Onde o servidor apontou o erro: details.path ("smtp", "0", "1.secret"…) e details.field. */
+export function errorTarget(e: ApiError | null): { path: string; field: string } {
+  const d = (e?.details ?? {}) as { path?: unknown; field?: unknown }
+  return { path: typeof d.path === 'string' ? d.path : '', field: typeof d.field === 'string' ? d.field : '' }
+}
+
+/** O 400 de destino de credencial mudado (segredo mantido pela máscara depois de trocar host, conta, ambiente…). */
+export function isDestinationChangedError(e: ApiError | null) {
+  return isDestinationChanged(e)
 }
 
 export function RoleDot({ color, className }: { color: string; className?: string }) {
@@ -53,7 +68,8 @@ export function TwoFactorBadge({ on, required }: { on: boolean; required?: boole
 
 /**
  * Seleção de cargo com a descrição logo abaixo (achado 9: nomes parecidos).
- * Cargos administrativos ficam travados para quem não pode concedê-los.
+ * Cargos com governança (administrativos, aprovar saques de jogadores ou de afiliados, jogo responsável,
+ * países bloqueados) ficam travados para quem não pode conceder cargos: o servidor recusaria (403).
  */
 export function RoleSelect({
   id,
@@ -84,8 +100,10 @@ export function RoleSelect({
         onChange={onChange}
         placeholder="Escolha um cargo"
         options={roles.map((r) => {
-          const locked = (isAdminLevelRole(r) && !canGrant) || lockedIds.includes(r.id)
-          return { value: r.id, label: `${r.name}${r.system ? ' (sistema)' : ''}${locked ? ' · só Superadmin concede' : ''}`, disabled: locked }
+          const needsGrant = isGovernedRole(r) && !canGrant
+          const locked = needsGrant || lockedIds.includes(r.id)
+          const why = needsGrant ? (isAdminLevelRole(r) ? ' · só Superadmin concede' : ' · só quem concede cargos') : ''
+          return { value: r.id, label: `${r.name}${r.system ? ' (sistema)' : ''}${why}`, disabled: locked }
         })}
       />
       {selected && (

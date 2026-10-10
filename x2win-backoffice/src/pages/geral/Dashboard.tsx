@@ -37,6 +37,8 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, dateShort, num, numCompact, pct } from '@/lib/format'
 import { cn } from '@/lib/cn'
+import { isApiMode } from '@/lib/api'
+import { useDb } from '@/lib/store'
 import { dayKey } from '@/data/now'
 import { gameStatsForPeriod, getDailySeries, sumSeries, walletBalanceAt, type DailyMetrics, type PeriodTotals } from '@/data/metrics'
 import { useAffiliates, usePlayers } from '@/data/hooks'
@@ -433,10 +435,28 @@ function TopGamesCard({ t, loading, rangeKey }: { t: PeriodTotals; loading: bool
   )
 }
 
-function ConvertingLinksCard({ t, loading }: { t: PeriodTotals; loading: boolean }) {
+/** Link de afiliado com cadastros: totais históricos dos indicados. */
+interface ReferralLinkStats {
+  id: string
+  /** nome do afiliado (demonstração); no modo API só o código do link */
+  name: string | null
+  code: string
+  signups: number
+  depositors: number
+  deposited: number
+}
+
+/** Os links com mais depósitos dos indicados, e a soma de todos (para a participação de cada um). */
+interface ReferralRanking {
+  links: ReferralLinkStats[]
+  totalDeposited: number
+}
+
+/** Demonstração: calculado da base de jogadores e de afiliados do navegador. */
+function useDemoReferralRanking(): ReferralRanking {
   const { items: affiliates } = useAffiliates()
   const { items: players } = usePlayers()
-  const ranked = useMemo(() => {
+  return useMemo(() => {
     const byRef = new Map<string, { signups: number; depositors: number; deposited: number }>()
     for (const pl of players) {
       if (!pl.referrerId) continue
@@ -446,17 +466,51 @@ function ConvertingLinksCard({ t, loading }: { t: PeriodTotals; loading: boolean
       cur.deposited += pl.totalDeposited
       byRef.set(pl.referrerId, cur)
     }
-    const totalDep = [...byRef.values()].reduce((s, x) => s + x.deposited, 0) || 1
-    // distribui os depósitos do período na proporção histórica de cada link
-    return affiliates
-      .map((a) => {
-        const s = byRef.get(a.id) ?? { signups: 0, depositors: 0, deposited: 0 }
-        return { a, ...s, periodDeposits: (s.deposited / totalDep) * t.deposits * 0.31 }
-      })
+    const totalDeposited = [...byRef.values()].reduce((s, x) => s + x.deposited, 0)
+    const links = affiliates
+      .map((a) => ({ id: a.id, name: a.name, code: a.code, ...(byRef.get(a.id) ?? { signups: 0, depositors: 0, deposited: 0 }) }))
       .filter((x) => x.signups > 0)
+    return { links, totalDeposited }
+  }, [affiliates, players])
+}
+
+const PLAYER_METRICS_KEY = 'geral.jogadores.metricas'
+/** valor padrão estável (o store compara a referência) */
+const NO_METRICS: unknown = {}
+
+/**
+ * Modo API: o Dashboard não lê a base de jogadores nem a de afiliados (dado pessoal). Usa as
+ * contagens calculadas pelo servidor em geral.jogadores.metricas (top 50 links por valor depositado).
+ */
+function useServerReferralRanking(): ReferralRanking {
+  const [value] = useDb<unknown>(PLAYER_METRICS_KEY, NO_METRICS)
+  return useMemo(() => {
+    const v = (value && typeof value === 'object' ? value : {}) as { referrals?: unknown; referralsDeposited?: unknown }
+    const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0)
+    const list = Array.isArray(v.referrals) ? (v.referrals as Record<string, unknown>[]) : []
+    const links: ReferralLinkStats[] = []
+    for (const r of list) {
+      // afiliado fora da base (sem código) não tem link para mostrar
+      if (!r || typeof r !== 'object' || typeof r.code !== 'string' || !r.code) continue
+      links.push({ id: String(r.affiliateId ?? r.code), name: null, code: r.code, signups: n(r.signups), depositors: n(r.depositors), deposited: n(r.deposited) })
+    }
+    return { links, totalDeposited: n(v.referralsDeposited) || links.reduce((s, x) => s + x.deposited, 0) }
+  }, [value])
+}
+
+/** Escolhido uma vez: o modo não muda com a página aberta. */
+const useReferralRanking: () => ReferralRanking = isApiMode() ? useServerReferralRanking : useDemoReferralRanking
+
+function ConvertingLinksCard({ t, loading }: { t: PeriodTotals; loading: boolean }) {
+  const { links, totalDeposited } = useReferralRanking()
+  const ranked = useMemo(() => {
+    const total = totalDeposited || 1
+    // distribui os depósitos do período na proporção histórica de cada link
+    return links
+      .map((l) => ({ ...l, periodDeposits: (l.deposited / total) * t.deposits * 0.31 }))
       .sort((x, y) => y.periodDeposits - x.periodDeposits)
       .slice(0, 5)
-  }, [affiliates, players, t.deposits])
+  }, [links, totalDeposited, t.deposits])
   return (
     <Card>
       <CardHeader
@@ -470,16 +524,18 @@ function ConvertingLinksCard({ t, loading }: { t: PeriodTotals; loading: boolean
       <CardBody>
         {loading ? (
           <Skeleton className="h-56 w-full" />
+        ) : ranked.length === 0 ? (
+          <p className="rounded-lg bg-surface-2 px-3 py-3 text-[13px] text-fg-3">Nenhum cadastro por link de afiliado ainda.</p>
         ) : (
           <ul className="divide-y divide-line">
             {ranked.map((r) => (
-              <li key={r.a.id} className="flex items-center gap-3 py-2.5 first:pt-0">
+              <li key={r.id} className="flex items-center gap-3 py-2.5 first:pt-0">
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary-text">
                   <Link2 size={15} aria-hidden />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px] font-medium text-fg">{r.a.name}</p>
-                  <p className="truncate font-mono text-[11.5px] text-fg-3">x2win.bet.br/?ref={r.a.code}</p>
+                  <p className="truncate text-[13px] font-medium text-fg">{r.name ?? `Link ${r.code}`}</p>
+                  <p className="truncate font-mono text-[11.5px] text-fg-3">x2win.bet.br/?ref={r.code}</p>
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="text-[13px] font-semibold text-fg tnum">{brlCompact(r.periodDeposits)}</p>

@@ -164,10 +164,12 @@ describe('deploy/nginx.conf e deploy/security-headers.conf (estático)', () => {
 
   // NODE_ENV ausente agora vale produção: o desenvolvimento local diz development nos scripts do npm.
   it('npm run dev roda em development; seed e migrate usam development só sem NODE_ENV', () => {
-    const { scripts } = JSON.parse(read('server/package.json')) as { scripts: Record<string, string> }
-    expect(scripts.dev).toBe('NODE_ENV=development tsx watch src/index.ts')
-    expect(scripts.seed).toBe('NODE_ENV=${NODE_ENV:-development} tsx src/seed.ts')
-    expect(scripts.migrate).toBe('NODE_ENV=${NODE_ENV:-development} tsx src/migrate.ts')
+    const { scripts, engines } = JSON.parse(read('server/package.json')) as { scripts: Record<string, string>; engines: Record<string, string> }
+    // server/.env é lido quando existe (--env-file-if-exists, Node 22.9+); variável exportada no shell vale mais que o arquivo
+    expect(scripts.dev).toBe('NODE_ENV=development tsx watch --env-file-if-exists=.env src/index.ts')
+    expect(scripts.seed).toBe('NODE_ENV=${NODE_ENV:-development} tsx --env-file-if-exists=.env src/seed.ts')
+    expect(scripts.migrate).toBe('NODE_ENV=${NODE_ENV:-development} tsx --env-file-if-exists=.env src/migrate.ts')
+    expect(engines.node).toBe('>=22.9')
     expect(scripts.start).toBe('node dist/index.js')
     // a imagem fixa production (não depende do padrão)
     expect(read('Dockerfile.api')).toMatch(/^ENV NODE_ENV=production$/m)

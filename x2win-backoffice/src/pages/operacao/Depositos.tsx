@@ -70,9 +70,10 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, dateTime, num, pct, relative, time } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useDb } from '@/lib/store'
+import { ApiError, api, isApiMode } from '@/lib/api'
+import { refreshKey, useDb } from '@/lib/store'
 import { DAY, dayKey, startOfDay } from '@/data/now'
-import { useDeposits } from '@/data/hooks'
+import { DATA_KEYS, useDeposits } from '@/data/hooks'
 import { DEPOSIT_STATUS_LABEL, type Deposit, type DepositStatus } from '@/data/finance'
 import { seedDepositCampaigns } from '@/data/operacao'
 import { audit, usePageAccess } from '@/domain/session'
@@ -100,7 +101,7 @@ import {
   type DepositLimits,
   type TimelineStep,
 } from '@/domain/operacao'
-import { PlayerDrawer, TableFrame, maskEmailShort } from '@/pages/geral/_shared'
+import { PlayerDrawer, TableFrame, maskEmailShort, useCanOpenPlayer } from '@/pages/geral/_shared'
 
 type TabId = 'depositos' | 'campanhas' | 'limites'
 
@@ -134,6 +135,34 @@ export default function Depositos() {
 
 type Filter = 'todos' | DepositStatus
 
+/**
+ * Modo API: a lista de depósitos é gravada só pelo servidor (PUT em operacao.depositos é 403). A reconsulta vai
+ * para POST /api/kv/operacao.depositos/recheck { ids } (depositos.editar), que baixa como expirado o PIX pendente
+ * vencido e grava a auditoria; depois a lista é lida de novo.
+ */
+const API = isApiMode()
+/** limite de ids por pedido de reconsulta no servidor */
+const RECHECK_BATCH = 500
+
+interface RecheckResponse {
+  ok: true
+  expired: string[]
+  unchanged: string[]
+  missing: string[]
+  version: number
+}
+
+async function recheckOnServer(ids: string[]) {
+  const out = { expired: [] as string[], unchanged: [] as string[], missing: [] as string[] }
+  for (let i = 0; i < ids.length; i += RECHECK_BATCH) {
+    const res = await api<RecheckResponse>('POST', `/api/kv/${encodeURIComponent(DATA_KEYS.deposits)}/recheck`, { ids: ids.slice(i, i + RECHECK_BATCH) })
+    out.expired.push(...res.expired)
+    out.unchanged.push(...res.unchanged)
+    out.missing.push(...res.missing)
+  }
+  return out
+}
+
 function DepositList() {
   const { canEdit } = usePageAccess()
   const deposits = useDeposits()
@@ -142,6 +171,7 @@ function DepositList() {
   const [filter, setFilter] = useState<Filter>('todos')
   const [openId, setOpenId] = useState<string | null>(null)
   const [playerId, setPlayerId] = useState<string | null>(null)
+  const canOpenPlayer = useCanOpenPlayer()
 
   const inPeriod = useMemo(() => deposits.items.filter((d) => d.status === 'pendente' || inRange(d.createdAt, range)), [deposits.items, range])
   const counts = useMemo(() => {
@@ -167,9 +197,39 @@ function DepositList() {
     return paid
   }, [deposits.items, range])
 
+  const [rechecking, setRechecking] = useState(false)
+  const recheckApi = async (list: Deposit[]) => {
+    if (rechecking || !list.length) return
+    setRechecking(true)
+    try {
+      const res = await recheckOnServer(list.map((d) => d.id))
+      await refreshKey(DATA_KEYS.deposits).catch(() => {})
+      if (list.length === 1) {
+        const d = list[0]
+        if (res.expired.includes(d.id)) toast.success('PIX baixado como expirado', { description: `${d.id}: o prazo venceu sem pagamento.` })
+        else if (res.missing.includes(d.id)) toast.warning('Depósito não encontrado', { description: `${d.id} não está mais na lista do servidor.` })
+        else if (d.status === 'pendente') toast.info('Ainda aguardando pagamento', { description: `O código vale até ${time(pixDeadline(d, limits.pixExpirationMin))}.` })
+        else toast.info('Nada mudou', { description: `${d.id} já estava ${DEPOSIT_STATUS_LABEL[d.status].toLowerCase()}.` })
+      } else {
+        toast.success('Gateways reconsultados', {
+          description: `${num(res.expired.length)} PIX vencidos baixados como expirados${res.unchanged.length ? `; ${num(res.unchanged.length)} sem mudança` : ''}.`,
+        })
+      }
+    } catch (e) {
+      toast.error('Não foi possível reconsultar', { description: e instanceof ApiError ? e.message : 'Tente de novo em instantes.', duration: 6000 })
+      refreshKey(DATA_KEYS.deposits).catch(() => {})
+    } finally {
+      setRechecking(false)
+    }
+  }
+
   const recheck = (list: Deposit[]) => {
     if (!canEdit) {
       toast.error('Seu cargo só consulta depósitos.')
+      return
+    }
+    if (API) {
+      void recheckApi(list)
       return
     }
     const now = Date.now()
@@ -347,7 +407,7 @@ function DepositList() {
           tone="warning"
           title={`${overdue.length} PIX passaram do prazo de ${limits.pixExpirationMin} min e seguem como aguardando`}
           action={
-            <Button size="sm" icon={RefreshCw} onClick={recheckAll} disabled={!canEdit} title={!canEdit ? 'Seu cargo só consulta depósitos' : undefined}>
+            <Button size="sm" icon={RefreshCw} onClick={recheckAll} disabled={!canEdit} loading={rechecking} title={!canEdit ? 'Seu cargo só consulta depósitos' : undefined}>
               Reconsultar no gateway
             </Button>
           }
@@ -372,7 +432,7 @@ function DepositList() {
           rowClassName={(d) => (isPixOverdue(d, limits.pixExpirationMin) ? 'bg-danger/[0.03]' : undefined)}
           rowActions={(d) => [
             { label: 'Ver detalhes', icon: Eye, onSelect: () => setOpenId(d.id) },
-            { label: 'Ver jogador', icon: UserRound, onSelect: () => setPlayerId(d.playerId) },
+            { label: 'Ver jogador', icon: UserRound, disabled: !canOpenPlayer, hint: canOpenPlayer ? undefined : 'só em Usuários', onSelect: () => setPlayerId(d.playerId) },
             { label: 'Copiar referência', icon: Copy, onSelect: () => copyRef(d) },
             ...(d.status === 'pendente'
               ? [{ divider: true as const }, { label: 'Reconsultar no gateway', icon: RefreshCw, disabled: !canEdit, hint: canEdit ? undefined : 'só leitura', onSelect: () => recheck([d]) }]

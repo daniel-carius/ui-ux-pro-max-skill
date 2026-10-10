@@ -41,6 +41,7 @@ import {
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import { brl, dateTime, maskEmail, num, pct } from '@/lib/format'
+import { isApiMode } from '@/lib/api'
 import { useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { seedReferrals } from '@/data/campanhas2-seeds'
@@ -75,7 +76,9 @@ export default function Indicacao() {
     successMessage: 'Regras de indicação salvas',
   })
   const v = form.values
-  const records = useMemo(() => seedReferrals(), [])
+  // indicados de demonstração (gerados da base local). Modo API: ainda não há registro de indicados
+  // no servidor; a tela não mostra os de demonstração (nomes e e-mails) como se fossem reais
+  const records = useMemo(() => (isApiMode() ? [] : seedReferrals()), [])
   const saved = useMemo(() => referralStats(records, form.saved, status.enabled, coin), [records, form.saved, status.enabled, coin])
   const draft = useMemo(() => referralStats(records, v, status.enabled, coin), [records, v, status.enabled, coin])
   const chestErr = chestErrors(v.chests)
@@ -444,7 +447,7 @@ function ReferralPreview({ chests, coin, on, hasErrors }: { chests: Chest[]; coi
 
 function ReferrersTable({ referrers, cfg, coin, on }: { referrers: ReferrerSummary[]; cfg: ReferralConfig; coin: CoinCtx; on: boolean }) {
   const columns: Column<ReferrerSummary>[] = [
-    { id: 'name', header: 'Jogador', minWidth: 220, pinned: true, sortValue: (r) => r.name, csv: (r) => `${r.name} (${r.referrerId})`, cell: (r) => <PersonCell name={r.name} sub={maskEmail(r.email)} /> },
+    { id: 'name', header: 'Jogador', minWidth: 220, pinned: true, sortValue: (r) => r.name, csv: (r) => `${r.name} (${r.referrerId})`, cell: (r) => <PersonCell name={r.name} sub={r.email ? maskEmail(r.email) : `ID ${r.referrerId}`} /> },
     { id: 'referred', header: 'Indicados', align: 'right', sortValue: (r) => r.referred, cell: (r) => <span className="tnum">{num(r.referred)}</span> },
     { id: 'valid', header: 'Válidos', align: 'right', sortValue: (r) => r.valid, cell: (r) => <span className="font-semibold tnum">{num(r.valid)}</span> },
     {

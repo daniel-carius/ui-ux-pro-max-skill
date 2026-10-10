@@ -12,7 +12,9 @@ import { seedTeam } from '@/data/team'
 import { DEMO_KEYS, DEMO_STAFF_LABEL, demoCpf, demoEmail, demoIp, demoize, demoPhone, seedDemo } from '../src/modules/kv/demo-seed'
 import { buildMetrics, cashbackRulesOf, DEFAULT_CASHBACK_RULES, DEFAULT_LEVEL_CASHBACK, levelCashbackOf } from '../src/modules/kv/player-projections'
 import { STATUS_TRANSITIONS as SERVER_TRANSITIONS, isPlayerRequestedReason as serverIsPlayerRequested } from '../src/modules/kv/player-status'
+import { attackAutoOffAt, runAttackAutoOffOnce } from '../src/modules/kv/attack-auto-off'
 import kvRoutes from '../src/modules/kv/routes'
+import { DEMO_BYPASS_TOKEN } from '../src/modules/kv/rules-system'
 import { encryptAtRest, loadRow, saveRow } from '../src/modules/kv/store'
 import { api, createTestApp, loginAs } from './helpers'
 
@@ -72,7 +74,7 @@ describe('kv: Modo de ataque, Manutenção e Empresa ficam na auditoria do servi
   let app: FastifyInstance
   let admin: { cookie: string; user: { id: string } }
   const attack = (p: Row = {}) => ({ active: false, since: null, activatedBy: null, autoOffMinutes: 120, lowerLimits: true, closeSignups: false, captcha: true, ...p })
-  const maint = (p: Row = {}) => ({ active: false, message: 'Voltamos em breve.', returnAt: null, bypassToken: 'link-secreto-AAA111', since: null, ...p })
+  const maint = (p: Row = {}) => ({ active: false, message: 'Voltamos em breve.', returnAt: null, bypassToken: 'link-secreto-AAA111-aaaa', since: null, ...p })
 
   beforeAll(async () => {
     app = await createTestApp()
@@ -113,10 +115,10 @@ describe('kv: Modo de ataque, Manutenção e Empresa ficam na auditoria do servi
     const mark = await lastAuditId(app)
     const first = await put(app, admin.cookie, 'config.manutencao', maint())
     expect(first.statusCode, first.body).toBe(200)
-    const token = await put(app, admin.cookie, 'config.manutencao', maint({ bypassToken: 'link-secreto-BBB222' }), 1)
+    const token = await put(app, admin.cookie, 'config.manutencao', maint({ bypassToken: 'link-secreto-BBB222-bbbb' }), 1)
     expect(token.statusCode).toBe(200)
     const returnAt = iso(Date.UTC(2099, 0, 2, 15, 30))
-    const on = await put(app, admin.cookie, 'config.manutencao', maint({ bypassToken: 'link-secreto-BBB222', active: true, returnAt, since: '2020-01-01T00:00:00.000Z' }), 2)
+    const on = await put(app, admin.cookie, 'config.manutencao', maint({ bypassToken: 'link-secreto-BBB222-bbbb', active: true, returnAt, since: '2020-01-01T00:00:00.000Z' }), 2)
     expect(on.statusCode, on.body).toBe(200)
     expect(Math.abs(Date.parse(on.json().value.since) - Date.now())).toBeLessThan(60_000)
     const off = await put(app, admin.cookie, 'config.manutencao', { ...on.json().value, active: false }, 3)
@@ -152,8 +154,8 @@ describe('kv: Modo de ataque, Manutenção e Empresa ficam na auditoria do servi
       expect(r.body, role).not.toContain('link-secreto')
     }
     const viewer = await customRole(app, 'so-manutencao', ['manutencao.ver'])
-    expect((await current(app, viewer, 'config.manutencao')).value.bypassToken).toBe('link-secreto-BBB222')
-    expect((await current(app, admin.cookie, 'config.manutencao')).value.bypassToken).toBe('link-secreto-BBB222')
+    expect((await current(app, viewer, 'config.manutencao')).value.bypassToken).toBe('link-secreto-BBB222-bbbb')
+    expect((await current(app, admin.cookie, 'config.manutencao')).value.bypassToken).toBe('link-secreto-BBB222-bbbb')
   })
 
   it("empresa: 'editar' em \"Empresa e licença\" (uma linha, sem a linha genérica)", async () => {
@@ -185,6 +187,74 @@ describe('kv: Modo de ataque, Manutenção e Empresa ficam na auditoria do servi
     } finally {
       await fresh.close()
     }
+  })
+})
+
+describe('kv: o servidor desliga o modo de ataque no prazo e nunca grava link de testes fraco', () => {
+  let app: FastifyInstance
+  let admin: { cookie: string; user: { id: string } }
+  const attack = (p: Row = {}) => ({ active: false, since: null, activatedBy: null, autoOffMinutes: 30, lowerLimits: true, closeSignups: true, captcha: true, ...p })
+  const maint = (p: Row = {}) => ({ active: false, message: 'Voltamos em breve.', returnAt: null, since: null, ...p })
+
+  beforeAll(async () => {
+    app = await createTestApp()
+    admin = await loginAs(app, 'superadmin', { name: 'Ana Operadora' })
+  })
+  afterAll(async () => app.close())
+
+  it("desligamento automático: no prazo, active:false e a linha 'desligar' em nome de \"Sistema\" (sem ninguém com o painel aberto)", async () => {
+    const on = await put(app, admin.cookie, 'seguranca.modo-ataque', attack({ active: true }))
+    expect(on.statusCode, on.body).toBe(200)
+    const since = Date.parse(on.json().value.since)
+    expect(attackAutoOffAt(on.json().value)).toBe(since + 30 * 60_000)
+    // antes do prazo: nada muda
+    expect(await runAttackAutoOffOnce(app, since + 29 * 60_000)).toBe(false)
+    expect((await storedPlain<Row>(app, 'seguranca.modo-ataque')).active).toBe(true)
+
+    const mark = await lastAuditId(app)
+    expect(await runAttackAutoOffOnce(app, since + 30 * 60_000 + 1000)).toBe(true)
+    expect(await storedPlain<Row>(app, 'seguranca.modo-ataque')).toMatchObject({ active: false, since: null, activatedBy: null, autoOffMinutes: 30, closeSignups: true })
+    const rows = await auditsAfter(app, mark)
+    expect(rows.map((r) => [r.action, r.entity, r.actor_id, r.actor_name, r.source])).toEqual([['desligar', 'Modo de ataque', null, 'Sistema', 'servidor']])
+    expect(rows[0].summary).toBe('seguranca.modo-ataque — Desligado automaticamente após 30 min (ligado por Ana Operadora) (v1→v2)')
+    // já desligado: nada a fazer (outra instância da API que confira depois não grava de novo)
+    expect(await runAttackAutoOffOnce(app, since + 60 * 60_000)).toBe(false)
+    expect(await auditsAfter(app, mark)).toHaveLength(1)
+    // o painel que ainda tinha a versão anterior recebe 409 e relê
+    expect((await put(app, admin.cookie, 'seguranca.modo-ataque', { ...on.json().value, active: false }, 1)).statusCode).toBe(409)
+  })
+
+  it('desligamento só manual (autoOffMinutes 0) ou sem "desde": o servidor não desliga', async () => {
+    const cur = await current(app, admin.cookie, 'seguranca.modo-ataque')
+    const on = await put(app, admin.cookie, 'seguranca.modo-ataque', attack({ active: true, autoOffMinutes: 0 }), cur.version)
+    expect(on.statusCode, on.body).toBe(200)
+    expect(attackAutoOffAt(on.json().value)).toBeNull()
+    expect(await runAttackAutoOffOnce(app, Date.now() + 365 * DAY)).toBe(false)
+    expect((await storedPlain<Row>(app, 'seguranca.modo-ataque')).active).toBe(true)
+    expect(attackAutoOffAt({ active: true, autoOffMinutes: 30, since: null })).toBeNull()
+    expect(attackAutoOffAt({ active: false, autoOffMinutes: 30, since: iso(0) })).toBeNull()
+  })
+
+  it('manutenção: link de testes ausente, o da demonstração ou curto é trocado por um novo do servidor', async () => {
+    let version = 0
+    const seen = new Set<string>()
+    for (const p of [{}, { bypassToken: DEMO_BYPASS_TOKEN }, { bypassToken: 'teste-0123456789' }, { bypassToken: 'link com espaço e mais de vinte' }, { bypassToken: 12345 }]) {
+      const r = await put(app, admin.cookie, 'config.manutencao', maint(p), version || undefined)
+      expect(r.statusCode, r.body).toBe(200)
+      version = r.json().version
+      const token = r.json().value.bypassToken as string
+      expect(token, JSON.stringify(p)).toMatch(/^teste-[A-Za-z0-9_-]{24}$/)
+      expect(token).not.toBe(DEMO_BYPASS_TOKEN)
+      expect(seen.has(token)).toBe(false)
+      seen.add(token)
+      expect((await storedPlain<Row>(app, 'config.manutencao')).bypassToken).toBe(token)
+    }
+    // link forte enviado pelo painel: gravado como veio
+    const strong = `teste-${'a1'.repeat(16)}`
+    const ok = await put(app, admin.cookie, 'config.manutencao', maint({ bypassToken: strong }), version)
+    expect(ok.json().value.bypassToken).toBe(strong)
+    const rows = await app.db.query<AuditRow>(`select summary from audit_log where entity = 'Manutenção'`)
+    for (const r of rows) for (const t of [...seen, strong]) expect(r.summary).not.toContain(t)
   })
 })
 
@@ -430,7 +500,7 @@ describe('kv: público de marketing e métricas da base calculados pelo servidor
       expect((await get(app, cookies.tema, key)).statusCode, key).toBe(403)
       expect((await get(app, cookies.admin, key)).statusCode, key).toBe(200)
     }
-    expect(findKvRule('geral.jogadores.audiencia')?.readPages).toEqual(['promocoes', 'free-spins', 'cupons', 'torneios', 'niveis', 'disparos', 'notificacoes', 'popups-inbox'])
+    expect(findKvRule('geral.jogadores.audiencia')?.readPages).toEqual(['promocoes', 'free-spins', 'torneios', 'niveis', 'disparos', 'notificacoes', 'popups-inbox'])
     expect(findKvRule('geral.jogadores.metricas')?.readPages).toEqual([
       'dashboard',
       'cadastro',
@@ -440,7 +510,6 @@ describe('kv: público de marketing e métricas da base calculados pelo servidor
       'cashback',
       'promocoes',
       'free-spins',
-      'cupons',
       'torneios',
       'niveis',
       'disparos',
@@ -1008,15 +1077,19 @@ describe('kv: dados de demonstração gravados pelo servidor nas chaves das tela
     const cpfs = collect(all, /^cpf$/)
     expect(cpfs.length).toBe(340)
     for (const [, c] of cpfs) expect(validCpf(c), c).toBe(false)
-    for (const [, p] of collect(all, /^phone$/)) expect(p).toMatch(/^\d{2}90000\d{4}$/)
+    for (const [, p] of collect(all, /^phone$/)) expect(p).toMatch(/^\d{2}90\d{7}$/)
+    // a regra mantém 7 dígitos: jogadores diferentes não passam a dividir o celular (falso "Mesmo celular" no Anti-fraude)
+    const playerPhones = (all['geral.jogadores'] as Row[]).map((p) => p.phone)
+    expect(playerPhones.length).toBeGreaterThan(100)
+    expect(new Set(playerPhones).size).toBe(playerPhones.length)
     for (const [, ip] of collect(all, /^ip$/)) expect(ip).toMatch(/^10\./)
-    // chaves PIX: e-mail .invalid, CPF inválido, celular (DD) 90000-XXXX
+    // chaves PIX: e-mail .invalid, CPF inválido, celular (DD) 9 0XXX-XXXX
     const pix = [...(all['afiliados.saques'] as Row[]), ...(all['crescimento.afiliados'] as Row[])].filter((x) => typeof x.pixKey === 'string')
     expect(pix.length).toBeGreaterThan(10)
     for (const x of pix) {
       const k = x.pixKey as string
       if (k.includes('@')) expect(k).toMatch(/\.invalid$/)
-      else if (x.pixKeyType === 'Celular') expect(k).toMatch(/^\d{2}90000\d{4}$/)
+      else if (x.pixKeyType === 'Celular') expect(k).toMatch(/^\d{2}90\d{7}$/)
       else if (x.pixKeyType === 'CPF' || /^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(k)) expect(validCpf(k), k).toBe(false)
     }
     // autor das decisões: rótulo genérico
@@ -1056,8 +1129,9 @@ describe('kv: dados de demonstração gravados pelo servidor nas chaves das tela
     expect(validCpf(demoCpf('529.982.247-25'))).toBe(false)
     expect(demoCpf('529.982.247-25')).toMatch(/^529\.982\.247-\d5$/)
     expect(demoCpf(demoCpf('52998224725'))).toBe(demoCpf('52998224725'))
-    expect(demoPhone('11987654321')).toBe('11900004321')
-    expect(demoPhone('(11) 98765-4321')).toBe('(11) 90000-4321')
+    expect(demoPhone('11987654321')).toBe('11907654321')
+    expect(demoPhone('(11) 98765-4321')).toBe('(11) 90765-4321')
+    expect(demoPhone('1134567890')).toBe('1104567890')
     expect(demoEmail('ana@gmail.com')).toBe('ana@gmail.com.invalid')
     expect(demoEmail(demoEmail('ana@gmail.com'))).toBe('ana@gmail.com.invalid')
     expect(demoIp('189.45.12.207')).toBe('10.45.12.207')

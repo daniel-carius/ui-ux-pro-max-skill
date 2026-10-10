@@ -2,10 +2,10 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { LogIn, Mail } from 'lucide-react'
 import type { LoginResponse } from '@shared/api'
-import { api } from '@/lib/api'
+import { api, isServerBusy } from '@/lib/api'
 import { useAuthApi, type LoginReason } from '@/domain/session'
 import { Alert, Button, Field, Input } from '@/components/ui'
-import { AuthCard, AuthErrorAlert, PasswordInput, describeAuthError, useNow, type AuthErrorView } from './_shared'
+import { AuthCard, AuthErrorAlert, PasswordInput, describeAuthError, useNow, withBusyRetry, type AuthErrorView } from './_shared'
 
 const NOTICE: Record<LoginReason, { tone: 'info' | 'success' | 'danger'; title: string; text: string }> = {
   expired: {
@@ -50,12 +50,15 @@ export function LoginPage({ reason }: { reason?: LoginReason }) {
     setError(null)
     setShowNotice(false)
     try {
-      await api<LoginResponse>('POST', '/api/auth/login', { email: email.trim(), password })
+      // servidor ocupado (503): espera o tempo indicado e tenta mais uma vez sozinho
+      await withBusyRetry(() => api<LoginResponse>('POST', '/api/auth/login', { email: email.trim(), password }), setError)
+      setError(null)
       // a sessão segue para a etapa certa (troca de senha, 2FA ou painel)
       await signedIn()
     } catch (err) {
       setError(describeAuthError(err, 'login'))
-      setPassword('')
+      // ocupado: a senha não foi conferida; fica no campo para tentar de novo
+      if (!isServerBusy(err)) setPassword('')
       setTimeout(() => passwordRef.current?.focus(), 0)
     } finally {
       setBusy(false)

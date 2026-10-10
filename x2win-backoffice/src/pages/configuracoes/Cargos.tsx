@@ -49,10 +49,12 @@ import {
 import { num, plural } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { uid } from '@/lib/random'
+import { isApiMode } from '@/lib/api'
+import { dbSetAndWait, refreshKey } from '@/lib/store'
 import { MODULES, PAGES, type ModuleId } from '@/nav'
 import type { TeamMember } from '@/data/team'
-import { audit, usePageAccess, useRoles, useSession, useTeam } from '@/domain/session'
-import { PERMISSIONS, ceilingLabel, moduleAccess, type Permission, type Role } from '@/domain/roles'
+import { KEYS, audit, usePageAccess, useRoles, useSession, useTeam } from '@/domain/session'
+import { PERMISSIONS, ceilingLabel, isRequire2faLocked, moduleAccess, seedRoles, type Permission, type Role } from '@/domain/roles'
 import {
   GRANT_PERM,
   ROLE_COLORS,
@@ -63,6 +65,10 @@ import {
   diffPermissions,
   isAdminLevelRole,
   isAdminPerm,
+  isGovernedChange,
+  isGovernedPerm,
+  isGovernedRole,
+  needsGrantToCreateOrDelete,
   permsOfModule,
   permsOfPage,
   roleColorVar,
@@ -75,11 +81,31 @@ import { RoleBadge, RoleDot } from './_shared-g'
 
 const ACCESS_LABEL = { nenhum: 'Nenhum', leitura: 'Leitura', edicao: 'Edição' } as const
 
+/** Modo API: o servidor confere cargos.conceder e devolve 403 com o motivo (o adaptador mostra a mensagem). */
+const API = isApiMode()
+
+/** Grava a lista de cargos e espera a confirmação do servidor (modo demonstração: na hora). */
+function saveRoles(change: (prev: Role[]) => Role[]) {
+  return dbSetAndWait<Role[]>(KEYS.roles, change, seedRoles)
+}
+
+/** 2FA exigido de verdade: marcado no cargo ou travado (Superadmin, sempre exigido). */
+const requires2fa = (r: Role) => r.require2fa || isRequire2faLocked(r)
+
+const GRANT_MSG = 'Só quem pode conceder cargos dá ou tira as permissões de aprovar saques, de jogo responsável e de países bloqueados, e muda o teto de aprovação de saques.'
+
+/** Cargo do sistema mais restrito sem governança: recebe as pessoas desligadas de um cargo excluído (como o servidor). */
+function fallbackRole(roles: Role[], removed: Role) {
+  return roles
+    .filter((x) => x.system && x.id !== removed.id && !isGovernedRole(x))
+    .sort((a, b) => a.permissions.length - b.permissions.length || a.id.localeCompare(b.id))[0]
+}
+
 export default function Cargos() {
   const { canEdit, can } = usePageAccess()
   const { setViewAs, realRole } = useSession()
-  const [roles, setRoles] = useRoles()
-  const [team] = useTeam()
+  const [roles] = useRoles()
+  const [team, setTeam] = useTeam()
   const [openId, setOpenId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [renaming, setRenaming] = useState<{ role: Role; suggestion?: string } | null>(null)
@@ -92,11 +118,17 @@ export default function Cargos() {
     return null
   }
 
+  /** excluir ou duplicar: cargo com governança ou com teto exige cargos.conceder */
+  const grantLock = (r: Role): string | null =>
+    !canGrant && needsGrantToCreateOrDelete(r) ? 'Só quem pode conceder cargos cria ou exclui cargos que aprovam saques, mexem em jogo responsável, países ou acessos, ou têm teto de saque.' : null
+
   const membersOf = (r: Role) => team.filter((m) => m.roleId === r.id)
   const activeOf = (r: Role) => membersOf(r).filter((m) => m.status === 'ativo')
-  const weakRoles = broadRolesWithout2fa(roles)
+  /** quem impede a exclusão: ativos e convidados (desligados passam para outro cargo) */
+  const inUseOf = (r: Role) => membersOf(r).filter((m) => m.status !== 'desligado')
+  const weakRoles = broadRolesWithout2fa(roles).filter((r) => !isRequire2faLocked(r))
   const pairs = similarRolePairs(roles)
-  const required = roles.filter((r) => r.require2fa)
+  const required = roles.filter(requires2fa)
   const approvers = roles.filter((r) => r.approvalCeiling !== 0 && r.permissions.includes('saques.aprovar'))
 
   const viewAs = (r: Role) => {
@@ -106,6 +138,10 @@ export default function Cargos() {
 
   const set2fa = async (r: Role, on: boolean) => {
     if (!canEdit) return
+    if (isRequire2faLocked(r)) {
+      toast.error(`O 2FA é sempre exigido no cargo ${r.name}.`)
+      return
+    }
     if (isAdminLevelRole(r) && !canGrant) {
       toast.error('Só o Superadmin altera cargos administrativos.')
       return
@@ -124,10 +160,14 @@ export default function Cargos() {
       })
       if (!ok) return
     }
-    setRoles((prev) => prev.map((x) => (x.id === r.id ? { ...x, require2fa: on } : x)))
-    audit(on ? 'ligar' : 'desligar', `Cargo ${r.name}`, on ? '2FA passou a ser exigido' : '2FA passou a ser opcional')
+    if (!(await saveRoles((prev) => prev.map((x) => (x.id === r.id ? { ...x, require2fa: on } : x))))) return
+    // modo API: o servidor grava a auditoria do cargo
+    if (!API) audit(on ? 'ligar' : 'desligar', `Cargo ${r.name}`, on ? '2FA passou a ser exigido' : '2FA passou a ser opcional')
     toast.success(on ? `2FA exigido em ${r.name}` : `2FA opcional em ${r.name}`, {
-      description: on && without.length ? `${without.map((m) => m.name).join(', ')} precisa${without.length > 1 ? 'm' : ''} ativar no próximo acesso.` : 'Vale na hora.',
+      description:
+        on && without.length
+          ? `${without.map((m) => m.name).join(', ')} ${without.length > 1 ? 'saem' : 'sai'} do painel na próxima ação e cadastra${without.length > 1 ? 'm' : ''} o 2FA ao entrar de novo.`
+          : 'Vale na hora.',
     })
   }
 
@@ -142,7 +182,7 @@ export default function Cargos() {
     const ok = await confirm({
       title: `Exigir 2FA em ${plural(allowed.length, 'cargo', 'cargos')} com acesso amplo?`,
       description: affected.length
-        ? `${affected.map((m) => m.name).join(', ')} precisa${affected.length > 1 ? 'm' : ''} ativar o 2FA no próximo acesso.`
+        ? `${affected.map((m) => m.name).join(', ')} ${affected.length > 1 ? 'saem' : 'sai'} do painel na próxima ação e cadastra${affected.length > 1 ? 'm' : ''} o 2FA ao entrar de novo.`
         : 'Todas as pessoas desses cargos já usam 2FA.',
       confirmLabel: 'Exigir 2FA',
       icon: ShieldCheck,
@@ -158,15 +198,16 @@ export default function Cargos() {
       ),
     })
     if (!ok) return
-    setRoles((prev) => prev.map((x) => (allowed.some((a) => a.id === x.id) ? { ...x, require2fa: true } : x)))
-    audit('ligar', 'Cargos e permissões', `2FA exigido em cargos com acesso amplo: ${allowed.map((r) => r.name).join(', ')}`)
+    if (!(await saveRoles((prev) => prev.map((x) => (allowed.some((a) => a.id === x.id) ? { ...x, require2fa: true } : x))))) return
+    if (!API) audit('ligar', 'Cargos e permissões', `2FA exigido em cargos com acesso amplo: ${allowed.map((r) => r.name).join(', ')}`)
     toast.success('2FA exigido nos cargos com acesso amplo')
   }
 
-  const duplicate = (r: Role) => {
+  const duplicate = async (r: Role) => {
     if (!canEdit) return
-    if (isAdminLevelRole(r) && !canGrant) {
-      toast.error('Só o Superadmin duplica cargos administrativos.')
+    const gl = grantLock(r)
+    if (gl) {
+      toast.error('Cargo não duplicado', { description: gl })
       return
     }
     let name = `Cópia de ${r.name}`
@@ -181,31 +222,55 @@ export default function Cargos() {
       permissions: [...r.permissions],
       color: ROLE_COLORS[roles.length % ROLE_COLORS.length],
     }
-    setRoles((prev) => [...prev, copy])
-    audit('criar', `Cargo ${name}`, `Cargo duplicado de ${r.name} (${r.permissions.length} permissões)`)
+    if (!(await saveRoles((prev) => [...prev, copy]))) return
+    if (!API) audit('criar', `Cargo ${name}`, `Cargo duplicado de ${r.name} (${r.permissions.length} permissões)`)
     toast.success('Cargo duplicado', { description: 'Ajuste o nome e as permissões antes de atribuir.' })
     setOpenId(copy.id)
   }
 
   const remove = async (r: Role) => {
     if (r.system) return
-    const members = membersOf(r)
+    const gl = grantLock(r)
+    if (gl) {
+      toast.error('Cargo não excluído', { description: gl })
+      return
+    }
+    const members = inUseOf(r)
     if (members.length) {
       toast.error('Cargo em uso', {
         description: `${members.map((m) => `${m.name} (${m.status})`).join(', ')} usa${members.length > 1 ? 'm' : ''} este cargo. Troque em Equipe antes de excluir.`,
       })
       return
     }
+    // pessoas desligadas não impedem: passam para o cargo do sistema mais restrito (o servidor faz o mesmo)
+    const off = membersOf(r).filter((m) => m.status === 'desligado')
+    const fallback = fallbackRole(roles, r)
+    if (off.length && !fallback) {
+      toast.error('Cargo não excluído', { description: `Não há cargo do sistema para receber as pessoas desligadas de ${r.name}.` })
+      return
+    }
     const ok = await confirm({
       title: `Excluir o cargo ${r.name}?`,
-      description: 'O cargo some da lista e não pode ser recuperado. Ninguém usa este cargo hoje.',
+      description: off.length
+        ? `O cargo some da lista e não pode ser recuperado. ${plural(off.length, 'pessoa desligada passa', 'pessoas desligadas passam')} para o cargo ${fallback!.name}.`
+        : 'O cargo some da lista e não pode ser recuperado. Ninguém usa este cargo hoje.',
       confirmLabel: 'Excluir cargo',
       tone: 'danger',
       icon: Trash2,
     })
     if (!ok) return
-    setRoles((prev) => prev.filter((x) => x.id !== r.id))
-    audit('excluir', `Cargo ${r.name}`, `Cargo personalizado excluído (${r.permissions.length} permissões)`)
+    if (!(await saveRoles((prev) => prev.filter((x) => x.id !== r.id)))) return
+    if (API) {
+      // o servidor já moveu as pessoas desligadas e gravou a auditoria
+      if (off.length) void refreshKey(KEYS.team).catch(() => {})
+    } else {
+      if (off.length) setTeam((prev) => prev.map((m) => (m.roleId === r.id && m.status === 'desligado' ? { ...m, roleId: fallback!.id } : m)))
+      audit(
+        'excluir',
+        `Cargo ${r.name}`,
+        `Cargo personalizado excluído (${r.permissions.length} permissões)${off.length ? `; ${plural(off.length, 'pessoa desligada passou', 'pessoas desligadas passaram')} para ${fallback!.name}` : ''}`,
+      )
+    }
     toast.success('Cargo excluído')
   }
 
@@ -252,7 +317,7 @@ export default function Cargos() {
               </Button>
             }
           >
-            <p>Nestes cargos, quem tiver a senha roubada entra com tudo o que o cargo permite. Exigir 2FA obriga a ativação no próximo acesso.</p>
+            <p>Nestes cargos, quem tiver a senha roubada entra com tudo o que o cargo permite. Ao exigir 2FA, quem está sem ele sai do painel na próxima ação e cadastra o 2FA ao entrar de novo.</p>
             <ul className="mt-2 space-y-1">
               {weakRoles.map((r) => (
                 <li key={r.id} className="flex flex-wrap items-center gap-1.5">
@@ -303,7 +368,9 @@ export default function Cargos() {
               members={activeOf(r)}
               allMembers={membersOf(r)}
               lock={lockReason(r)}
-              canToggle2fa={canEdit && (!isAdminLevelRole(r) || canGrant)}
+              grantLock={grantLock(r)}
+              inUse={inUseOf(r).length}
+              canToggle2fa={canEdit && (!isAdminLevelRole(r) || canGrant) && !isRequire2faLocked(r)}
               onOpen={() => setOpenId(r.id)}
               onToggle2fa={(on) => set2fa(r, on)}
               onDuplicate={() => duplicate(r)}
@@ -342,6 +409,8 @@ function RoleCard({
   members,
   allMembers,
   lock,
+  grantLock,
+  inUse,
   canToggle2fa,
   onOpen,
   onToggle2fa,
@@ -355,6 +424,10 @@ function RoleCard({
   members: TeamMember[]
   allMembers: TeamMember[]
   lock: string | null
+  /** excluir/duplicar exige cargos.conceder */
+  grantLock: string | null
+  /** pessoas ativas ou convidadas (impedem a exclusão) */
+  inUse: number
   canToggle2fa: boolean
   onOpen: () => void
   onToggle2fa: (on: boolean) => void
@@ -365,7 +438,8 @@ function RoleCard({
   canCreate: boolean
 }) {
   const b = broadAccess(r)
-  const weak = b.broad && !r.require2fa
+  const locked2fa = isRequire2faLocked(r)
+  const weak = b.broad && !requires2fa(r)
   const withAccess = MODULES.map((m) => ({ m, a: moduleAccess(r, m.id) })).filter((x) => x.a !== 'nenhum')
   return (
     <article className={cn('card flex flex-col', weak && 'border-danger/30')}>
@@ -387,9 +461,16 @@ function RoleCard({
             { label: lock ? 'Ver permissões' : 'Editar permissões', icon: lock ? Eye : Pencil, onSelect: onOpen },
             { label: 'Ver painel como este cargo', icon: Eye, onSelect: onViewAs },
             { divider: true },
-            { label: 'Duplicar', icon: Copy, disabled: !canCreate, onSelect: onDuplicate },
+            { label: 'Duplicar', icon: Copy, disabled: !canCreate || !!grantLock, hint: canCreate && grantLock ? 'só quem concede cargos' : undefined, onSelect: onDuplicate },
             { label: 'Renomear', icon: Type, disabled: r.system || !!lock, hint: r.system ? 'sistema' : undefined, onSelect: onRename },
-            { label: 'Excluir', icon: Trash2, danger: true, disabled: r.system || !!lock || allMembers.length > 0, hint: allMembers.length ? 'em uso' : undefined, onSelect: onDelete },
+            {
+              label: 'Excluir',
+              icon: Trash2,
+              danger: true,
+              disabled: r.system || !!lock || !!grantLock || inUse > 0,
+              hint: r.system ? undefined : inUse ? 'em uso' : grantLock ? 'só quem concede cargos' : undefined,
+              onSelect: onDelete,
+            },
           ]}
         />
       </div>
@@ -421,12 +502,13 @@ function RoleCard({
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="flex items-center gap-1.5 text-[13px] font-medium text-fg">
-              2FA {r.require2fa ? <Badge tone="success">Exigido</Badge> : <Badge tone={weak ? 'danger' : 'neutral'}>Opcional</Badge>}
+              2FA {requires2fa(r) ? <Badge tone="success">Exigido</Badge> : <Badge tone={weak ? 'danger' : 'neutral'}>Opcional</Badge>}
             </p>
             {weak && <p className="mt-0.5 text-xs text-danger">Acesso amplo sem 2FA obrigatório</p>}
+            {locked2fa && <p className="mt-0.5 text-xs text-fg-3">Sempre exigido: acesso total.</p>}
           </div>
-          <span title={canToggle2fa ? (r.require2fa ? 'Deixar opcional' : 'Exigir 2FA') : 'Só o Superadmin altera este cargo'}>
-            <Switch checked={r.require2fa} onChange={onToggle2fa} disabled={!canToggle2fa} ariaLabel={`Exigir 2FA no cargo ${r.name}`} size="sm" />
+          <span title={locked2fa ? `O 2FA é sempre exigido no cargo ${r.name}` : canToggle2fa ? (r.require2fa ? 'Deixar opcional' : 'Exigir 2FA') : 'Só o Superadmin altera este cargo'}>
+            <Switch checked={requires2fa(r)} onChange={onToggle2fa} disabled={!canToggle2fa || locked2fa} ariaLabel={`Exigir 2FA no cargo ${r.name}`} size="sm" />
           </span>
         </div>
         <div>
@@ -566,8 +648,8 @@ function RoleDrawer({
   onClose: () => void
   onViewAs: () => void
 }) {
-  const [, setRoles] = useRoles()
   const [draft, setDraft] = useState<Role>(role)
+  const [saving, setSaving] = useState(false)
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<Set<ModuleId>>(() => new Set(MODULES.filter((m) => moduleAccess(role, m.id) !== 'nenhum').map((m) => m.id)))
   const readOnly = !!lock
@@ -576,9 +658,13 @@ function RoleDrawer({
   const diff = diffPermissions(role.permissions, draft.permissions)
   const ceilingErr = draft.approvalCeiling !== null && draft.approvalCeiling < 0 ? 'Valor inválido.' : null
   const canApprove = draft.permissions.includes('saques.aprovar')
+  const paysAffiliates = draft.permissions.includes('afiliados-saques.aprovar')
   const activeMembers = members.filter((m) => m.status === 'ativo')
+  const locked2fa = isRequire2faLocked(role)
+  // teto e permissões de governança: só quem concede cargos muda (o servidor responde 403)
+  const ceilingLocked = readOnly || !canGrant
 
-  const permLocked = (p: Permission) => readOnly || (isAdminPerm(p.key) && !canGrant)
+  const permLocked = (p: Permission) => readOnly || (isGovernedPerm(p.key) && !canGrant)
   const setPerms = (fn: (prev: string[]) => string[]) => setDraft((d) => ({ ...d, permissions: fn(d.permissions) }))
 
   const q = query.trim().toLowerCase()
@@ -599,27 +685,30 @@ function RoleDrawer({
     onClose()
   }
 
-  const save = () => {
-    if (readOnly) return
+  const save = async () => {
+    if (readOnly || saving) return
     if (nameCheck.error) {
       toast.error('Revise o nome', { description: nameCheck.error })
       return
     }
     if (ceilingErr) return
-    const addedAdmin = diff.added.filter(isAdminPerm)
-    if (addedAdmin.length && !canGrant) {
-      toast.error('Só o Superadmin concede permissões administrativas.')
+    const next = { ...draft, name: draft.name.trim(), description: draft.description.trim() }
+    if (!canGrant && isGovernedChange(role, next)) {
+      toast.error('Cargo não salvo', { description: GRANT_MSG })
       return
     }
-    const next = { ...draft, name: draft.name.trim(), description: draft.description.trim() }
-    setRoles((prev) => prev.map((r) => (r.id === role.id ? next : r)))
+    setSaving(true)
+    const ok = await saveRoles((prev) => prev.map((r) => (r.id === role.id ? next : r)))
+    setSaving(false)
+    // recusado: o motivo do servidor já apareceu; o rascunho continua aberto
+    if (!ok) return
     const parts: string[] = []
     if (diff.added.length || diff.removed.length) parts.push(`+${diff.added.length} / −${diff.removed.length} permissões`)
     if (next.name !== role.name) parts.push(`nome: ${role.name} → ${next.name}`)
     if (next.require2fa !== role.require2fa) parts.push(`2FA ${next.require2fa ? 'exigido' : 'opcional'}`)
     if (next.approvalCeiling !== role.approvalCeiling) parts.push(`teto: ${ceilingLabel(role)} → ${ceilingLabel(next)}`)
     if (next.description !== role.description) parts.push('descrição')
-    audit('editar', `Cargo ${next.name}`, parts.join('; ') || 'Cargo salvo')
+    if (!API) audit('editar', `Cargo ${next.name}`, parts.join('; ') || 'Cargo salvo')
     toast.success('Cargo salvo', { description: `Vale na hora para ${plural(activeMembers.length, 'pessoa', 'pessoas')}. Teste com "Ver como".` })
     onClose()
   }
@@ -648,7 +737,7 @@ function RoleDrawer({
           <div className="flex gap-2">
             <Button onClick={close}>{readOnly ? 'Fechar' : 'Cancelar'}</Button>
             {!readOnly && (
-              <Button variant="primary" onClick={save} disabled={!dirty || !!nameCheck.error || !!ceilingErr}>
+              <Button variant="primary" onClick={save} loading={saving} disabled={!dirty || !!nameCheck.error || !!ceilingErr}>
                 Salvar cargo
               </Button>
             )}
@@ -660,6 +749,11 @@ function RoleDrawer({
         {lock && (
           <Alert tone={role.id === 'superadmin' ? 'info' : 'warning'} icon={Lock}>
             {lock}
+          </Alert>
+        )}
+        {!lock && !canGrant && (
+          <Alert tone="info" icon={Lock}>
+            As permissões com cadeado e o teto de saque só mudam com quem pode conceder cargos. O resto do cargo você pode editar.
           </Alert>
         )}
 
@@ -707,9 +801,17 @@ function RoleDrawer({
         <section className="grid gap-4 rounded-xl border border-line p-4 sm:grid-cols-2">
           <Switch
             label="Exigir 2FA"
-            description={draft.require2fa ? 'Quem não tiver 2FA ativa no próximo acesso.' : broadAccess(draft).broad ? 'Opcional em cargo com acesso amplo: risco alto.' : 'Opcional.'}
-            checked={draft.require2fa}
-            disabled={readOnly}
+            description={
+              locked2fa
+                ? 'Sempre exigido: o Superadmin tem acesso total.'
+                : draft.require2fa
+                  ? 'Quem estiver sem 2FA sai do painel na próxima ação e cadastra o 2FA ao entrar de novo.'
+                  : broadAccess(draft).broad
+                    ? 'Opcional em cargo com acesso amplo: risco alto.'
+                    : 'Opcional.'
+            }
+            checked={draft.require2fa || locked2fa}
+            disabled={readOnly || locked2fa}
             onChange={(on) => setDraft((d) => ({ ...d, require2fa: on }))}
           />
           <div>
@@ -722,7 +824,8 @@ function RoleDrawer({
                   size="sm"
                   ariaLabel="Teto de aprovação"
                   value={ceilingMode(draft.approvalCeiling)}
-                  onChange={(m) => !readOnly && setDraft((d) => ({ ...d, approvalCeiling: m === 'sem_teto' ? null : m === 'nao_aprova' ? 0 : d.approvalCeiling && d.approvalCeiling > 0 ? d.approvalCeiling : 5000 }))}
+                  disabled={ceilingLocked}
+                  onChange={(m) => !ceilingLocked && setDraft((d) => ({ ...d, approvalCeiling: m === 'sem_teto' ? null : m === 'nao_aprova' ? 0 : d.approvalCeiling && d.approvalCeiling > 0 ? d.approvalCeiling : 5000 }))}
                   options={[
                     { value: 'nao_aprova', label: 'Não aprova' },
                     { value: 'valor', label: 'Até um valor' },
@@ -730,9 +833,20 @@ function RoleDrawer({
                   ]}
                 />
                 {ceilingMode(draft.approvalCeiling) === 'valor' && (
-                  <MoneyInput id="rd-ceiling" value={draft.approvalCeiling ?? 0} disabled={readOnly} onValueChange={(v) => setDraft((d) => ({ ...d, approvalCeiling: Math.max(1, v) }))} />
+                  <MoneyInput
+                    id="rd-ceiling"
+                    ariaLabel="Teto de aprovação em reais"
+                    value={draft.approvalCeiling ?? 0}
+                    disabled={ceilingLocked}
+                    onValueChange={(v) => setDraft((d) => ({ ...d, approvalCeiling: Math.max(1, v) }))}
+                  />
                 )}
-                {!canApprove && draft.approvalCeiling !== 0 && <p className="text-xs text-warning">Sem a permissão "Aprovar e recusar saques", o teto não vale.</p>}
+                <p className="text-xs text-fg-3">Um teto em reais vale para aprovar saques de jogadores e para pagar saques de afiliados.</p>
+                {!canApprove && !paysAffiliates && draft.approvalCeiling !== 0 && (
+                  <p className="text-xs text-warning">Sem permissão para aprovar saques de jogadores ou pagar saques de afiliados, o teto não vale.</p>
+                )}
+                {paysAffiliates && draft.approvalCeiling === 0 && <p className="text-xs text-warning">"Não aprova" não limita o valor dos saques de afiliados que o cargo paga.</p>}
+                {!readOnly && !canGrant && <p className="flex items-center gap-1 text-xs text-fg-3"><Lock size={12} aria-hidden /> Só quem pode conceder cargos muda o teto.</p>}
               </div>
             )}
           </div>
@@ -842,7 +956,12 @@ function RoleDrawer({
                                   <Checkbox
                                     checked={draft.permissions.includes(edit.key)}
                                     disabled={permLocked(edit)}
-                                    label={<span className="text-xs text-fg-2">Editar</span>}
+                                    label={
+                                      <span className="inline-flex items-center gap-1 text-xs text-fg-2">
+                                        Editar
+                                        {isGovernedPerm(edit.key) && <Lock size={11} className="text-warning" aria-label="só quem concede cargos dá ou tira" />}
+                                      </span>
+                                    }
                                     onChange={(on) => setPerms((prev) => togglePermission(prev, edit.key, on))}
                                   />
                                 ) : (
@@ -862,7 +981,8 @@ function RoleDrawer({
                                       <span className="flex flex-wrap items-center gap-1.5 text-xs text-fg-2">
                                         {sp.label}
                                         {isAdminPerm(sp.key) && <Badge tone="warning" icon={Lock}>só Superadmin concede</Badge>}
-                                        {!isAdminPerm(sp.key) && (sp.key.includes('aprovar') || sp.key.includes('exportar') || sp.key.includes('ver-') || sp.key.includes('banir')) && <Badge tone="danger">sensível</Badge>}
+                                        {!isAdminPerm(sp.key) && isGovernedPerm(sp.key) && <Badge tone="warning" icon={Lock}>só quem concede cargos</Badge>}
+                                        {!isGovernedPerm(sp.key) && (sp.key.includes('aprovar') || sp.key.includes('exportar') || sp.key.includes('ver-') || sp.key.includes('banir')) && <Badge tone="danger">sensível</Badge>}
                                       </span>
                                     }
                                   />
@@ -910,18 +1030,23 @@ function PermList({ keys }: { keys: string[] }) {
 // ---------- Novo cargo ----------
 
 function NewRoleModal({ roles, canGrant, onClose, onCreated }: { roles: Role[]; canGrant: boolean; onClose: () => void; onCreated: (id: string) => void }) {
-  const [, setRoles] = useRoles()
   const [name, setName] = useState('')
+  const [saving, setSaving] = useState(false)
   const [description, setDescription] = useState('')
   const [base, setBase] = useState('')
   const [touched, setTouched] = useState(false)
   const check = checkRoleName(name, roles)
   const baseRole = roles.find((r) => r.id === base)
-  const baseErr = baseRole && isAdminLevelRole(baseRole) && !canGrant ? 'Só o Superadmin parte de um cargo administrativo.' : null
+  const baseErr =
+    baseRole && isGovernedRole(baseRole) && !canGrant
+      ? isAdminLevelRole(baseRole)
+        ? 'Só o Superadmin parte de um cargo administrativo.'
+        : 'Só quem pode conceder cargos parte de um cargo que aprova saques ou altera jogo responsável ou países bloqueados.'
+      : null
   const descErr = description.trim().length < 10 ? 'Descreva em uma frase o que o cargo faz (mínimo 10 letras).' : null
-  const submit = () => {
+  const submit = async () => {
     setTouched(true)
-    if (check.error || baseErr || descErr) return
+    if (check.error || baseErr || descErr || saving) return
     const role: Role = {
       id: uid('cargo-'),
       name: name.trim(),
@@ -932,8 +1057,11 @@ function NewRoleModal({ roles, canGrant, onClose, onCreated }: { roles: Role[]; 
       approvalCeiling: 0,
       color: ROLE_COLORS[roles.length % ROLE_COLORS.length],
     }
-    setRoles((prev) => [...prev, role])
-    audit('criar', `Cargo ${role.name}`, baseRole ? `Cargo criado a partir de ${baseRole.name}` : 'Cargo criado só com acesso ao Dashboard')
+    setSaving(true)
+    const ok = await saveRoles((prev) => [...prev, role])
+    setSaving(false)
+    if (!ok) return
+    if (!API) audit('criar', `Cargo ${role.name}`, baseRole ? `Cargo criado a partir de ${baseRole.name}` : 'Cargo criado só com acesso ao Dashboard')
     toast.success('Cargo criado', { description: '2FA já vem exigido. Agora escolha as permissões.' })
     onCreated(role.id)
   }
@@ -947,7 +1075,7 @@ function NewRoleModal({ roles, canGrant, onClose, onCreated }: { roles: Role[]; 
       footer={
         <>
           <Button onClick={onClose}>Cancelar</Button>
-          <Button variant="primary" onClick={submit}>
+          <Button variant="primary" onClick={submit} loading={saving}>
             Criar e escolher permissões
           </Button>
         </>
@@ -976,7 +1104,10 @@ function NewRoleModal({ roles, canGrant, onClose, onCreated }: { roles: Role[]; 
             id="nr-base"
             value={base}
             onChange={setBase}
-            options={[{ value: '', label: 'Só o Dashboard (vazio)' }, ...roles.map((r) => ({ value: r.id, label: `Permissões de ${r.name} (${r.permissions.length})` }))]}
+            options={[
+              { value: '', label: 'Só o Dashboard (vazio)' },
+              ...roles.map((r) => ({ value: r.id, label: `Permissões de ${r.name} (${r.permissions.length})${!canGrant && isGovernedRole(r) ? ' · só quem concede cargos' : ''}` })),
+            ]}
           />
         </Field>
       </form>
@@ -987,15 +1118,18 @@ function NewRoleModal({ roles, canGrant, onClose, onCreated }: { roles: Role[]; 
 // ---------- Renomear ----------
 
 function RenameModal({ role, suggestion, roles, onClose }: { role: Role; suggestion?: string; roles: Role[]; onClose: () => void }) {
-  const [, setRoles] = useRoles()
   const [team] = useTeam()
   const [name, setName] = useState(suggestion ?? role.name)
+  const [saving, setSaving] = useState(false)
   const check = checkRoleName(name, roles, role.id)
   const changed = name.trim() !== role.name
-  const save = () => {
-    if (check.error || !changed) return
-    setRoles((prev) => prev.map((r) => (r.id === role.id ? { ...r, name: name.trim() } : r)))
-    audit('editar', `Cargo ${name.trim()}`, `Cargo renomeado de "${role.name}" para "${name.trim()}"`)
+  const save = async () => {
+    if (check.error || !changed || saving) return
+    setSaving(true)
+    const ok = await saveRoles((prev) => prev.map((r) => (r.id === role.id ? { ...r, name: name.trim() } : r)))
+    setSaving(false)
+    if (!ok) return
+    if (!API) audit('editar', `Cargo ${name.trim()}`, `Cargo renomeado de "${role.name}" para "${name.trim()}"`)
     toast.success('Cargo renomeado', { description: `${plural(team.filter((m) => m.roleId === role.id).length, 'pessoa vê', 'pessoas veem')} o nome novo na hora.` })
     onClose()
   }
@@ -1010,7 +1144,7 @@ function RenameModal({ role, suggestion, roles, onClose }: { role: Role; suggest
       footer={
         <>
           <Button onClick={onClose}>Cancelar</Button>
-          <Button variant="primary" onClick={save} disabled={!!check.error || !changed}>
+          <Button variant="primary" onClick={save} loading={saving} disabled={!!check.error || !changed}>
             Renomear
           </Button>
         </>

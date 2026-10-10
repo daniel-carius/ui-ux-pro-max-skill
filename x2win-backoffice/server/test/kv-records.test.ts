@@ -175,16 +175,16 @@ describe('kv: saques de afiliados só pelas rotas do servidor (afiliados.saques)
   it('pagar: só pendente, valor e dados gravados, decisor/data/referência do servidor, auditoria com valor', async () => {
     const r = await post(app, approver.cookie, `/api/kv/${KEY}/w1/pay`)
     expect(r.statusCode, r.body).toBe(200)
-    expect(r.json()).toMatchObject({ ok: true, message: 'R$ 300,00 pagos a Afiliado Um. O PIX foi enviado.' })
+    expect(r.json()).toMatchObject({ ok: true, message: 'Pagamento de R$ 300,00 a Afiliado Um registrado. Faça o PIX pelo banco ou gateway da operação.' })
     // resposta mascarada para quem não tem afiliados-saques.ver-pix
     expect(r.json().withdrawal.pixKey).toBe('123.***.***-09')
     const w1 = (await storedPlain(app, KEY)).find((w) => w.id === 'w1')!
     expect(w1).toMatchObject({ amount: 300, status: 'pago', decidedBy: 'Paulo Pagador', decidedById: approver.user.id, reason: null, pixKey: '12345678909' })
-    expect(w1.reference).toMatch(/^E\d{8}[0-9A-F]{12}$/)
+    expect(w1.reference).toMatch(/^PIX-\d{8}-[0-9A-F]{12}$/)
     expect(Date.now() - Date.parse(w1.decidedAt)).toBeLessThan(60_000)
     const a = (await audits(app, `${KEY}%`)).at(-1)!
     expect(a).toMatchObject({ action: 'aprovar', entity: 'Saque de afiliado #w1', source: 'servidor', actor_name: 'Paulo Pagador' })
-    expect(a.summary).toContain('Pagamento de R$ 300,00 para Afiliado Um (a1) (PIX) · pendente → pago · ref. E')
+    expect(a.summary).toContain('Pagamento de R$ 300,00 para Afiliado Um (a1) (PIX) registrado · pendente → pago · ref. interna PIX-')
     expect(a.summary).toMatch(/\(v\d+→v\d+\)$/)
     // já decidido / inexistente / valor inválido
     expect((await post(app, approver.cookie, `/api/kv/${KEY}/w1/pay`)).json().error.code).toBe('ja_decidido')
@@ -895,10 +895,12 @@ describe('kv: valores de recompensa das campanhas validados no servidor; registr
     await seed(app, 'geral.jogadores', [
       { id: 'p1', name: 'Jogador Um', email: 'p1@x.com', status: 'ativo' },
       { id: 'p2', name: 'Autoexcluído', email: 'p2@x.com', status: 'autoexcluido' },
+      { id: 'p3', name: 'Em pausa', email: 'p3@x.com', status: 'pausa' },
+      { id: 'p4', name: 'Bloqueado', email: 'p4@x.com', status: 'bloqueado' },
     ])
     expect((await put(app, mo.cookie, 'campanhas.free-spins', [{ id: 'fs1', name: 'Giros', gameId: 'g1', spinValue: 0.2, validityDays: 7 }], 0)).statusCode).toBe(200)
     const grant = (p: Row) => ({ id: 'FS1', campaignId: 'fs1', playerId: 'p1', spins: 50, note: 'Compensação', spinValue: 100, used: 0, winnings: 9999, grantedBy: 'Daniel Carius', ...p })
-    for (const p of [{ playerId: 'p2' }, { playerId: 'p9' }, { campaignId: 'nao' }, { spins: 5000 }, { note: '' }]) {
+    for (const p of [{ playerId: 'p2' }, { playerId: 'p3' }, { playerId: 'p4' }, { playerId: 'p9' }, { campaignId: 'nao' }, { spins: 5000 }, { note: '' }]) {
       const r = await put(app, mo.cookie, 'campanhas.free-spins.concessoes', [grant(p)], 0)
       expect(r.statusCode, JSON.stringify(p)).toBe(400)
     }
@@ -909,6 +911,45 @@ describe('kv: valores de recompensa das campanhas validados no servidor; registr
     expect((await put(app, mo.cookie, 'campanhas.free-spins.concessoes', [{ ...fs, spins: 500 }], 1)).statusCode).toBe(403)
     expect((await put(app, mo.cookie, 'campanhas.free-spins.concessoes', [], 1)).statusCode).toBe(403)
     expect((await put(app, mo.cookie, 'campanhas.free-spins.concessoes', [{ ...fs, status: 'cancelada', note: 'Cancelado: erro' }], 1)).statusCode).toBe(200)
+  })
+
+  it('concessão de free spins: mesmas recusas do painel (pausa, bloqueado, campanha encerrada, limite por jogador)', async () => {
+    const key = 'campanhas.free-spins.concessoes'
+    await seed(app, 'geral.jogadores', [
+      { id: 'q1', name: 'Jogador Um', email: 'q1@x.com', status: 'ativo' },
+      { id: 'q2', name: 'Jogador Dois', email: 'q2@x.com', status: 'ativo' },
+      { id: 'q3', name: 'Em pausa', email: 'q3@x.com', status: 'pausa' },
+      { id: 'q4', name: 'Bloqueado', email: 'q4@x.com', status: 'bloqueado' },
+    ])
+    const base = { gameId: 'g1', spinValue: 0.2, validityDays: 7, startAt: '2019-12-01T00:00:00.000Z', paused: false }
+    await seed(app, 'campanhas.free-spins', [
+      { ...base, id: 'fs-fim', name: 'Encerrada', maxPerPlayer: 5, endAt: '2020-01-01T00:00:00.000Z' },
+      { ...base, id: 'fs-um', name: 'Uma por jogador', maxPerPlayer: 1, endAt: null },
+      { ...base, id: 'fs-dois', name: 'Duas por jogador', maxPerPlayer: 2, endAt: '2099-01-01T00:00:00.000Z', paused: true },
+    ])
+    const g = (id: string, campaignId: string, playerId: string, p: Row = {}) => ({ id, campaignId, playerId, spins: 10, note: 'Compensação', ...p })
+    let cur = await current(app, mo.cookie, key)
+    const refused = async (grants: Row[], message: RegExp) => {
+      const r = await put(app, mo.cookie, key, [...grants, ...cur.value], cur.version)
+      expect(r.statusCode, r.body).toBe(400)
+      expect(r.json().error.message).toMatch(message)
+    }
+    await refused([g('N1', 'fs-um', 'q3')], /pausa de jogo responsável/)
+    await refused([g('N1', 'fs-um', 'q4')], /bloqueado/)
+    await refused([g('N1', 'fs-fim', 'q1')], /encerrada/)
+    // duas da mesma campanha de limite 1 na mesma gravação; o status enviado não conta (o servidor grava 'ativa')
+    await refused([g('N1', 'fs-um', 'q1', { status: 'cancelada' }), g('N2', 'fs-um', 'q1')], /limite: 1/)
+
+    // campanha pausada aceita concessão manual (como no painel); limite 2 por jogador
+    const ok = await put(app, mo.cookie, key, [g('N1', 'fs-dois', 'q1'), g('N2', 'fs-dois', 'q1'), g('N3', 'fs-um', 'q2'), ...cur.value], cur.version)
+    expect(ok.statusCode, ok.body).toBe(200)
+    cur = await current(app, mo.cookie, key)
+    await refused([g('N4', 'fs-dois', 'q1')], /já recebeu esta campanha 2 vezes \(limite: 2\)/)
+    await refused([g('N4', 'fs-um', 'q2')], /limite: 1/)
+    // cancelada deixa de contar
+    const n1 = cur.value.find((x: Row) => x.id === 'N1')
+    const again = await put(app, mo.cookie, key, [g('N4', 'fs-dois', 'q1'), ...cur.value.map((x: Row) => (x === n1 ? { ...x, status: 'cancelada', note: 'Cancelado: duplicada' } : x))], cur.version)
+    expect(again.statusCode, again.body).toBe(200)
   })
 })
 

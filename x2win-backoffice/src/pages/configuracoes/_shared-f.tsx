@@ -5,7 +5,7 @@ import type { LucideIcon } from 'lucide-react'
 import { Eye, Lock } from 'lucide-react'
 import { Card, CardBody, CardHeader } from '@/components/ui'
 import { cn } from '@/lib/cn'
-import { parseMarkdown, type MdInline } from '@/domain/config1-textos'
+import { parseMarkdown, safeLinkHref, type MdInline } from '@/domain/config1-textos'
 
 /** Cartão "Prévia" com moldura de navegador: mostra o que o jogador vê. */
 export function SitePreview({
@@ -115,9 +115,14 @@ function Inline({ parts }: { parts: MdInline[] }) {
         ) : p.t === 'i' ? (
           <em key={i}>{p.v}</em>
         ) : p.t === 'a' ? (
-          <a key={i} href={p.href} className="link" target="_blank" rel="noreferrer noopener" onClick={(e) => e.preventDefault()}>
-            {p.v}
-          </a>
+          // só https:// ou caminho interno vira link; o resto (javascript:, data:, http:…) fica como texto
+          safeLinkHref(p.href) ? (
+            <a key={i} href={safeLinkHref(p.href)!} className="link" target="_blank" rel="noreferrer noopener" onClick={(e) => e.preventDefault()}>
+              {p.v}
+            </a>
+          ) : (
+            <Fragment key={i}>{p.v}</Fragment>
+          )
         ) : (
           <Fragment key={i}>{p.v}</Fragment>
         ),

@@ -1,5 +1,6 @@
 // Dados de demonstração do módulo Operação: campanhas exibidas na tela de depósito.
 import type { DepositCampaignsConfig } from '@/domain/operacao'
+import { apiValue } from './demo'
 import { daysAgo, iso, DAY, NOW } from './now'
 
 export function seedDepositCampaigns(): DepositCampaignsConfig {
@@ -70,3 +71,6 @@ export function seedDepositCampaigns(): DepositCampaignsConfig {
     ],
   }
 }
+
+// modo API, sem nada gravado: a configuração padrão, sem campanhas
+apiValue(seedDepositCampaigns, (): DepositCampaignsConfig => ({ maxVisible: 3, preselectFirst: false, items: [] }))

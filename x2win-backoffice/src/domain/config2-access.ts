@@ -4,25 +4,55 @@
 // consistência da matriz de permissões.
 import { MODULES, PAGES, type ModuleId } from '@/nav'
 import type { AuditAction, TeamMember } from '@/data/team'
+import {
+  ADMIN_LEVEL_PERMISSIONS,
+  GOVERNED_PERMISSIONS,
+  isAdminLevelRole as roleIsAdminLevel,
+  isGovernedChange,
+  isGovernedRole as roleIsGoverned,
+  isRequire2faLocked,
+} from '@shared/permissions'
 import { PERMISSIONS, PERMISSION_BY_KEY, type Permission, type Role } from './roles'
 
-// ---------- Cargos administrativos ----------
+// ---------- Cargos administrativos e de governança ----------
+// As listas vêm de shared/permissions.ts, as mesmas que o servidor usa para recusar (403).
 
-/** Cargos que só o Superadmin concede ou retira. */
-export const ADMIN_ROLE_IDS = ['superadmin', 'administrador'] as const
+/** Permissões que dão poder sobre acessos, cargos, chaves de IA e destinos de pagamento. */
+export const ADMIN_PERMS = ADMIN_LEVEL_PERMISSIONS
 
-/** Permissões que dão poder sobre o próprio controle de acesso. */
-export const ADMIN_PERMS = ['cargos.conceder', 'cargos.editar', 'equipe.editar', 'seguranca-painel.editar'] as const
+/**
+ * Permissões de governança: as administrativas e as que decidem dinheiro ou obrigação regulatória
+ * (aprovar saques de jogadores e de afiliados, jogo responsável, países bloqueados).
+ */
+export { GOVERNED_PERMISSIONS, isGovernedChange }
 
 export const GRANT_PERM = 'cargos.conceder'
 
+/** Cargo com alguma permissão administrativa: só quem concede cargos altera, dá ou retira. */
 export function isAdminLevelRole(role: Role | undefined): boolean {
-  if (!role) return false
-  return (ADMIN_ROLE_IDS as readonly string[]).includes(role.id) || role.permissions.some((p) => (ADMIN_PERMS as readonly string[]).includes(p))
+  return !!role && roleIsAdminLevel(role)
 }
 
 export function isAdminPerm(key: string) {
-  return (ADMIN_PERMS as readonly string[]).includes(key)
+  return (ADMIN_LEVEL_PERMISSIONS as readonly string[]).includes(key)
+}
+
+/** Só quem concede cargos dá ou tira esta permissão de um cargo. */
+export function isGovernedPerm(key: string) {
+  return (GOVERNED_PERMISSIONS as readonly string[]).includes(key)
+}
+
+/** Cargo com alguma permissão de governança (inclui as administrativas): pôr alguém nele exige cargos.conceder. */
+export function isGovernedRole(role: Role | undefined): boolean {
+  return !!role && roleIsGoverned(role)
+}
+
+/**
+ * Criar (duplicar) ou excluir este cargo exige cargos.conceder: ele tem permissão de governança ou teto de
+ * aprovação diferente de "não aprova" (o servidor compara com um cargo inexistente).
+ */
+export function needsGrantToCreateOrDelete(role: Pick<Role, 'permissions' | 'approvalCeiling'>): boolean {
+  return isGovernedChange(null, role)
 }
 
 // ---------- Acesso amplo (achados 1 e 2) ----------
@@ -66,9 +96,9 @@ export function broadAccess(role: Role): BroadAccess {
   return { broad: reasons.length > 0, reasons, sensitive }
 }
 
-/** Cargos de acesso amplo com 2FA opcional (achado 1). */
+/** Cargos de acesso amplo com 2FA opcional (achado 1). O Superadmin sempre exige 2FA (travado). */
 export function broadRolesWithout2fa(roles: Role[]): Role[] {
-  return roles.filter((r) => !r.require2fa && broadAccess(r).broad)
+  return roles.filter((r) => !r.require2fa && !isRequire2faLocked(r) && broadAccess(r).broad)
 }
 
 export interface RiskyMember {
@@ -91,9 +121,9 @@ export function riskyMembers(team: TeamMember[], roles: Role[]): RiskyMember[] {
   return out
 }
 
-/** A pessoa vai precisar ativar o 2FA no próximo login? */
+/** A pessoa precisa cadastrar o 2FA? (2FA para todos, exigido no cargo ou travado no Superadmin) */
 export function needs2faSetup(member: TeamMember, role: Role | undefined, enforceAll: boolean) {
-  return !member.twoFactor && (enforceAll || !!role?.require2fa)
+  return !member.twoFactor && (enforceAll || !!role?.require2fa || (!!role && isRequire2faLocked(role)))
 }
 
 // ---------- Equipe ----------
@@ -127,6 +157,8 @@ export function canChangeRole(
   if (from?.id === to.id) return { ok: false, message: 'A pessoa já tem este cargo.' }
   if ((isAdminLevelRole(from) || isAdminLevelRole(to)) && !canGrant)
     return { ok: false, message: 'Só o Superadmin concede ou retira cargos administrativos (Superadmin, Administrador ou cargos com controle de acesso).' }
+  if (isGovernedRole(to) && !canGrant)
+    return { ok: false, message: `Só quem pode conceder cargos põe pessoas no cargo ${to.name} (aprova saques ou altera jogo responsável ou países bloqueados).` }
   if (from?.id === 'superadmin' && member.id === currentUserId)
     return { ok: false, message: 'Você não pode retirar o próprio cargo de Superadmin.' }
   if (from?.id === 'superadmin' && member.status === 'ativo' && activeMembers(team, 'superadmin').length <= 1)

@@ -5,7 +5,8 @@
 //  - Modo de ataque: registros do "Modo de ataque" (quem ligou/desligou e quando);
 //  - Segurança do painel: registros da própria configuração (lista de IPs, 2FA para todos, sessão), do 2FA e os
 //    logins (entradas no painel);
-//  - Equipe: registros sobre pessoas da equipe (acessos, convites, cargos, 2FA de cada pessoa).
+//  - Equipe: registros sobre pessoas da equipe (acessos, convites, cargos, 2FA de cada pessoa);
+//  - Manutenção e Empresa e licença: registros da própria tela (quem fechou o site, última alteração).
 // Nessas fatias o IP só vem nos registros da própria pessoa (login de outra pessoa sai sem IP).
 import { canReadKey } from '@shared/kv-registry'
 import { canViewPage } from '@shared/permissions'
@@ -30,6 +31,9 @@ const PAGE_SLICES: Record<string, string> = {
   'modo-ataque': `entity = 'Modo de ataque'`,
   'seguranca-painel': `entity = 'Segurança do painel' or entity = '2FA' or entity like '2FA · %' or (action = 'login' and entity = 'Acesso ao painel')`,
   equipe: `entity = 'Equipe' or entity like 'Equipe · %' or entity = 'Dados · Equipe' or entity like '2FA · %'`,
+  manutencao: `entity = 'Manutenção'`,
+  // 'Dados · Empresa e licença': entidade das gravações antes da mudança para 'Empresa e licença'
+  empresa: `entity = 'Empresa e licença' or entity = 'Dados · Empresa e licença'`,
 }
 
 /** Filtro da leitura: null = trilha inteira; senão a condição das fatias que a pessoa pode ver. */

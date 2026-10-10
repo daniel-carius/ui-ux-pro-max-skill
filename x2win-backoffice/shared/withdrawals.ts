@@ -40,6 +40,17 @@ export interface DecisionResult {
 
 type RoleLike = Pick<Role, 'name' | 'permissions' | 'approvalCeiling'>
 
+/**
+ * Resultado da aprovação, sem prometer o que não aconteceu: saque.pago é um aviso aos sistemas da operação (não há
+ * integração com gateway). Com destino ativo, o aviso fica na fila de envio; sem nenhum, o pagamento é manual.
+ * `queued`: avisos saque.pago enfileirados (um por destino ativo). Mesmo texto no servidor e na demonstração.
+ */
+export function approvalMessage(amount: number, queued: number): string {
+  const head = `Saque de ${brl(amount)} aprovado.`
+  if (queued > 0) return `${head} Aviso de pagamento na fila para ${queued} ${queued === 1 ? 'sistema' : 'sistemas'}.`
+  return `${head} Nenhum destino "saque.pago" ativo: o pagamento precisa ser feito pelo financeiro no gateway.`
+}
+
 export function canDecideWithdrawals(role: RoleLike) {
   return role.permissions.includes('saques.aprovar') && role.approvalCeiling !== 0
 }

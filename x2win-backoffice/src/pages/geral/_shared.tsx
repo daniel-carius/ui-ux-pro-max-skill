@@ -1,7 +1,7 @@
 // Peças compartilhadas do módulo Geral: ficha do jogador (Drawer), selos de status,
 // tipo de transação e valor com sinal. Usadas por Usuários, Transações, Rankings,
 // Depósitos e Apostas esportivas.
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -63,10 +63,12 @@ import {
 } from '@/components/ui'
 import { brl, cpf as fmtCpf, date, dateTime, maskCpf, maskEmail, maskPhone, num, pct, phone as fmtPhone, plural, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useCollection } from '@/lib/store'
+import { findKvRule } from '@shared/kv-registry'
+import { isApiMode } from '@/lib/api'
+import { dbGet, dbSetAndWait, refreshKey, useCollection } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { DAY } from '@/data/now'
-import { useAffiliates, usePlayers, useTransactions } from '@/data/hooks'
+import { DATA_KEYS, useAffiliates, usePlayers, useTransactions } from '@/data/hooks'
 import { KYC_LABEL, PLAYER_STATUS_LABEL, type KycStatus, type Player, type PlayerOrigin, type PlayerRole, type PlayerStatus } from '@/data/players'
 import { TRANSACTION_TYPE_LABEL, type Transaction, type TransactionType } from '@/data/finance'
 import { audit, useSession } from '@/domain/session'
@@ -77,7 +79,6 @@ import {
   MANUAL_REASONS,
   PAUSE_OPTIONS,
   STATUS_ACTION_LABEL,
-  STATUS_ACTION_NEXT,
   STATUS_REASONS,
   ageFrom,
   buildManualTx,
@@ -93,6 +94,7 @@ import {
   type AnnotatedTransaction,
   type ManualAdjustInput,
   type StatusAction,
+  type StatusActionOption,
   type StatusEvent,
 } from '@/domain/geral'
 
@@ -218,10 +220,48 @@ type DrawerTab = 'resumo' | 'acoes' | 'transacoes'
  *   <PlayerDrawer playerId={openId} onClose={() => setOpenId(null)} />
  */
 export function PlayerDrawer({ playerId, onClose, initialTab = 'resumo' }: { playerId: string | null; onClose: () => void; initialTab?: DrawerTab }) {
+  // a base de jogadores só é lida quando uma ficha é aberta
+  if (!playerId) return null
+  return <PlayerDrawerGate playerId={playerId} onClose={onClose} initialTab={initialTab} />
+}
+
+/**
+ * Abre a ficha do jogador? Modo API: a ficha lê a base de jogadores (geral.jogadores), que só Usuários e as
+ * telas de readPages (shared/kv-registry.ts) leem; em Depósitos ou Apostas, um cargo sem elas vê um aviso.
+ * Demonstração: sempre.
+ */
+export function useCanOpenPlayer(): boolean {
+  const { canView } = useSession()
+  if (!isApiMode()) return true
+  const rule = findKvRule(DATA_KEYS.players)
+  return !!rule && (rule.read === 'equipe' || [rule.page, ...(rule.readPages ?? [])].some((pg) => canView(pg)))
+}
+
+function PlayerDrawerGate({ playerId, onClose, initialTab }: { playerId: string; onClose: () => void; initialTab: DrawerTab }) {
+  const canOpen = useCanOpenPlayer()
+  if (!canOpen) return <PlayerDrawerDenied onClose={onClose} />
+  return <PlayerDrawerFromBase playerId={playerId} onClose={onClose} initialTab={initialTab} />
+}
+
+function PlayerDrawerFromBase({ playerId, onClose, initialTab }: { playerId: string; onClose: () => void; initialTab: DrawerTab }) {
   const players = usePlayers()
-  const p = playerId ? players.get(playerId) : undefined
+  const p = players.get(playerId)
   if (!p) return null
   return <PlayerDrawerContent key={p.id} p={p} onClose={onClose} initialTab={initialTab} />
+}
+
+/** Sem leitura da base: avisa uma vez e fecha (o servidor recusaria a leitura com 403). */
+function PlayerDrawerDenied({ onClose }: { onClose: () => void }) {
+  const warned = useRef(false)
+  useEffect(() => {
+    if (!warned.current) {
+      warned.current = true
+      toast.error('Ficha do jogador indisponível', { description: 'Seu cargo não abre a base de jogadores. A ficha completa fica em Usuários.' })
+    }
+    onClose()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  return null
 }
 
 function PlayerDrawerContent({ p, onClose, initialTab }: { p: Player; onClose: () => void; initialTab: DrawerTab }) {
@@ -479,16 +519,21 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
   const players = usePlayers()
   const txs = useTransactions()
   const history = useCollection<StatusEvent>(GERAL_KEYS.statusHistory, EMPTY_HISTORY)
-  const { user } = useSession()
+  const { user, can } = useSession()
   const mine = history.items.filter((h) => h.playerId === p.id)
   const lastPause = mine.find((h) => h.action === 'pausar') ?? null
-  const actions = statusActions(p.status, lastPause)
+  const lastBlock = mine.find((h) => h.action === 'bloquear') ?? null
+  // mesma tabela de transições do servidor (shared/players.ts), com as permissões da pessoa
+  const statusPerms = new Set(['usuarios.editar', 'antifraude.banir'].filter((perm) => can(perm)))
+  const actions = statusActions(p.status, lastPause, Date.now(), statusPerms, lastBlock)
+  const [busy, setBusy] = useState(false)
 
-  const changeStatus = async (action: StatusAction, pauseDays?: number) => {
+  const changeStatus = async (opt: StatusActionOption, pauseDays?: number) => {
+    const { action, next } = opt
     const pauseLabel = PAUSE_OPTIONS.find((o) => o.days === pauseDays)?.label
     const r = await confirmWithInput({
       title: action === 'pausar' ? `Pausar a conta por ${pauseLabel}?` : `${STATUS_ACTION_LABEL[action]} de ${p.nickname}?`,
-      description: STATUS_ACTION_TEXT[action],
+      description: next === 'pausa' && action === 'desbloquear' ? `${STATUS_ACTION_TEXT[action]} A pausa pedida pelo jogador continua até o prazo.` : STATUS_ACTION_TEXT[action],
       confirmLabel: action === 'pausar' ? `Pausar por ${pauseLabel}` : STATUS_ACTION_LABEL[action],
       tone: action === 'bloquear' ? 'danger' : action === 'pausar' ? 'warning' : 'success',
       icon: STATUS_ACTION_ICON[action],
@@ -497,9 +542,7 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
     if (!r.confirmed) return
     const now = new Date()
     const until = action === 'pausar' && pauseDays ? new Date(now.getTime() + pauseDays * DAY).toISOString() : null
-    const next = STATUS_ACTION_NEXT[action]
-    players.update(p.id, { status: next })
-    history.add({
+    const event: StatusEvent = {
       id: uid('st'),
       playerId: p.id,
       at: now.toISOString(),
@@ -510,7 +553,22 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
       by: user.name,
       until,
       byPlayer: action === 'pausar' && isPlayerRequestedPause(r.value),
-    })
+    }
+    if (isApiMode()) {
+      // o servidor confere a transição (e a pausa do jogador) ao gravar o status; o histórico só entra
+      // depois, para não registrar uma mudança recusada. Recusa: o aviso com o motivo já aparece.
+      setBusy(true)
+      try {
+        const saved = await dbSetAndWait<Player[]>(DATA_KEYS.players, (prev) => prev.map((x) => (x.id === p.id ? { ...x, status: next } : x)))
+        if (!saved) return
+        await dbSetAndWait<StatusEvent[]>(GERAL_KEYS.statusHistory, (prev) => [event, ...prev], EMPTY_HISTORY)
+      } finally {
+        setBusy(false)
+      }
+    } else {
+      players.update(p.id, { status: next })
+      history.add(event)
+    }
     audit(action === 'bloquear' ? 'bloquear' : 'editar', `Jogador #${p.id}`, `${STATUS_ACTION_LABEL[action]}${until ? ` até ${dateTime(until)}` : ''}. Motivo: ${r.value}`)
     toast.success(`Conta ${PLAYER_STATUS_LABEL[next].toLowerCase()}`, { description: `${p.nickname} · registrado na auditoria.` })
   }
@@ -550,10 +608,26 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
     })
     if (!ok) return
     const tx = buildManualTx(adj, p, user.name)
-    txs.add(tx)
-    players.update(p.id, walletPatch(adj.wallet, tx.balanceAfter))
-    audit('creditar', `Jogador #${p.id}`, `${adj.kind === 'credito' ? 'Creditação' : 'Subtração'} de ${brl(adj.amount)} no saldo ${adj.wallet === 'real' ? 'real' : 'bônus'} (${tx.id}). Motivo: ${tx.note}`)
-    toast.success(adj.kind === 'credito' ? 'Crédito lançado' : 'Débito lançado', { description: `${tx.id} · novo saldo ${brl(tx.balanceAfter)}.` })
+    let balanceAfter = tx.balanceAfter
+    if (isApiMode()) {
+      // o servidor lança no extrato, aplica o saldo e audita numa transação (o saldo enviado é ignorado);
+      // recusa (teto de 24 h, saldo, autoexcluído): o aviso com o motivo já aparece e nada muda
+      setBusy(true)
+      try {
+        const saved = await dbSetAndWait<Transaction[]>(DATA_KEYS.transactions, (prev) => [tx, ...prev])
+        if (!saved) return
+        await refreshKey(DATA_KEYS.players)
+        const stored = dbGet<Transaction[]>(DATA_KEYS.transactions, []).find((t) => t.id === tx.id)
+        if (stored) balanceAfter = stored.balanceAfter
+      } finally {
+        setBusy(false)
+      }
+    } else {
+      txs.add(tx)
+      players.update(p.id, walletPatch(adj.wallet, tx.balanceAfter))
+      audit('creditar', `Jogador #${p.id}`, `${adj.kind === 'credito' ? 'Creditação' : 'Subtração'} de ${brl(adj.amount)} no saldo ${adj.wallet === 'real' ? 'real' : 'bônus'} (${tx.id}). Motivo: ${tx.note}`)
+    }
+    toast.success(adj.kind === 'credito' ? 'Crédito lançado' : 'Débito lançado', { description: `${tx.id} · novo saldo ${brl(balanceAfter)}.` })
     setAdj(blank)
     setTouched(false)
   }
@@ -573,9 +647,15 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
                   <Menu
                     key={a.action}
                     align="end"
-                    items={[{ heading: 'Pausar por' }, ...PAUSE_OPTIONS.map((o) => ({ label: o.label, icon: CirclePause, onSelect: () => changeStatus('pausar', o.days) }))]}
+                    items={[{ heading: 'Pausar por' }, ...PAUSE_OPTIONS.map((o) => ({ label: o.label, icon: CirclePause, onSelect: () => changeStatus(a, o.days) }))]}
                     trigger={(t) => (
-                      <Button {...t} size="sm" icon={CirclePause} disabled={!canEdit} title={!canEdit ? 'Seu cargo não altera o status de jogadores' : undefined}>
+                      <Button
+                        {...t}
+                        size="sm"
+                        icon={CirclePause}
+                        disabled={!canEdit || !a.allowed || busy}
+                        title={!canEdit ? 'Seu cargo não altera o status de jogadores' : a.reason}
+                      >
                         Pausar
                       </Button>
                     )}
@@ -587,9 +667,9 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
                     variant={a.action === 'bloquear' ? 'secondary' : 'success'}
                     className={a.action === 'bloquear' ? 'text-danger' : undefined}
                     icon={STATUS_ACTION_ICON[a.action]}
-                    disabled={!canEdit || !a.allowed}
+                    disabled={!canEdit || !a.allowed || busy}
                     title={!canEdit ? 'Seu cargo não altera o status de jogadores' : a.reason}
-                    onClick={() => changeStatus(a.action)}
+                    onClick={() => changeStatus(a)}
                   >
                     {STATUS_ACTION_LABEL[a.action]}
                   </Button>
@@ -676,7 +756,7 @@ function ActionsTab({ p, canEdit }: { p: Player; canEdit: boolean }) {
               )}
               {adj.amount >= MANUAL_ADJUST_STRONG_CONFIRM && !errors.amount && <p className="mt-0.5 text-xs text-fg-3">Acima de {brl(MANUAL_ADJUST_STRONG_CONFIRM)} pedimos para digitar a confirmação.</p>}
             </div>
-            <Button variant={adj.kind === 'credito' ? 'primary' : 'danger'} icon={adj.kind === 'credito' ? CirclePlus : CircleMinus} onClick={submit} disabled={!canEdit}>
+            <Button variant={adj.kind === 'credito' ? 'primary' : 'danger'} icon={adj.kind === 'credito' ? CirclePlus : CircleMinus} onClick={submit} disabled={!canEdit} loading={busy}>
               {adj.kind === 'credito' ? 'Lançar crédito' : 'Lançar débito'}
             </Button>
           </div>

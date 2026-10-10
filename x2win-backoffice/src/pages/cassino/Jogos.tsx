@@ -57,6 +57,7 @@ import { gameStatsForPeriod, getDailySeries, sumSeries, type GameStat } from '@/
 import { CASSINO_KEYS, seedGameBadges } from '@/data/cassino'
 import { audit, usePageAccess } from '@/domain/session'
 import { reconcileStats } from '@/domain/ggr'
+import { safeImageSrc } from '@/domain/personalizacao-p1'
 import {
   CATEGORY_ORDER,
   GAME_BADGE_LABEL,
@@ -893,7 +894,7 @@ function CoverModalBody({
             </p>
           )}
         </div>
-        <ImageUpload label="Nova capa" value={draft} onChange={setDraft} width={400} height={500} hint="400×500 px · PNG, JPG ou WEBP até 3 MB" previewClassName="mx-auto max-w-[220px]" />
+        <ImageUpload label="Nova capa" value={safeImageSrc(draft)} onChange={setDraft} width={400} height={500} hint="400×500 px · PNG, JPG ou WEBP até 3 MB" previewClassName="mx-auto max-w-[220px]" />
       </div>
     </Modal>
   )

@@ -34,8 +34,8 @@ import { useAffiliates, usePlayers } from '@/data/hooks'
 import { SEED_LINK_STATE, type LinkState } from '@/data/afiliados'
 import type { Affiliate, Player } from '@/data/players'
 import { audit, usePageAccess, useSession } from '@/domain/session'
-import { AFILIADOS_KEYS, duplicateCodes, makeAffiliateCode, referralLink } from '@/domain/afiliados'
-import { AffiliateTypeBadge, LevelBadge, MiniBar, StatTile, TYPE_META } from '@/pages/afiliados/_shared'
+import { AFILIADOS_KEYS, REVEAL_PAYOUT_PERMISSION, duplicateCodes, makeAffiliateCode, referralLink } from '@/domain/afiliados'
+import { AffiliateContact, AffiliateTypeBadge, LevelBadge, MiniBar, StatTile, TYPE_META } from '@/pages/afiliados/_shared'
 
 type LinkStatus = 'ativo' | 'pausado' | 'afiliado_pausado'
 
@@ -552,6 +552,7 @@ export default function Links() {
 }
 
 function LinkDrawer({ row, onClose, action }: { row: LinkRow; onClose: () => void; action: ReactNode }) {
+  const { can } = useSession()
   const [utm, setUtm] = useState({ source: '', campaign: '' })
   const slug = (s: string) =>
     s
@@ -599,6 +600,8 @@ function LinkDrawer({ row, onClose, action }: { row: LinkRow; onClose: () => voi
           </div>
           {row.manager && <p className="mt-2 text-xs text-fg-3">Faz parte da rede do gerente {row.manager.name}.</p>}
         </section>
+
+        <AffiliateContact key={a.id} affiliate={a} canReveal={can(REVEAL_PAYOUT_PERMISSION)} />
 
         <section>
           <h3 className="mb-3 text-sm font-semibold text-fg">Desempenho do link</h3>

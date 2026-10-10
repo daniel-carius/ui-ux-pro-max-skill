@@ -1,6 +1,6 @@
 // Cupons: código digitado pelo jogador que libera uma recompensa.
 import { brl, num } from '@/lib/format'
-import type { Player } from '@/data/players'
+import type { CampaignPlayer } from './campanhas-jogadores'
 import { AUDIENCE_LABEL, inAudience, rewardCost, rewardText, type Audience, type CoinInfo } from './campanhas2-common'
 
 export type CouponReward = 'bonus_pct' | 'bonus_brl' | 'free_spins' | 'moedas'
@@ -50,7 +50,8 @@ export interface CouponRedemption {
   code: string
   playerId: string
   playerName: string
-  playerEmail: string
+  /** vem da plataforma (mascarado para quem não vê dados pessoais); o painel nunca grava resgates no modo API */
+  playerEmail?: string
   deposit: number
   reward: string
   /** custo para a casa (R$) */
@@ -137,7 +138,7 @@ export function maxCouponCost(c: Coupon, coin: Pick<CoinInfo, 'refValue'>) {
 /** Regras do resgate. Retorna o motivo da recusa ou o custo. */
 export function checkRedemption(
   c: Coupon,
-  player: Player,
+  player: Pick<CampaignPlayer, 'id' | 'status' | 'createdAt' | 'lastAccess' | 'tags' | 'depositsCount'>,
   redemptions: Pick<CouponRedemption, 'couponId' | 'playerId'>[],
   deposit: number,
   coin: Pick<CoinInfo, 'refValue'>,

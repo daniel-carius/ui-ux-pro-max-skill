@@ -58,11 +58,11 @@ import {
 import { cn } from '@/lib/cn'
 import { brl, brlCompact, date, dateTime, maskEmail, mult, num, pct, plural, relative } from '@/lib/format'
 import { uid } from '@/lib/random'
-import { useCollection } from '@/lib/store'
-import { useGames, usePlayers, useProviders } from '@/data/hooks'
-import type { Player } from '@/data/players'
+import { dbSetAndWait, useCollection } from '@/lib/store'
+import { useGames, useProviders } from '@/data/hooks'
 import { FS_KEYS, seedFsCampaigns, seedFsGrants } from '@/data/campanhas-freespins'
 import { audit, usePageAccess, useSession } from '@/domain/session'
+import { useCampaignPlayers, type CampaignPlayer } from '@/domain/campanhas-jogadores'
 import {
   FS_STATUS_LABEL,
   FS_TRIGGER_DESCRIPTION,
@@ -91,6 +91,9 @@ const TRIGGER_ICON: Record<FsTrigger, LucideIcon> = { deposito: ArrowDownToLine,
 
 type CampaignRow = FreeSpinCampaign & { status: FsCampaignStatus }
 type GrantRow = FreeSpinGrant & { live: GrantStatus }
+
+/** ID e e-mail mascarado (quando a concessão tem e-mail). */
+const grantPlayerSub = (g: Pick<FreeSpinGrant, 'playerId' | 'playerEmail'>) => (g.playerEmail ? `ID ${g.playerId} · ${maskEmail(g.playerEmail)}` : `ID ${g.playerId}`)
 
 export default function FreeSpins() {
   const [tab, setTab] = useTabParam('campanhas', ['campanhas', 'concessoes'] as const)
@@ -215,15 +218,18 @@ export default function FreeSpins() {
     toast.success('Campanha excluída')
   }
 
-  const grant = (player: Player, c: FreeSpinCampaign, spins: number, note: string) => {
+  const grant = async (player: CampaignPlayer, c: FreeSpinCampaign, spins: number, note: string) => {
     const now = new Date()
+    const who = player.name ?? player.nickname
     const g: FreeSpinGrant = {
       id: `FS${String(Math.floor(20000 + Math.random() * 79999))}`,
       campaignId: c.id,
       campaignName: c.name,
       playerId: player.id,
-      playerName: player.name,
-      playerEmail: player.email,
+      playerName: who,
+      // demonstração: a tela faz o papel do servidor. Modo API: o público não tem e-mail e o servidor
+      // refaz a concessão (valor do giro, prazo, nome e e-mail do jogador, autor e data)
+      ...(player.email ? { playerEmail: player.email } : {}),
       gameId: c.gameId,
       spins,
       spinValue: c.spinValue,
@@ -236,11 +242,13 @@ export default function FreeSpins() {
       grantedBy: user.name,
       note,
     }
-    grants.add(g)
+    // espera o servidor: recusada (jogador autoexcluído, em pausa ou bloqueado, campanha encerrada, limite por jogador,
+    // motivo curto…), o aviso mostra o motivo e o modal fica aberto
+    if (!(await dbSetAndWait<FreeSpinGrant[]>(FS_KEYS.grants, (prev) => [g, ...prev], seedFsGrants))) return
     const game = games.find((x) => x.id === c.gameId)
-    audit('criar', `Free spins ${c.name}`, `${spins} giros de ${brl(c.spinValue)} (${game?.name ?? '—'}) concedidos a ${player.name} (ID ${player.id}). Motivo: ${note}`)
+    audit('criar', `Free spins ${c.name}`, `${spins} giros de ${brl(c.spinValue)} (${game?.name ?? '—'}) concedidos a ${who} (ID ${player.id}). Motivo: ${note}`)
     toast.success('Giros concedidos', {
-      description: `${spins} giros em ${game?.name ?? 'jogo'} para ${player.name}. Valem até ${date(g.expiresAt)}.`,
+      description: `${spins} giros em ${game?.name ?? 'jogo'} para ${who}. Valem até ${date(g.expiresAt)}.`,
       action: tab === 'concessoes' ? undefined : { label: 'Ver concessões', onClick: () => setTab('concessoes') },
     })
     setGranting(null)
@@ -315,7 +323,9 @@ export default function FreeSpins() {
               input: { label: 'Motivo', required: true, options: ['Contas ligadas (anti-fraude)', 'Concedido por engano', 'Pedido do jogador', 'Jogo responsável', 'Outro motivo'].map((v) => ({ value: v, label: v })) },
             })
             if (!r.confirmed) return false
-            grants.update(g.id, { status: 'cancelada', note: `Cancelado: ${r.value}` })
+            // modo API: o servidor só aceita cancelar concessão em uso; recusada, a mensagem dele aparece
+            const cancelled = await dbSetAndWait<FreeSpinGrant[]>(FS_KEYS.grants, (prev) => prev.map((x) => (x.id === g.id ? { ...x, status: 'cancelada', note: `Cancelado: ${r.value}` } : x)), seedFsGrants)
+            if (!cancelled) return false
             audit('editar', `Free spins ${g.campaignName}`, `Giros restantes de ${g.playerName} (ID ${g.playerId}) cancelados: ${r.value}`)
             toast.success('Giros cancelados')
             return true
@@ -531,7 +541,7 @@ function GrantsTab({
       minWidth: 220,
       sortValue: (g) => g.playerName,
       csv: (g) => `${g.playerName} (ID ${g.playerId})`,
-      cell: (g) => <PersonCell name={g.playerName} sub={`ID ${g.playerId} · ${maskEmail(g.playerEmail)}`} />,
+      cell: (g) => <PersonCell name={g.playerName} sub={grantPlayerSub(g)} />,
     },
     {
       id: 'campaign',
@@ -609,7 +619,7 @@ function GrantsTab({
         rows={visible}
         columns={columns}
         rowKey={(g) => g.id}
-        searchText={(g) => `${g.id} ${g.playerName} ${g.playerId} ${g.playerEmail} ${g.campaignName}`}
+        searchText={(g) => `${g.id} ${g.playerName} ${g.playerId} ${g.playerEmail ?? ''} ${g.campaignName}`}
         searchPlaceholder="Buscar jogador, ID ou e-mail"
         initialSort={{ id: 'grantedAt', dir: 'desc' }}
         exportName="free-spins-concessoes"
@@ -688,7 +698,7 @@ function GrantsTab({
             </div>
             <section>
               <h3 className="mb-3 text-sm font-semibold text-fg">Jogador</h3>
-              <PersonCell name={open.playerName} sub={`ID ${open.playerId} · ${maskEmail(open.playerEmail)}`} />
+              <PersonCell name={open.playerName} sub={grantPlayerSub(open)} />
             </section>
             <DescriptionList
               items={[
@@ -731,7 +741,7 @@ function CampaignDrawer({
 }) {
   const { items: games } = useGames()
   const { items: providers } = useProviders()
-  const { items: players } = usePlayers()
+  const { players } = useCampaignPlayers()
   const [c, setC] = useState<FreeSpinCampaign>(initial)
   const [touched, setTouched] = useState(false)
   const game = games.find((g) => g.id === c.gameId)
@@ -896,12 +906,13 @@ function GrantModal({
   campaigns: CampaignRow[]
   grants: FreeSpinGrant[]
   onClose: () => void
-  onGrant: (p: Player, c: FreeSpinCampaign, spins: number, note: string) => void
+  onGrant: (p: CampaignPlayer, c: FreeSpinCampaign, spins: number, note: string) => Promise<void>
 }) {
-  const { items: players } = usePlayers()
+  // demonstração: a base inteira; modo API: só jogadores ativos, sem dado pessoal (busca por ID ou apelido)
+  const { players, reachableOnly } = useCampaignPlayers()
   const { items: games } = useGames()
   const options = campaigns.filter((c) => c.status !== 'encerrada')
-  const [player, setPlayer] = useState<Player | null>(null)
+  const [player, setPlayer] = useState<CampaignPlayer | null>(null)
   const [cid, setCid] = useState(campaignId ?? options.find((c) => c.status === 'ativa')?.id ?? options[0]?.id ?? '')
   const campaign = campaigns.find((c) => c.id === cid)
   const [spins, setSpins] = useState(campaign?.spins ?? 50)
@@ -912,10 +923,17 @@ function GrantModal({
   const game = games.find((g) => g.id === campaign?.gameId)
   const history = player ? grants.filter((g) => g.playerId === player.id) : []
 
-  const submit = () => {
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
     setTouched(true)
-    if (!check.ok || note.trim().length < 5 || !player || !campaign) return
-    onGrant(player, campaign, spins, note.trim())
+    if (!check.ok || note.trim().length < 5 || !player || !campaign || busy) return
+    setBusy(true)
+    try {
+      await onGrant(player, campaign, spins, note.trim())
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -929,14 +947,14 @@ function GrantModal({
       footer={
         <>
           <Button onClick={onClose}>Cancelar</Button>
-          <Button variant="primary" icon={Gift} onClick={submit} disabled={!player || !campaign}>
+          <Button variant="primary" icon={Gift} onClick={submit} loading={busy} disabled={!player || !campaign}>
             Conceder {num(spins)} giros
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        <Field label="Jogador" htmlFor="gr-player" required hint="Busque por ID, e-mail ou nome.">
+        <Field label="Jogador" htmlFor="gr-player" required hint={reachableOnly ? 'Busque por ID ou apelido. Só aparecem jogadores ativos.' : 'Busque por ID, e-mail ou nome.'}>
           <PlayerFinder id="gr-player" players={players} value={player} onChange={setPlayer} />
         </Field>
         {player && history.length > 0 && <p className="-mt-2 text-xs text-fg-3">Este jogador já recebeu giros {history.length} {history.length === 1 ? 'vez' : 'vezes'}; a última {relative(history[0].grantedAt)}.</p>}
@@ -975,7 +993,7 @@ function GrantModal({
           </div>
         )}
         <Field label="Motivo" htmlFor="gr-note" required error={noteError} hint="Aparece na ficha da concessão e na auditoria.">
-          <Textarea id="gr-note" rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ex.: compensação por instabilidade no jogo em 08/10" invalid={!!noteError} />
+          <Textarea id="gr-note" rows={2} maxLength={300} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ex.: compensação por instabilidade no jogo em 08/10" invalid={!!noteError} />
         </Field>
         {player && !check.ok && (
           <Alert tone="danger" title="Não é possível conceder">

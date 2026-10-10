@@ -48,7 +48,7 @@ import {
 import { date, dateTime, num, pct, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { useCollection, useDb } from '@/lib/store'
-import { usePlayers } from '@/data/hooks'
+import { usePlayerCounts } from '@/domain/config1-metricas'
 import { audit, usePageAccess, useSession } from '@/domain/session'
 import { useCompany } from '@/domain/system'
 import { formatCnpj } from '@/domain/config1-empresa'
@@ -93,8 +93,8 @@ export default function TextosLegais() {
   const [drafts, setDrafts] = useDb<Record<string, string>>(LEGAL_KEYS.drafts, {})
   const [docId, setDocId] = useTabParam<LegalDocId>('termos', DOC_IDS, 'doc')
   const [viewing, setViewing] = useState<number | null>(null)
-  const { items: players } = usePlayers()
-  const activePlayers = players.filter((p) => p.status === 'ativo').length
+  // modo API: contagem pronta do servidor (geral.jogadores.metricas); a tela não lê a base
+  const activePlayers = usePlayerCounts().byStatus.ativo
 
   const { canEdit } = usePageAccess()
   const doc = docs.get(docId) ?? docs.items[0]

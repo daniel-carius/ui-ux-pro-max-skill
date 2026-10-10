@@ -1,5 +1,7 @@
-// Jogadores e afiliados.
+// Jogadores e afiliados. Dados pessoais obviamente fictícios (ver ./demo): e-mail .invalid,
+// CPF com dígito verificador errado, celular (DD) 9 0XXX-XXXX e IP na faixa privada 10.x.
 import { createRng } from '@/lib/random'
+import { demoCpf, demoEmail, demoIp, demoPhone, demoRecords } from './demo'
 import { CITIES, EMAIL_DOMAINS, FIRST_NAMES, LAST_NAMES, NICK_PARTS_A, NICK_PARTS_B, slugify } from './names'
 import { DAY, HOUR, NOW, iso } from './now'
 
@@ -82,11 +84,11 @@ export const KYC_LABEL: Record<KycStatus, string> = {
 const TAGS = ['VIP', 'Alto valor', 'Bônus abuser', 'Novo', 'Reativado', 'Suporte prioritário', 'Revisar KYC', 'Crash lover']
 
 function genCpf(rng: ReturnType<typeof createRng>) {
-  return rng.digits(11)
+  return demoCpf(rng.digits(11))
 }
 
 function genIp(rng: ReturnType<typeof createRng>) {
-  return `${rng.pick([177, 179, 186, 187, 189, 191, 200, 201])}.${rng.int(1, 254)}.${rng.int(1, 254)}.${rng.int(1, 254)}`
+  return demoIp(`${rng.pick([177, 179, 186, 187, 189, 191, 200, 201])}.${rng.int(1, 254)}.${rng.int(1, 254)}.${rng.int(1, 254)}`)
 }
 
 let _players: Player[] | null = null
@@ -104,7 +106,7 @@ function build() {
     const last = rng.pick(LAST_NAMES)
     const name = `${first} ${last}`
     const nickname = `${rng.pick(NICK_PARTS_A)}${rng.pick(NICK_PARTS_B)}${rng.bool(0.4) ? rng.int(1, 99) : ''}`
-    const email = `${slugify(first)}.${slugify(last)}${rng.int(1, 999)}@${rng.pick(EMAIL_DOMAINS)}`
+    const email = demoEmail(`${slugify(first)}.${slugify(last)}${rng.int(1, 999)}@${rng.pick(EMAIL_DOMAINS)}`)
     const createdDaysAgo = Math.pow(rng.next(), 1.6) * 360
     const createdAt = new Date(NOW.getTime() - createdDaysAgo * DAY - rng.int(0, 23) * HOUR)
     const lastAccessAgo = Math.min(createdDaysAgo, Math.pow(rng.next(), 2.5) * 60)
@@ -149,7 +151,7 @@ function build() {
       name,
       nickname,
       email,
-      phone: `${rng.pick([11, 21, 31, 41, 51, 61, 71, 81, 85, 92])}9${rng.digits(8)}`,
+      phone: demoPhone(`${rng.pick([11, 21, 31, 41, 51, 61, 71, 81, 85, 92])}9${rng.digits(8)}`),
       cpf: genCpf(rng),
       birthDate: iso(birth),
       origin,
@@ -216,7 +218,7 @@ function build() {
       revShare: type === 'Manager' ? 0.1 : type === 'Influencer' ? 0.3 : 0.2,
       status: i === 21 || i === 29 ? 'pausado' : 'ativo',
       balance: rng.money(0, 9000),
-      pixKey: rng.bool(0.5) ? p.email : `${rng.digits(3)}.${rng.digits(3)}.${rng.digits(3)}-${rng.digits(2)}`,
+      pixKey: rng.bool(0.5) ? p.email : demoCpf(`${rng.digits(3)}.${rng.digits(3)}.${rng.digits(3)}-${rng.digits(2)}`),
       createdAt: p.createdAt,
     }
   })
@@ -245,3 +247,7 @@ export function seedAffiliates(): Affiliate[] {
   if (!_affiliates) seedPlayers()
   return _affiliates!
 }
+
+// modo API: a base vem do servidor (DEMO_DATA grava estes mesmos dados); sem nada gravado, lista vazia
+demoRecords(seedPlayers)
+demoRecords(seedAffiliates)

@@ -64,7 +64,8 @@ export interface ShopPurchase {
   kind: ShopKind
   playerId: string
   playerName: string
-  playerEmail: string
+  /** vem da plataforma (mascarado para quem não vê dados pessoais) */
+  playerEmail?: string
   price: number
   /** valor do prêmio em R$ (estimado) */
   valueBrl: number

@@ -1,7 +1,7 @@
 // Regras de Configurações › Jogo responsável (Lei 14.790/2023 e portarias da SPA/MF).
 // As ferramentas exigidas ficam sempre disponíveis ao jogador; o painel só ajusta
 // os parâmetros. Diminuir um limite vale na hora; aumentar respeita o prazo de espera.
-import type { Player } from '@/data/players'
+import type { PlayerCounts } from './config1-metricas'
 
 export const RG_KEY = 'config.jogo-responsavel'
 
@@ -119,12 +119,14 @@ function hash(s: string) {
   return h >>> 0
 }
 
-/** Indicadores (o limite ativo por jogador é simulado de forma determinística). */
-export function rgPlayerStats(players: Player[]) {
-  const paused = players.filter((p) => p.status === 'pausa').length
-  const excluded = players.filter((p) => p.status === 'autoexcluido').length
-  const withLimit = players.filter((p) => p.status === 'ativo' && p.depositsCount > 0 && hash(p.id) % 100 < 14).length
-  const waitingIncrease = players.filter((p) => p.status === 'ativo' && hash(`${p.id}:inc`) % 100 < 2).length
-  const depositors = players.filter((p) => p.depositsCount > 0).length
-  return { paused, excluded, withLimit, waitingIncrease, depositors, total: players.length }
+/**
+ * Indicadores. Pausa, autoexclusão, depositantes e total vêm das contagens da base (no modo API, do servidor).
+ * Limite ativo e aumento em espera são simulados de forma determinística sobre a lista de jogadores, que só existe
+ * na demonstração: no modo API ficam null (indisponível).
+ */
+export function rgPlayerStats(c: PlayerCounts) {
+  const players = c.players
+  const withLimit = players ? players.filter((p) => p.status === 'ativo' && p.depositsCount > 0 && hash(p.id) % 100 < 14).length : null
+  const waitingIncrease = players ? players.filter((p) => p.status === 'ativo' && hash(`${p.id}:inc`) % 100 < 2).length : null
+  return { paused: c.byStatus.pausa, excluded: c.byStatus.autoexcluido, withLimit, waitingIncrease, depositors: c.depositors, total: c.total }
 }

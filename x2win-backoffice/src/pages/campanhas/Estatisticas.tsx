@@ -30,7 +30,7 @@ import { dateShort, dateTime, num, pct, relative } from '@/lib/format'
 import { useWebhookDestinations, useWebhookExecutions } from '@/data/hooks'
 import { NOW } from '@/data/now'
 import { audit } from '@/domain/session'
-import { WEBHOOK_EVENT_LABEL, type WebhookEvent, type WebhookExecution } from '@/domain/webhooks'
+import { WEBHOOK_EVENT_LABEL, WEBHOOK_TEST_EVENT, isTestExecution, type WebhookEvent, type WebhookExecution } from '@/domain/webhooks'
 import { daysBetween, hasTokenLikeSegment, latencyTone, maskTokenUrl, prettyJson, rollingRange, webhookStats } from '@/domain/campanhas3-webhooks'
 import { RateBar, TableFrame } from './_shared-c3'
 
@@ -335,6 +335,8 @@ export default function Estatisticas() {
 function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: boolean | null }) {
   const body = prettyJson(e.payload)
   const tone = latencyTone(e.durationMs)
+  // teste: sai como webhook.teste; a execução fica no evento do destino
+  const test = isTestExecution(e)
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-3 gap-3">
@@ -353,8 +355,10 @@ function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: b
       </div>
       <DescriptionList
         items={[
+          // e.url vem com os trechos sensíveis mascarados: só para exibir (o destino é o destinationId)
           { label: 'Destino', value: <Mono className="break-all">{`POST https://${maskTokenUrl(e.url)}`}</Mono>, full: true },
           { label: 'ID da execução', value: <Mono>{e.id}</Mono> },
+          ...(test ? [{ label: 'Origem', value: `Envio de teste (${WEBHOOK_TEST_EVENT})` }] : []),
           { label: 'Destino hoje', value: destActive === null ? 'Removido' : destActive ? 'Ativo' : 'Pausado' },
         ]}
       />
@@ -363,7 +367,7 @@ function ExecutionDetail({ e, destActive }: { e: WebhookExecution; destActive: b
           <Clock size={14} className="text-fg-3" aria-hidden /> Cabeçalhos enviados
         </h3>
         <pre className="overflow-x-auto rounded-xl border border-line bg-surface-2 p-3 font-mono text-[12px] leading-5 text-fg-2">
-          {`Content-Type: application/json\nUser-Agent: X2Win-Webhooks/1.0\nX-X2W-Event: ${e.event}\nX-X2W-Delivery: ${e.id}\nX-X2W-Signature: sha256=••••••••••••`}
+          {`Content-Type: application/json\nUser-Agent: X2Win-Webhooks/1.0\nX-X2W-Event: ${test ? WEBHOOK_TEST_EVENT : e.event}\nX-X2W-Delivery: ${e.id}\nX-X2W-Signature: sha256=••••••••••••`}
         </pre>
         <p className="mt-1.5 text-xs text-fg-3">A assinatura HMAC usa o segredo do destino, que nunca é exibido.</p>
       </section>

@@ -28,9 +28,10 @@ import {
 import { brl, brlCompact, date, maskEmail, num, relative } from '@/lib/format'
 import { useAffiliates, usePlayers } from '@/data/hooks'
 import type { Affiliate } from '@/data/players'
-import { audit, usePageAccess } from '@/domain/session'
+import { audit, usePageAccess, useSession } from '@/domain/session'
 import {
   MAX_REVSHARE_PCT,
+  REVEAL_PAYOUT_PERMISSION,
   buildManager,
   contractLabel,
   makeAffiliateCode,
@@ -42,7 +43,7 @@ import {
   type ManagerDraft,
   type ManagerErrors,
 } from '@/domain/afiliados'
-import { AffiliateTypeBadge, StatTile } from './_shared'
+import { AffiliateContact, AffiliateTypeBadge, StatTile } from './_shared'
 
 interface ManagerRow {
   id: string
@@ -474,6 +475,7 @@ function ManagerDrawer({
   onSaveContract: (cpa: number, revSharePct: number) => void
 }) {
   const m = row.manager
+  const { can } = useSession()
   const [editing, setEditing] = useState(false)
   const [c, setC] = useState({ cpa: m.cpa, revSharePct: round2(m.revShare * 100) })
   const errors = validateContract(c)
@@ -534,6 +536,8 @@ function ManagerDrawer({
             <CopyButton value={url} label="Copiar link do gerente" />
           </div>
         </section>
+
+        <AffiliateContact key={m.id} affiliate={m} canReveal={can(REVEAL_PAYOUT_PERMISSION)} />
 
         <section>
           <div className="mb-3 flex items-center justify-between gap-2">

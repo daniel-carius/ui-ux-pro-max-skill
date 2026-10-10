@@ -30,7 +30,7 @@ import { useDb } from '@/lib/store'
 import { useProviders } from '@/data/hooks'
 import type { Provider } from '@/data/catalog'
 import { usePageAccess } from '@/domain/session'
-import { PROVIDERS_STRIP_MAX, validateProvidersHome, type HomeConfig, type ProvidersHomeConfig } from '@/domain/personalizacao-p1'
+import { PROVIDERS_STRIP_MAX, safeImageSrc, validateProvidersHome, type HomeConfig, type ProvidersHomeConfig } from '@/domain/personalizacao-p1'
 import { DEFAULT_HOME, DEFAULT_PROVIDERS_HOME, P1_KEYS } from '@/data/personalizacao-p1'
 import {
   BrowserFrame,
@@ -43,6 +43,7 @@ import {
   PreviewJumpButton,
   PreviewPanel,
   ProviderStripMock,
+  SafeImage,
   SiteBlockTitle,
   SiteHeaderMock,
   SiteLogo,
@@ -225,11 +226,12 @@ export default function ProvedoresHome() {
                   return (
                     <div className="flex items-center gap-3">
                       <span className={cn('hidden h-10 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-line bg-surface-2 sm:flex', paused && 'opacity-50')}>
-                        {it.logo ? (
-                          <img src={it.logo} alt={`Logotipo ${name}`} className="h-8 w-14 object-contain" />
-                        ) : (
-                          <Monogram name={name} hue={prov?.logoHue ?? 0} className="h-7 w-11 rounded-md text-xs" />
-                        )}
+                        <SafeImage
+                          src={it.logo}
+                          alt={`Logotipo ${name}`}
+                          className="h-8 w-14 object-contain"
+                          fallback={<Monogram name={name} hue={prov?.logoHue ?? 0} className="h-7 w-11 rounded-md text-xs" />}
+                        />
                       </span>
                       <div className="min-w-0 flex-1">
                         <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-fg">
@@ -310,7 +312,7 @@ export default function ProvedoresHome() {
             <ImageUpload
               width={160}
               height={80}
-              value={logoItem.logo}
+              value={safeImageSrc(logoItem.logo)}
               onChange={(url) => form.set('items', v.items.map((i) => (i.providerId === logoFor ? { ...i, logo: url } : i)))}
               disabled={!canEdit}
               previewClassName="max-w-[260px]"

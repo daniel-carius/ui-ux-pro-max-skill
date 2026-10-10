@@ -9,12 +9,15 @@ import {
   AuthCard,
   AuthErrorAlert,
   CodeInput,
+  RECOVERY_CODE_LENGTH,
   SignedInAs,
   describeAuthError,
   formatRecoveryCode,
   useNow,
   type AuthErrorView,
 } from './_shared'
+
+const RECOVERY_FORMAT = 'XXXXX-XXXXX-XXXXX-XXXXX'
 
 export function TwoFactorPage({ me }: { me: MeResponse }) {
   const { reload, logout } = useAuthApi()
@@ -53,8 +56,9 @@ export function TwoFactorPage({ me }: { me: MeResponse }) {
       if (code.length === 6) void verify(code)
       else setError({ tone: 'warning', title: 'Código incompleto', message: 'Digite os 6 dígitos que aparecem no aplicativo.' })
     } else {
-      if (/^[A-Z0-9]{5}-[A-Z0-9]{5}$/.test(recovery)) void verify(recovery)
-      else setError({ tone: 'warning', title: 'Código incompleto', message: 'O código de recuperação tem 10 letras e números, no formato XXXXX-XXXXX.' })
+      // o campo já formata (maiúsculas, sem espaços, hífens a cada 5); o servidor normaliza de novo
+      if (recovery.replace(/-/g, '').length === RECOVERY_CODE_LENGTH) void verify(recovery)
+      else setError({ tone: 'warning', title: 'Código incompleto', message: `O código de recuperação tem ${RECOVERY_CODE_LENGTH} letras e números, no formato ${RECOVERY_FORMAT}.` })
     }
   }
 
@@ -98,13 +102,13 @@ export function TwoFactorPage({ me }: { me: MeResponse }) {
             <p className="mt-2 text-xs leading-5 text-fg-3">O código muda a cada 30 segundos. Ao completar os 6 dígitos, a verificação é automática.</p>
           </div>
         ) : (
-          <Field label="Código de recuperação" htmlFor="tfa-recovery" hint="Letras e números, no formato XXXXX-XXXXX.">
+          <Field label="Código de recuperação" htmlFor="tfa-recovery" hint="20 letras e números. Pode colar com espaços ou em minúsculas.">
             <Input
               ref={recoveryRef}
               id="tfa-recovery"
               value={recovery}
               onChange={(e) => setRecovery(formatRecoveryCode(e.target.value))}
-              placeholder="XXXXX-XXXXX"
+              placeholder={RECOVERY_FORMAT}
               autoComplete="off"
               autoCapitalize="characters"
               spellCheck={false}

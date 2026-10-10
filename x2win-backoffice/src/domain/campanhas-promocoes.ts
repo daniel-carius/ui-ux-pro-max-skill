@@ -2,6 +2,7 @@
 // Regras puras: a recriação com servidor deve aplicar as mesmas validações no back-end.
 import { brl, date, mult, num } from '@/lib/format'
 import type { Player } from '@/data/players'
+import type { CampaignPlayer } from './campanhas-jogadores'
 
 export type PromoType = 'bonus_deposito' | 'free_spins' | 'cashback' | 'cupom' | 'torneio' | 'missao'
 export type PromoStatus = 'rascunho' | 'agendada' | 'ativa' | 'pausada' | 'encerrada'
@@ -339,7 +340,8 @@ const BLOCKED_STATUSES: Player['status'][] = ['autoexcluido', 'bloqueado', 'paus
  * O jogador entra no público da promoção? Autoexcluídos, em pausa e bloqueados
  * nunca entram (jogo responsável — Lei 14.790/2023).
  */
-export function audienceMatches(player: Player, a: PromoAudience, now: Date = new Date()): boolean {
+/** Vale para a base inteira (demonstração) e para o público do servidor (modo API, só ativos). */
+export function audienceMatches(player: CampaignPlayer, a: PromoAudience, now: Date = new Date()): boolean {
   if (BLOCKED_STATUSES.includes(player.status)) return false
   if (a.excludeAbusers && player.tags.includes('Bônus abuser')) return false
   const days = (iso: string) => (now.getTime() - new Date(iso).getTime()) / 86_400_000

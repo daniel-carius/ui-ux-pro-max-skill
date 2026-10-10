@@ -52,7 +52,6 @@ import {
   type Tone,
 } from '@/components/ui'
 import { brl, date, dateShort, mult, num, pct } from '@/lib/format'
-import { useCollection } from '@/lib/store'
 import { uid } from '@/lib/random'
 import { DAY } from '@/data/now'
 import { GAME_CATEGORY_LABEL, type GameCategory } from '@/data/catalog'
@@ -81,7 +80,7 @@ import {
   type ObjectiveScope,
   type Recurrence,
 } from '@/domain/campanhas2-missoes'
-import { DrawerSection, PlayerPreview, READ_ONLY_TITLE, REWARD_ICON, RewardBadge, confirmDiscard, useCoin, useGameName, type CoinCtx } from './_shared-c2'
+import { DrawerSection, PlayerPreview, READ_ONLY_TITLE, REWARD_ICON, RewardBadge, confirmDiscard, useCoin, useGameName, useSavedCollection, type CoinCtx } from './_shared-c2'
 
 const OBJECTIVE_ICON: Record<ObjectiveKind, LucideIcon> = { apostar: CircleDollarSign, depositar: ArrowDownToLine, rodadas: RotateCw, multiplicador: Rocket, login: CalendarCheck }
 const RECURRENCE_ICON: Record<Recurrence, LucideIcon> = { diaria: Timer, semanal: Repeat, unica: Flag }
@@ -110,7 +109,8 @@ function blankMission(): Mission {
 
 export default function Missoes() {
   const { canEdit } = usePageAccess()
-  const missions = useCollection<Mission>(C2_KEYS.missoes, seedMissions)
+  // modo API: quem começou e concluiu (started, completions) e a data de criação são do servidor
+  const missions = useSavedCollection<Mission>(C2_KEYS.missoes, seedMissions)
   const coin = useCoin()
   const gameName = useGameName()
   const [filter, setFilter] = useState<Filter>('todas')
@@ -138,7 +138,8 @@ export default function Missoes() {
       })
       if (!ok) return
     }
-    missions.update(m.id, { status, updatedAt: new Date().toISOString(), ...(status === 'encerrada' && !m.endsAt ? { endsAt: new Date().toISOString() } : {}) })
+    const ok = await missions.updateAndWait(m.id, { status, updatedAt: new Date().toISOString(), ...(status === 'encerrada' && !m.endsAt ? { endsAt: new Date().toISOString() } : {}) })
+    if (!ok) return
     const verb = { ativa: 'ligar', pausada: 'desligar', encerrada: 'desligar', rascunho: 'editar' } as const
     audit(verb[status], `Missão ${m.name}`, `Status: ${MISSION_STATUS_LABEL[m.status]} → ${MISSION_STATUS_LABEL[status]}`)
     toast.success(status === 'ativa' ? (m.status === 'rascunho' ? 'Missão publicada' : 'Missão ativada') : status === 'pausada' ? 'Missão pausada' : 'Missão encerrada', {
@@ -154,16 +155,15 @@ export default function Missoes() {
       tone: 'danger',
       icon: Trash2,
     })
-    if (!ok) return
-    missions.remove(m.id)
+    if (!ok || !(await missions.removeAndWait(m.id))) return
     audit('excluir', `Missão ${m.name}`, `Missão ${RECURRENCE_LABEL[m.recurrence].toLowerCase()} excluída`)
     toast.success('Missão excluída')
   }
 
-  const save = (m: Mission, isNew: boolean) => {
+  const save = async (m: Mission, isNew: boolean) => {
     const next = { ...m, name: m.name.trim(), updatedAt: new Date().toISOString() }
-    if (isNew) missions.add(next)
-    else missions.update(m.id, next)
+    const ok = isNew ? await missions.addAndWait(next) : await missions.updateAndWait(m.id, next)
+    if (!ok) return
     audit(isNew ? 'criar' : 'editar', `Missão ${next.name}`, `${objText(next)} → ${rewardText(next.reward, coin)} · ${RECURRENCE_LABEL[next.recurrence]} · ${AUDIENCE_SHORT[next.audience]} · ${MISSION_STATUS_LABEL[next.status]}`)
     toast.success(isNew ? 'Missão criada' : 'Missão salva', { description: next.status === 'ativa' ? 'Já vale no site.' : `Status: ${MISSION_STATUS_LABEL[next.status]}.` })
     setEditing(null)
@@ -350,10 +350,10 @@ export default function Missoes() {
               label: 'Duplicar',
               icon: Copy,
               disabled: !canEdit,
-              onSelect: () => {
+              onSelect: async () => {
                 const now = new Date().toISOString()
                 const copy: Mission = { ...structuredClone(m), id: uid('ms'), name: `${m.name} (cópia)`, status: 'rascunho', started: 0, completions: 0, createdAt: now, updatedAt: now }
-                missions.add(copy)
+                if (!(await missions.addAndWait(copy))) return
                 audit('criar', `Missão ${copy.name}`, `Cópia de ${m.name}, criada como rascunho`)
                 toast.success('Missão duplicada', { description: 'A cópia começa como rascunho.' })
               },
@@ -429,8 +429,9 @@ function MissionCard({ m, coin, gameName }: { m: Mission; coin: CoinCtx; gameNam
 
 // ---------- Formulário ----------
 
-function MissionDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Mission; isNew: boolean; coin: CoinCtx; onClose: () => void; onSave: (m: Mission) => void }) {
+function MissionDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Mission; isNew: boolean; coin: CoinCtx; onClose: () => void; onSave: (m: Mission) => Promise<void> }) {
   const [m, setM] = useState<Mission>(initial)
+  const [saving, setSaving] = useState(false)
   const [touched, setTouched] = useState(!isNew)
   const { items: games } = useGames()
   const errs = touched ? missionErrors(m) : {}
@@ -447,6 +448,16 @@ function MissionDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Mis
   const close = async () => {
     if (await confirmDiscard(dirty)) onClose()
   }
+  /** espera o servidor: recusada, o drawer fica aberto com o que foi digitado */
+  const send = async (next: Mission) => {
+    if (saving) return
+    setSaving(true)
+    try {
+      await onSave(next)
+    } finally {
+      setSaving(false)
+    }
+  }
   const submit = () => {
     setTouched(true)
     const first = Object.values(missionErrors(m)).find(Boolean)
@@ -454,7 +465,7 @@ function MissionDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Mis
       toast.error('Revise a missão', { description: first })
       return
     }
-    onSave(m)
+    void send(m)
   }
 
   return (
@@ -483,14 +494,15 @@ function MissionDrawer({ initial, isNew, coin, onClose, onSave }: { initial: Mis
                   toast.error('Revise a missão', { description: first })
                   return
                 }
-                onSave({ ...m, status: 'ativa' })
+                void send({ ...m, status: 'ativa' })
               }}
               icon={Send}
+              disabled={saving}
             >
               Criar e publicar
             </Button>
           )}
-          <Button variant="primary" onClick={submit}>
+          <Button variant="primary" onClick={submit} loading={saving}>
             {isNew ? (m.status === 'rascunho' ? 'Salvar rascunho' : 'Criar missão') : 'Salvar missão'}
           </Button>
         </>

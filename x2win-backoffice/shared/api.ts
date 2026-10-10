@@ -49,7 +49,10 @@ export interface LoginResponse {
 }
 
 export interface TwoFactorVerifyRequest {
-  /** 6 dígitos do aplicativo OU um código de recuperação (XXXXX-XXXXX) */
+  /**
+   * 6 dígitos do aplicativo OU um código de recuperação: 20 caracteres Crockford base32 em
+   * 4 grupos de 5 (XXXXX-XXXXX-XXXXX-XXXXX). O servidor aceita minúsculas, espaços e sem hífens.
+   */
   code: string
 }
 
@@ -65,7 +68,7 @@ export interface TwoFactorEnableRequest {
 
 export interface TwoFactorEnableResponse {
   stage: LoginStage
-  /** mostrados uma única vez */
+  /** mostrados uma única vez, no formato XXXXX-XXXXX-XXXXX-XXXXX */
   recoveryCodes: string[]
 }
 
@@ -99,6 +102,8 @@ export type KvPutResponse<T = unknown> = KvGetResponse<T>
 export interface WithdrawalDecisionResponse {
   ok: true
   message: string
+  /** aprovação: avisos saque.pago enfileirados (0 = pagamento manual no gateway); a recusa não traz */
+  queuedDeliveries?: number
   /** saque já atualizado, no mesmo formato da lista (operacao.saques) */
   withdrawal: Record<string, unknown>
 }
@@ -154,7 +159,8 @@ export interface InviteMemberResponse {
 
 export interface AcceptInviteRequest {
   token: string
-  name: string
+  /** ignorado pelo servidor: o nome é o que quem convidou cadastrou */
+  name?: string
   password: string
 }
 

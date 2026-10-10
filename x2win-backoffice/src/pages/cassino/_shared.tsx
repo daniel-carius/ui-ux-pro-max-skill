@@ -1,12 +1,13 @@
 // Peças visuais do módulo Cassino: capa gerada do jogo, logotipo em monograma
 // das provedoras e dos agregadores, ícone por categoria e barra de "salvar ordem".
-import type { CSSProperties, ReactNode } from 'react'
+import { useState, type CSSProperties, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { Clapperboard, Cherry, EyeOff, Flame, Gem, Grid3x3, RotateCcw, Rocket, Save, Spade, Sparkles, Star, Zap } from 'lucide-react'
 import { Button } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import type { Game, GameCategory } from '@/data/catalog'
 import type { GameBadge } from '@/domain/cassino'
+import { safeImageSrc } from '@/domain/personalizacao-p1'
 
 export const CATEGORY_ICON: Record<GameCategory, LucideIcon> = {
   slots: Cherry,
@@ -50,8 +51,9 @@ function coverBackground(h: number): CSSProperties {
 export type CoverSize = 'thumb' | 'xs' | 'sm' | 'md'
 
 /**
- * Capa do jogo. Usa a imagem enviada; sem imagem, gera uma arte com a cor do
- * jogo, o nome, a provedora e o ícone da categoria (como um tile de cassino).
+ * Capa do jogo. Usa a imagem enviada (só endereço seguro, ver safeImageSrc); sem imagem,
+ * ou se ela não carregar (em produção a CSP bloqueia imagem externa), gera uma arte com a
+ * cor do jogo, o nome, a provedora e o ícone da categoria (como um tile de cassino).
  */
 export function GameCover({
   game,
@@ -71,6 +73,9 @@ export function GameCover({
 }) {
   const Icon = CATEGORY_ICON[game.category]
   const h = game.hue
+  const cover = safeImageSrc(game.cover)
+  const [failed, setFailed] = useState<string | null>(null)
+  const showCover = !!cover && failed !== cover
   const tags: (GameBadge | 'novo')[] = [...(game.isNew ? (['novo'] as const) : []), ...badges]
   const showText = size !== 'thumb'
   const big = size === 'md'
@@ -81,12 +86,12 @@ export function GameCover({
         size === 'thumb' ? 'rounded-md' : size === 'xs' ? 'rounded-lg' : 'rounded-xl',
         className,
       )}
-      style={game.cover ? undefined : coverBackground(h)}
+      style={showCover ? undefined : coverBackground(h)}
       role="img"
       aria-label={`Capa de ${game.name}${providerName ? `, ${providerName}` : ''}`}
     >
-      {game.cover ? (
-        <img src={game.cover} alt="" className="absolute inset-0 h-full w-full object-cover" />
+      {showCover && cover ? (
+        <img src={cover} alt="" className="absolute inset-0 h-full w-full object-cover" onError={() => setFailed(cover)} />
       ) : (
         <>
           {/* ícone grande da categoria, ao fundo */}

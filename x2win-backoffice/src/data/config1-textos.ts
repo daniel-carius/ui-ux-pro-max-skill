@@ -1,5 +1,6 @@
 // Textos legais publicados no site, com histórico de versões.
 // Cada documento guarda o texto atual e as edições que levam de uma versão à anterior.
+import { apiValue } from './demo'
 import { DAY, NOW, iso } from './now'
 import { diffStats, type LegalDoc, type LegalDocId, type LegalVersion } from '@/domain/config1-textos'
 
@@ -403,3 +404,22 @@ function buildDoc(spec: DocSpec): LegalDoc {
 export function seedLegalDocs(): LegalDoc[] {
   return SPECS.map(buildDoc)
 }
+
+/** Modo API, sem nada gravado: cada documento só com o texto padrão (sem o histórico de demonstração). */
+function defaultLegalDocs(): LegalDoc[] {
+  return SPECS.map((spec) => {
+    const stats = diffStats('', spec.current)
+    const v: LegalVersion = {
+      version: 1,
+      publishedAt: iso(NOW),
+      author: 'Texto padrão',
+      summary: 'Texto padrão do painel. Revise e publique a versão da operação.',
+      content: spec.current,
+      requireReaccept: false,
+      added: stats.added,
+      removed: stats.removed,
+    }
+    return { id: spec.id, title: spec.title, slug: spec.slug, description: spec.description, versions: [v] }
+  })
+}
+apiValue(seedLegalDocs, defaultLegalDocs)

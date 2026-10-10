@@ -1,8 +1,9 @@
 // Segurança: sinais de identidade vistos fora do cadastro (login, PIX, recuperação
 // de conta, verificação por SMS) e bloqueios feitos pelo anti-fraude.
 // Os dados do cadastro (IP, e-mail, CPF, celular, padrinho) vêm de seedPlayers();
-// aqui ficam só os sinais extras que ligam contas entre si.
+// aqui ficam só os sinais extras que ligam contas entre si (IP e celular fictícios, ver ./demo).
 import { createRng } from '@/lib/random'
+import { demoIp, demoPhone, demoRecords } from './demo'
 import { DAY, HOUR, NOW, iso } from './now'
 import { seedAffiliates, seedPlayers, type Player, type PlayerStatus } from './players'
 
@@ -50,7 +51,7 @@ export interface Block {
 }
 
 function randomIp(rng: ReturnType<typeof createRng>) {
-  return `${rng.pick([138, 143, 152, 168, 177, 186, 187, 189, 191, 200, 201])}.${rng.int(1, 254)}.${rng.int(1, 254)}.${rng.int(1, 254)}`
+  return demoIp(`${rng.pick([138, 143, 152, 168, 177, 186, 187, 189, 191, 200, 201])}.${rng.int(1, 254)}.${rng.int(1, 254)}.${rng.int(1, 254)}`)
 }
 
 /** variações de um e-mail do Gmail que chegam na mesma caixa (pontos e +apelido) */
@@ -106,10 +107,10 @@ function build(): Built {
   }
 
   // Rede B: o mesmo Gmail com pontos e +apelido em várias contas
-  const gmailLead = take(pool((p) => p.email.endsWith('@gmail.com') && p.status === 'ativo'), 1)[0]
+  const gmailLead = take(pool((p) => /@gmail\.com(\.invalid)?$/.test(p.email) && p.status === 'ativo'), 1)[0]
   if (gmailLead) {
     const others = take(pool((p) => p.status === 'ativo' && isRecent(p, 120)), 3)
-    const phone = `${rng.pick([11, 21, 31, 71, 81])}9${rng.digits(8)}`
+    const phone = demoPhone(`${rng.pick([11, 21, 31, 71, 81])}9${rng.digits(8)}`)
     others.forEach((p, i) => add(p, 'email', gmailAlias(gmailLead.email, i), 'recuperacao'))
     ;[gmailLead, ...others.slice(0, 2)].forEach((p) => add(p, 'celular', phone, 'verificacao'))
     rings.push([gmailLead.id, ...others.map((p) => p.id)])
@@ -233,3 +234,6 @@ export function seedBlocks(): Block[] {
   }
   return out
 }
+
+// modo API: bloqueios vêm do servidor; sem nada gravado, lista vazia
+demoRecords(seedBlocks)

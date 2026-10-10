@@ -454,7 +454,7 @@ describe('kv: segredos (rule.secrets)', () => {
     next.servers[0].host = 'outro.exemplo.com'
     const w3 = await put(app, admin.cookie, KEY2, next, 2)
     expect(w3.statusCode).toBe(400)
-    expect(w3.json().error.details).toEqual({ path: 'servers.0', field: 'host' })
+    expect(w3.json().error.details).toEqual({ path: 'servers.0', field: 'host', reason: 'destino_mudou' })
     next.servers[0].password = 'senha-nova-0000'
     expect((await put(app, admin.cookie, KEY2, next, 2)).statusCode).toBe(200)
     expect(((await storedPlain(app, KEY2)) as { servers: unknown[] }).servers[0]).toEqual({ label: 'A2', host: 'outro.exemplo.com', password: 'senha-nova-0000' })

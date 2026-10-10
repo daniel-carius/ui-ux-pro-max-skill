@@ -81,7 +81,7 @@ import {
   type WheelPrize,
   type WheelSpin,
 } from '@/domain/campanhas2-roleta'
-import { CoinAmount, DrawerSection, MiniStat, READ_ONLY_TITLE, REWARD_ICON, REWARD_TONE, SLOTS, SlotPicker, confirmDiscard, slotColor, useCoin, useReducedMotion } from './_shared-c2'
+import { CoinAmount, DrawerSection, MiniStat, READ_ONLY_TITLE, REWARD_ICON, REWARD_TONE, SLOTS, SlotPicker, confirmDiscard, slotColor, useCoin, useReducedMotion, useSavedCollection } from './_shared-c2'
 
 const GROUP_ICON = { todos: Users, novos: UserPlus, vip: Crown } as const
 const GROUP_TONE: Record<WheelGroup, Tone> = { todos: 'neutral', novos: 'info', vip: 'gold' }
@@ -118,7 +118,8 @@ function spinCost(s: Pick<WheelSpin, 'kind' | 'value'>, coin: Pick<CoinInfo, 're
 
 export default function Roleta() {
   const { canEdit } = usePageAccess()
-  const wheels = useCollection<Wheel>(C2_KEYS.roleta, seedWheels)
+  // modo API: a data de criação é do servidor; giros (campanhas.roleta.giros) vêm da plataforma
+  const wheels = useSavedCollection<Wheel>(C2_KEYS.roleta, seedWheels)
   const spins = useCollection<WheelSpin>(C2_KEYS.roletaGiros, seedWheelSpins)
   const coin = useCoin()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -145,10 +146,12 @@ export default function Roleta() {
           icon: LoaderPinwheel,
         })
         if (!ok) return
-        wheels.update(other.id, { active: false, updatedAt: new Date().toISOString() })
-        audit('desligar', wheelEntity(other.name), `Desativada ao ativar ${w.name} no grupo ${WHEEL_GROUP_LABEL[w.group]}`)
       }
-      wheels.update(w.id, { active: true, updatedAt: new Date().toISOString() })
+      // as duas mudanças numa gravação só (o servidor aceita ou recusa as duas)
+      const at = new Date().toISOString()
+      const saved = await wheels.saveAndWait((prev) => prev.map((x) => (x.id === w.id ? { ...x, active: true, updatedAt: at } : other && x.id === other.id ? { ...x, active: false, updatedAt: at } : x)))
+      if (!saved) return
+      if (other) audit('desligar', wheelEntity(other.name), `Desativada ao ativar ${w.name} no grupo ${WHEEL_GROUP_LABEL[w.group]}`)
       audit('ligar', wheelEntity(w.name), `Roleta ativada para o grupo ${WHEEL_GROUP_LABEL[w.group]}`)
       toast.success('Roleta ativada', { description: `${w.name} já aparece para o grupo ${WHEEL_GROUP_LABEL[w.group]}.` })
     } else {
@@ -158,8 +161,7 @@ export default function Roleta() {
         confirmLabel: 'Desativar',
         tone: 'warning',
       })
-      if (!ok) return
-      wheels.update(w.id, { active: false, updatedAt: new Date().toISOString() })
+      if (!ok || !(await wheels.updateAndWait(w.id, { active: false, updatedAt: new Date().toISOString() }))) return
       audit('desligar', wheelEntity(w.name), 'Roleta desativada')
       toast.success('Roleta desativada')
     }
@@ -173,17 +175,16 @@ export default function Roleta() {
       tone: 'danger',
       icon: Trash2,
     })
-    if (!ok) return
-    wheels.remove(w.id)
+    if (!ok || !(await wheels.removeAndWait(w.id))) return
     if (selectedId === w.id) setSelectedId(null)
     audit('excluir', wheelEntity(w.name), `Roleta do grupo ${WHEEL_GROUP_LABEL[w.group]} com ${w.prizes.length} prêmios excluída`)
     toast.success('Roleta excluída')
   }
 
-  const duplicate = (w: Wheel) => {
+  const duplicate = async (w: Wheel) => {
     const now = new Date().toISOString()
     const copy: Wheel = { ...w, id: uid('rl-'), name: `${w.name} (cópia)`, active: false, createdAt: now, updatedAt: now, prizes: w.prizes.map((p) => ({ ...p, id: uid('p') })) }
-    wheels.add(copy, 'end')
+    if (!(await wheels.addAndWait(copy, 'end'))) return
     setSelectedId(copy.id)
     audit('criar', wheelEntity(copy.name), `Cópia de ${w.name}, criada desativada`)
     toast.success('Roleta duplicada', { description: 'A cópia começa desativada.' })
@@ -199,12 +200,15 @@ export default function Roleta() {
         tone: 'warning',
       })
       if (!ok) return false
-      wheels.update(other.id, { active: false, updatedAt: new Date().toISOString() })
-      audit('desligar', wheelEntity(other.name), `Desativada ao ativar ${w.name}`)
     }
     const next = { ...w, name: w.name.trim(), updatedAt: new Date().toISOString() }
-    if (isNew) wheels.add(next, 'end')
-    else wheels.update(w.id, next)
+    // a roleta e a que sai do grupo numa gravação só; recusada (regra do servidor), nada muda e o drawer fica aberto
+    const saved = await wheels.saveAndWait((prev) => {
+      const list = prev.map((x) => (other && x.id === other.id ? { ...x, active: false, updatedAt: next.updatedAt } : x))
+      return isNew ? [...list, next] : list.map((x) => (x.id === next.id ? next : x))
+    })
+    if (!saved) return false
+    if (other) audit('desligar', wheelEntity(other.name), `Desativada ao ativar ${w.name}`)
     setSelectedId(next.id)
     audit(
       isNew ? 'criar' : 'editar',
@@ -736,7 +740,7 @@ function WheelDrawer({
   all: Wheel[]
   coin: CoinInfo
   onClose: () => void
-  onSave: (w: Wheel) => void
+  onSave: (w: Wheel) => Promise<void>
 }) {
   const [w, setW] = useState<Wheel>(initial)
   const [touched, setTouched] = useState(false)
@@ -759,13 +763,20 @@ function WheelDrawer({
     if (await confirmDiscard(dirty)) onClose()
   }
 
-  const submit = () => {
+  const [saving, setSaving] = useState(false)
+  const submit = async () => {
     setTouched(true)
     if (hasWheelErrors(errs)) {
       toast.error('Revise a roleta', { description: errs.sum ?? errs.name ?? errs.prizes ?? Object.values(errs.prize)[0] ?? 'Há campos inválidos.' })
       return
     }
-    onSave(w)
+    if (saving) return
+    setSaving(true)
+    try {
+      await onSave(w)
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -778,7 +789,7 @@ function WheelDrawer({
       footer={
         <>
           <Button onClick={close}>Cancelar</Button>
-          <Button variant="primary" onClick={submit}>
+          <Button variant="primary" onClick={submit} loading={saving}>
             {isNew ? 'Criar roleta' : 'Salvar roleta'}
           </Button>
         </>

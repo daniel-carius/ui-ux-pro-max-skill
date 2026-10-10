@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { Calculator, ChevronRight, Eye, Lock, RotateCcw, Save } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/cn'
-import { dbSetAndWait, useDb } from '@/lib/store'
-import { isApiMode } from '@/lib/api'
+import { dbSetAndWaitResult, useDb } from '@/lib/store'
+import { isApiMode, type ApiError } from '@/lib/api'
 import { MODULE_BY_ID, pageByPath } from '@/nav'
 import { audit, usePageAccess } from '@/domain/session'
 import { Delta } from './Badge'
@@ -233,6 +233,11 @@ export interface SettingsForm<T> {
   save: () => void
   saving: boolean
   readOnly: boolean
+  /**
+   * Modo API: erro do servidor na última vez que salvou (limpa ao editar ou salvar de novo). A tela mostra junto
+   * do campo (details.field) os erros que passou em `quiet`.
+   */
+  error?: ApiError | null
 }
 
 /**
@@ -253,17 +258,29 @@ export function useSettingsForm<T>(
     successMessage?: string
     /** nomes legíveis dos campos para o resumo da auditoria */
     fieldLabels?: Partial<Record<keyof T & string, string>>
+    /** modo API: erros do servidor que a tela mostra no campo (form.error), sem o aviso "Alteração desfeita" */
+    quiet?: (e: ApiError) => boolean
   },
 ): SettingsForm<T> {
   const [saved, setSaved] = useDb<T>(key, defaults)
-  const [values, setValues] = useState<T>(saved)
+  const [values, setDraft] = useState<T>(saved)
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<ApiError | null>(null)
+  // editar o rascunho tira o erro da última gravação
+  const setValues = (v: T | ((prev: T) => T)) => {
+    setError(null)
+    setDraft(v)
+  }
   const { canEdit } = usePageAccess()
   const savedStr = stableStringify(saved)
+  const savedRef = useRef(saved)
+  savedRef.current = saved
+  // modo API: rascunho que fica na tela enquanto o servidor responde (a gravação otimista e o desfazer mudam o salvo)
+  const keepDraft = useRef<T | null>(null)
 
   // se o valor salvo mudar por fora (outra aba, reset), atualiza o rascunho
   useEffect(() => {
-    setValues(saved)
+    setDraft(keepDraft.current ?? saved)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedStr])
 
@@ -278,6 +295,7 @@ export function useSettingsForm<T>(
     dirty,
     readOnly: !canEdit,
     saving,
+    error,
     reset: () => setValues(saved),
     save: () => {
       if (!canEdit) {
@@ -290,6 +308,7 @@ export function useSettingsForm<T>(
         return
       }
       setSaving(true)
+      setError(null)
       const prev = saved
       const changed =
         values && typeof values === 'object' && !Array.isArray(values)
@@ -304,8 +323,19 @@ export function useSettingsForm<T>(
         toast.success(opts.successMessage ?? 'Alterações salvas', { description: 'A mudança já vale no site e foi registrada na auditoria.' })
       }
       if (isApiMode()) {
-        // o servidor valida, grava a auditoria e confirma; erro já aparece pelo adaptador
-        void dbSetAndWait(key, values, defaults).then(finish)
+        // o servidor valida, grava a auditoria e confirma; erro aparece pelo adaptador (ou no campo, com quiet)
+        const draft = values
+        keepDraft.current = draft
+        void dbSetAndWaitResult(key, draft, defaults, opts.quiet ? { quiet: opts.quiet } : undefined).then((r) => {
+          keepDraft.current = null
+          const onField = !r.ok && !!r.error && !!opts.quiet?.(r.error)
+          // erro mostrado no campo: o rascunho continua para a pessoa corrigir. Senão, sem edição durante a
+          // gravação, o rascunho passa a ser o que o servidor tem (valor gravado, ou o anterior se recusou)
+          const latest = savedRef.current
+          if (!onField) setDraft((cur) => (cur === draft ? latest : cur))
+          if (!r.ok) setError(r.error)
+          finish(r.ok)
+        })
         return
       }
       // modo demonstração: pequena espera para dar retorno visual de "salvando"

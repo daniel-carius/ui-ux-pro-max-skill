@@ -2,7 +2,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { brl } from '@shared/money'
-import { canDecideWithdrawals, checkApprovalCeiling } from '@shared/withdrawals'
+import { approvalMessage, canDecideWithdrawals, checkApprovalCeiling } from '@shared/withdrawals'
 import type { Db } from '../../db'
 import { AppError, Errors } from '../../errors'
 import { requireActive, requirePerm } from '../../http'
@@ -109,7 +109,7 @@ export default async function routes(app: FastifyInstance) {
     if (!canDecideWithdrawals(auth.role)) throw Errors.forbidden(`O cargo ${auth.role.name} não aprova saques.`)
     const { id } = idParams.parse(req.params)
 
-    const updated = await app.db.tx(async (t) => {
+    const { updated, queued } = await app.db.tx(async (t) => {
       await lockPlayerPayouts(t, id)
       const row = await lockWithdrawal(t, id)
       const amount = row.amount_cents / 100
@@ -129,14 +129,16 @@ export default async function routes(app: FastifyInstance) {
         entity: `Saque #${w.id}`,
         summary: `Saque de ${brl(amount)} de ${w.player_name} aprovado`,
       })
-      await enqueueWebhook(t, 'saque.pago', { id: w.id, amount, playerId: w.player_id })
-      return w
+      const queued = await enqueueWebhook(t, 'saque.pago', { id: w.id, amount, playerId: w.player_id })
+      return { updated: w, queued }
     })
 
     const amount = updated.amount_cents / 100
     return {
       ok: true as const,
-      message: `Saque de ${brl(amount)} aprovado. O PIX foi enviado.`,
+      message: approvalMessage(amount, queued),
+      /** avisos saque.pago enfileirados nesta aprovação (um por destino ativo) */
+      queuedDeliveries: queued,
       withdrawal: toPanelWithdrawal({ ...updated, decided_by_email: auth.user.email }, app.cipher, auth.perms),
     }
   })

@@ -1,6 +1,7 @@
 // Movimentação financeira: transações, depósitos e saques.
 import { createRng } from '@/lib/random'
 import { seedGames, seedProviders } from './catalog'
+import { DEMO_STAFF_LABEL, demoRecords } from './demo'
 import { DAY, HOUR, MIN, NOW, iso } from './now'
 import { seedPlayers } from './players'
 
@@ -101,6 +102,10 @@ export interface Withdrawal {
   createdAt: string
   updatedAt: string
   decidedBy: string | null
+  /** id de quem decidiu (modo API; ausente nos dados antigos da demonstração) */
+  decidedById?: string | null
+  /** e-mail atual de quem decidiu: separa pessoas com o mesmo nome */
+  decidedByEmail?: string | null
   decisionNote: string | null
 }
 
@@ -305,10 +310,15 @@ export function seedWithdrawals(): Withdrawal[] {
       reference: e2e(rng),
       createdAt: iso(created),
       updatedAt: iso(new Date(created.getTime() + (decided ? rng.int(5, 600) : 0) * MIN)),
-      decidedBy: decided ? rng.pick(['Daniel Carius', 'Rafael Lima', 'Beatriz Souza']) : null,
+      decidedBy: decided ? rng.pick([DEMO_STAFF_LABEL]) : null,
       decisionNote: status === 'recusado' ? rng.pick(['Rollover não cumprido', 'Conta duplicada', 'Dados do PIX divergentes']) : null,
     })
   }
   _withdrawals = list
   return _withdrawals
 }
+
+// modo API: registros vêm só do servidor (sem nada gravado, a tela fica vazia)
+demoRecords(seedTransactions)
+demoRecords(seedDeposits)
+demoRecords(seedWithdrawals)

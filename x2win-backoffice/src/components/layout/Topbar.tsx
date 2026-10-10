@@ -22,6 +22,7 @@ import {
 import { cn } from '@/lib/cn'
 import { brl, date, relative } from '@/lib/format'
 import { useTheme } from '@/lib/theme'
+import { isApiMode } from '@/lib/api'
 import { resetDb } from '@/lib/store'
 import { useAuthApi, useRoles, useSession, useTeam } from '@/domain/session'
 import { useAttackMode, useMaintenance, usePanelSecurity } from '@/domain/system'
@@ -33,6 +34,9 @@ import { Avatar, IconButton, Menu, Popover, confirm, toast, type MenuEntry } fro
 
 // só no modo API (carregado ao abrir)
 const ChangePasswordModal = lazy(() => import('@/pages/auth/ChangePasswordPage').then((m) => ({ default: m.ChangePasswordModal })))
+
+// modo API: faturas só do servidor (sem nada gravado, nenhum aviso de fatura)
+const NO_INVOICES: Invoice[] = []
 
 interface Notice {
   id: string
@@ -48,7 +52,7 @@ function useNotices(): Notice[] {
   const [team] = useTeam()
   const [panel] = usePanelSecurity()
   const { can } = useSession()
-  const { items: invoices } = useCollection<Invoice>(INVOICES_KEY, seedInvoices)
+  const { items: invoices } = useCollection<Invoice>(INVOICES_KEY, isApiMode() ? NO_INVOICES : seedInvoices)
   return useMemo(() => {
     const out: Notice[] = []
     const late = withdrawals.filter((w) => w.status === 'em_analise' || (w.status === 'pendente' && Date.now() - new Date(w.createdAt).getTime() > 24 * 3600_000))
@@ -78,6 +82,8 @@ function useNotices(): Notice[] {
 
 function StatusPill() {
   const [attack] = useAttackMode()
+  // só leitura de `active`: quem não vê a tela Manutenção recebe do servidor só {active, message,
+  // returnAt, since} (sem o link de testes); a barra nunca grava este valor
   const [maint] = useMaintenance()
   if (attack.active)
     return (

@@ -43,6 +43,7 @@ import {
 } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import { brl, brlCompact, dateTime, num, pct } from '@/lib/format'
+import { isApiMode } from '@/lib/api'
 import { usePlayers } from '@/data/hooks'
 import { getDailySeries, sumSeries } from '@/data/metrics'
 import { cashbackCycles } from '@/data/campanhas3-seeds'
@@ -62,13 +63,36 @@ import {
   type CashbackRules,
   type RakebackRules,
 } from '@/domain/campanhas3-cashback'
-import { BET_CATEGORIES, BET_CATEGORY_LABEL, WEEKDAYS, levelIndexForXp, slotColor, useLevelsConfig, type BetCategory } from '@/domain/campanhas3-niveis'
+import { BET_CATEGORIES, BET_CATEGORY_LABEL, WEEKDAYS, levelIndexForXp, slotColor, useLevelsConfig, type BetCategory, type Level } from '@/domain/campanhas3-niveis'
+import { EMPTY_CAMPAIGN_METRICS, refreshPlayerMetrics, usePlayerMetrics, type CashbackProjection } from '@/domain/campanhas-jogadores'
+
+const API = isApiMode()
+
+/** Regras que mudam a projeção do servidor (o período não: ele devolve os três). */
+const PROJECTION_RULES = ['enabled', 'mode', 'pct', 'minLoss', 'cap'] as const
+
+/**
+ * Projeção do próximo crédito. Demonstração: calculada aqui com a lista de jogadores e o
+ * rascunho. Modo API: a tela não lê a base; vem pronta do servidor (geral.jogadores.metricas),
+ * calculada com as regras SALVAS de cashback e níveis, para os três períodos.
+ */
+function useDemoProjection(cb: CashbackRules, levels: Level[]): CashbackProjection {
+  const { items: players } = usePlayers()
+  return useMemo(() => projectCycle(players, cb, levels, levelIndexForXp), [players, cb, levels])
+}
+function useServerProjection(cb: CashbackRules): CashbackProjection {
+  const metrics = usePlayerMetrics()
+  return (metrics ?? EMPTY_CAMPAIGN_METRICS).cashback[cb.period]
+}
+const useProjection: (cb: CashbackRules, levels: Level[]) => CashbackProjection = API ? useServerProjection : useDemoProjection
 
 export default function Cashback() {
   const form = useSettingsForm<CashbackConfig>(CASHBACK_KEY, DEFAULT_CASHBACK, {
     entity: 'Cashback e Rakeback',
     successMessage: 'Regras de cashback e rakeback salvas',
     validate: validateCashback,
+    // modo API: a projeção do servidor usa as regras salvas, mas a versão dela não muda ao salvar: busca de novo
+    onSaved: refreshPlayerMetrics,
   })
   const v = form.values
   const cb = v.cashback
@@ -77,7 +101,11 @@ export default function Cashback() {
   const setRb = (p: Partial<RakebackRules>) => form.set('rakeback', { ...rb, ...p })
   const [levelsCfg] = useLevelsConfig()
   const levels = levelsCfg.levels
-  const { items: players } = usePlayers()
+  const projection = useProjection(cb, levels)
+  // modo API: a projeção é das regras salvas; com o rascunho diferente, avisa (só o período vale na hora)
+  const savedCb = form.saved.cashback
+  const projectionEnabled = API ? savedCb.enabled : cb.enabled
+  const unsavedRules = API && PROJECTION_RULES.some((k) => cb[k] !== savedCb[k])
 
   const cycles = useMemo(() => cashbackCycles(), [])
   const last = cycles[cycles.length - 1]
@@ -85,7 +113,6 @@ export default function Cashback() {
   const lastTotal = last.cashback + last.rakeback
   const prevTotal = prev.cashback + prev.rakeback
   const ggrWeek = useMemo(() => sumSeries(getDailySeries().slice(-7)).ggr, [])
-  const projection = useMemo(() => projectCycle(players, cb, levels, levelIndexForXp), [players, cb, levels])
   const next = nextCreditDate(cb)
   const bothOff = !cb.enabled && !rb.enabled
 
@@ -115,17 +142,37 @@ export default function Cashback() {
             label="Jogadores elegíveis"
             icon={Users}
             tone="info"
-            value={cb.enabled ? num(projection.eligible) : '—'}
-            hint={cb.enabled ? `de ${num(projection.active)} ativos ${PERIOD_IN[cb.period]}` : 'cashback desligado'}
-            formula={`Jogadores ativos ${PERIOD_IN[cb.period]} cuja perda estimada passa do mínimo e cujo percentual é maior que zero. Usa o rascunho.`}
+            value={projectionEnabled ? num(projection.eligible) : '—'}
+            hint={
+              projectionEnabled
+                ? `de ${num(projection.active)} ativos ${PERIOD_IN[cb.period]}${unsavedRules ? ' · regras salvas' : ''}`
+                : API
+                  ? 'cashback desligado nas regras salvas'
+                  : 'cashback desligado'
+            }
+            formula={
+              API
+                ? `Jogadores ativos ${PERIOD_IN[cb.period]} cuja perda estimada passa do mínimo e cujo percentual é maior que zero. Usa as regras salvas de cashback e de Níveis e XP: mudanças ainda não salvas só entram depois de salvar (a troca de período vale na hora).`
+                : `Jogadores ativos ${PERIOD_IN[cb.period]} cuja perda estimada passa do mínimo e cujo percentual é maior que zero. Usa o rascunho.`
+            }
           />
           <KpiCard
             label="Projeção do próximo crédito"
             icon={CalendarClock}
             tone="primary"
-            value={cb.enabled ? brl(projection.total) : '—'}
-            hint={cb.enabled ? `${dateTime(next)}${projection.capped ? ` · ${projection.capped} no teto` : ''}` : 'cashback desligado'}
-            formula="Soma do cashback estimado de cada jogador elegível, já limitado pelo teto. Perda estimada = perda média diária × dias do período."
+            value={projectionEnabled ? brl(projection.total) : '—'}
+            hint={
+              projectionEnabled
+                ? `${dateTime(next)}${projection.capped ? ` · ${num(projection.capped)} no teto` : ''}${unsavedRules ? ' · regras salvas' : ''}`
+                : API
+                  ? 'cashback desligado nas regras salvas'
+                  : 'cashback desligado'
+            }
+            formula={
+              API
+                ? 'Soma do cashback estimado de cada jogador elegível, já limitado pelo teto, com as regras salvas. Perda estimada = perda média diária × dias do período.'
+                : 'Soma do cashback estimado de cada jogador elegível, já limitado pelo teto. Perda estimada = perda média diária × dias do período.'
+            }
           />
           <KpiCard
             label="Custo sobre o GGR"

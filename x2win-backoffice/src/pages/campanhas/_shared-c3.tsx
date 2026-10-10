@@ -37,47 +37,64 @@ import {
 import { Field, Input, NumberInput, Segmented, Select, Textarea } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import { num, pct } from '@/lib/format'
-import { useDeposits, usePlayers } from '@/data/hooks'
-import type { Player } from '@/data/players'
+import { isApiMode } from '@/lib/api'
+import { useDeposits } from '@/data/hooks'
+import type { Deposit } from '@/data/finance'
 import {
   type Audience,
+  type AudienceBase,
   type AudienceContext,
   type AudienceKind,
   type Channel,
   CHANNEL_LABEL,
   NEW_PLAYER_DAYS,
   estimateAudience,
+  lastDepositFromPlayers,
   lastDepositMap,
   matchesAudience,
   parseIds,
   sampleRecipient,
 } from '@/domain/campanhas3-audience'
+import { useCampaignPlayers, type CampaignPlayer } from '@/domain/campanhas-jogadores'
 import { levelIndexForXp, slotColor, useLevelsConfig } from '@/domain/campanhas3-niveis'
 import type { NotifIcon, Schedule } from '@/domain/campanhas3-mensagens'
 
 // ---------- Público ----------
 
-/** Base, contexto de segmentação e nomes de nível (com a trilha salva em Níveis e XP). */
+const NO_DEPOSITS: Deposit[] = []
+/**
+ * Depósitos pagos para o público "Depositaram recentemente": na demonstração, a lista de
+ * depósitos; no modo API a tela não lê os depósitos (o público do servidor já traz o
+ * último depósito pago de cada jogador).
+ */
+const useDepositList: () => Deposit[] = isApiMode() ? () => NO_DEPOSITS : () => useDeposits().items
+
+/**
+ * Jogadores, contexto de segmentação e nomes de nível (com a trilha salva em Níveis e XP).
+ * Demonstração: a base inteira. Modo API: só o público de marketing que o servidor manda
+ * (jogadores ativos, sem dado pessoal) e o tamanho da base em `base`.
+ */
 export function useAudienceContext() {
-  const { items: players } = usePlayers()
-  const { items: deposits } = useDeposits()
+  const { players, total, reachableOnly } = useCampaignPlayers()
+  const deposits = useDepositList()
   const [levelsCfg] = useLevelsConfig()
   const levels = levelsCfg.levels
   const ctx = useMemo<AudienceContext>(
     () => ({
       now: Date.now(),
-      lastDeposit: lastDepositMap(deposits),
-      levelOf: (p: Player) => levelIndexForXp(levels, p.xp) + 1,
+      lastDeposit: reachableOnly ? lastDepositFromPlayers(players) : lastDepositMap(deposits),
+      levelOf: (p: Pick<CampaignPlayer, 'xp'>) => levelIndexForXp(levels, p.xp) + 1,
     }),
-    [deposits, levels],
+    [players, reachableOnly, deposits, levels],
   )
+  const base = useMemo<AudienceBase | undefined>(() => (reachableOnly ? { total } : undefined), [reachableOnly, total])
   const levelName = (n: number) => levels[n - 1]?.name ?? `Nível ${n}`
-  return { players, ctx, levels, levelName }
+  return { players, ctx, levels, levelName, base }
 }
 
 export function useAudienceEstimate(audience: Audience, channel: Channel) {
-  const { players, ctx, levelName, levels } = useAudienceContext()
-  const estimate = useMemo(() => estimateAudience(players, audience, ctx, channel), [players, audience, ctx, channel])
+  const { players, ctx, levelName, levels, base } = useAudienceContext()
+  const estimate = useMemo(() => estimateAudience(players, audience, ctx, channel, base), [players, audience, ctx, channel, base])
   const sample = useMemo(() => sampleRecipient(players, audience, ctx, channel), [players, audience, ctx, channel])
   return { estimate, sample, levelName, levels, ctx }
 }
@@ -147,7 +164,7 @@ export function AudiencePicker({
   /** coluna estreita (ex.: formulário dentro de Drawer com prévia ao lado) */
   narrow?: boolean
 }) {
-  const { players, ctx, levels, levelName } = useAudienceContext()
+  const { players, ctx, levels, levelName, base } = useAudienceContext()
   const daysFor = (kind: AudienceKind) =>
     kind === 'depositou'
       ? (fixedDays?.depositou ?? (value.kind === 'depositou' ? value.days : 7))
@@ -166,7 +183,7 @@ export function AudiencePicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [players, ctx, kinds, value, fixedDays])
   const [idsText, setIdsTextRaw] = useIdsDraft(value)
-  const estimate = useMemo(() => estimateAudience(players, value, ctx, channel), [players, value, ctx, channel])
+  const estimate = useMemo(() => estimateAudience(players, value, ctx, channel, base), [players, value, ctx, channel, base])
 
   return (
     <div className="space-y-3">
@@ -231,7 +248,7 @@ export function AudiencePicker({
           label="IDs dos jogadores"
           htmlFor={`${idPrefix}-ids`}
           hint="Separe por vírgula, espaço ou uma linha por ID."
-          error={estimate.invalidIds.length ? `${estimate.invalidIds.length} ${estimate.invalidIds.length === 1 ? 'ID não existe' : 'IDs não existem'} na base: ${estimate.invalidIds.slice(0, 4).join(', ')}${estimate.invalidIds.length > 4 ? '…' : ''}` : null}
+          error={estimate.invalidIds.length ? `${invalidIdsText(estimate)}: ${estimate.invalidIds.slice(0, 4).join(', ')}${estimate.invalidIds.length > 4 ? '…' : ''}` : null}
         >
           <Textarea
             id={`${idPrefix}-ids`}
@@ -256,6 +273,13 @@ export function AudiencePicker({
       )}
     </div>
   )
+}
+
+/** Modo API a lista é só o público de marketing: um ID fora dela pode existir e não receber campanhas. */
+function invalidIdsText(e: ReturnType<typeof estimateAudience>) {
+  const n = e.invalidIds.length
+  if (e.outsideBase !== null) return `${n} ${n === 1 ? 'ID não está' : 'IDs não estão'} no público (não existe${n === 1 ? '' : 'm'} ou não pode${n === 1 ? '' : 'm'} receber campanhas)`
+  return `${n} ${n === 1 ? 'ID não existe' : 'IDs não existem'} na base`
 }
 
 /** Guarda o texto digitado da lista de IDs (sem perder vírgulas enquanto digita). */
@@ -299,6 +323,11 @@ export function AudienceSummary({
         {estimate.blocked > 0 && (
           <li className="flex items-center gap-1.5">
             <ShieldOff size={12} aria-hidden /> {num(estimate.blocked)} fora por autoexclusão, pausa ou bloqueio (Lei 14.790/2023)
+          </li>
+        )}
+        {!!estimate.outsideBase && (
+          <li className="flex items-center gap-1.5">
+            <ShieldOff size={12} aria-hidden /> {num(estimate.outsideBase)} da base {estimate.outsideBase === 1 ? 'fica' : 'ficam'} fora por autoexclusão, pausa ou bloqueio (Lei 14.790/2023)
           </li>
         )}
         {consentChannel && estimate.noConsent > 0 && (

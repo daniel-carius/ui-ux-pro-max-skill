@@ -2,6 +2,7 @@
 import { createRng } from '@/lib/random'
 import type { DepositBonusCampaign } from '@/domain/campanhas-bonus'
 import { DAY, NOW, iso } from './now'
+import { demoRecords } from './demo'
 
 export const DEPOSIT_BONUS_KEY = 'campanhas.bonus-deposito'
 
@@ -100,3 +101,6 @@ export function depositBonusDaily(): { day: string; resgates: number; bonus: num
   }
   return out
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedDepositBonus)

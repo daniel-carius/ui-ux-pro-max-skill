@@ -8,7 +8,7 @@
 //    valor mascarado nunca vira dado real) e é gravada por saveRow, cifrada conforme
 //    a regra da chave, com uma linha na auditoria ('criar', autor "Sistema");
 //  - dados pessoais ficam obviamente fictícios (demoize): e-mail no domínio reservado
-//    .invalid (RFC 2606), CPF com dígito verificador errado, celular (DD) 90000-XXXX e
+//    .invalid (RFC 2606), CPF com dígito verificador errado, celular (DD) 9 0XXX-XXXX e
 //    IP na faixa privada 10.x;
 //  - autor de decisões (by, decidedBy, closedBy, paidBy…) vira um rótulo genérico,
 //    nunca o nome de alguém da equipe.
@@ -16,6 +16,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { findKvRule } from '@shared/kv-registry'
 import { seedAffiliateWithdrawals } from '@/data/afiliados'
+import { DEMO_STAFF_LABEL, demoCpf, demoEmail, demoIp, demoPhone } from '@/data/demo'
 import { seedAggregators, seedGames, seedProviders } from '@/data/catalog'
 import { seedDeposits, seedTransactions } from '@/data/finance'
 import { seedSettlements } from '@/data/ggr'
@@ -36,55 +37,15 @@ import { encryptAtRest, loadRow, saveRow } from './store'
 import { importedTx, TRANSACTIONS_KEY } from './transactions'
 import { parseOr400 } from './validate-util'
 
-/** Autor genérico das decisões nos registros de demonstração. */
-export const DEMO_STAFF_LABEL = 'Equipe (demonstração)'
+// regras dos dados fictícios: as mesmas do painel (src/data/demo.ts), que os geradores já aplicam;
+// aqui valem de novo sobre toda a base (idempotentes)
+export { DEMO_STAFF_LABEL, demoCpf, demoEmail, demoIp, demoPhone }
+
 /** updated_by das linhas gravadas pela semeadura. */
 const SEED_ACTOR_ID = 'sistema'
 const SYSTEM = { id: null, name: 'Sistema', ip: '' }
 
 // ---------- dados pessoais fictícios ----------
-
-/** CPF com o 1º dígito verificador errado (nunca é um CPF válido); mantém a pontuação. */
-export function demoCpf(value: string): string {
-  const d = value.replace(/\D/g, '')
-  if (d.length !== 11) return value
-  const dv = (base: string, w: number) => {
-    const sum = [...base].reduce((s, c, i) => s + Number(c) * (w - i), 0)
-    const r = (sum * 10) % 11
-    return r === 10 ? 0 : r
-  }
-  const base = d.slice(0, 9)
-  const wrong = (dv(base, 10) + 1) % 10
-  const out = `${base}${wrong}${d[10]}`
-  let i = 0
-  return value.replace(/\d/g, () => out[i++])
-}
-
-/** Celular (DD) 9 0000-XXXX: faixa que não existe na numeração móvel; mantém a pontuação. */
-export function demoPhone(value: string): string {
-  const d = value.replace(/\D/g, '')
-  if (d.length < 10) return value
-  // depois do DDD (e do 9 do celular), os 4 primeiros dígitos viram 0
-  const from = d.length >= 11 ? 3 : 2
-  let i = 0
-  return value.replace(/\d/g, (c) => {
-    const pos = i++
-    return pos >= from && pos < from + 4 ? '0' : c
-  })
-}
-
-/** E-mail no domínio reservado .invalid (RFC 2606): nunca entrega para ninguém. */
-export function demoEmail(value: string): string {
-  const at = value.lastIndexOf('@')
-  if (at < 1 || value.endsWith('.invalid')) return value
-  return `${value}.invalid`
-}
-
-/** IPv4 na faixa privada 10.x (mantém os 3 últimos números: as contas que dividem IP continuam dividindo). */
-export function demoIp(value: string): string {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value)
-  return m ? `10.${m[2]}.${m[3]}.${m[4]}` : value
-}
 
 const EMAIL_FIELD = /^e-?mail$|Email$/i
 const CPF_FIELD = /^(cpf|document|documento)$|(Cpf|CPF|Document|Documento)$/

@@ -1,7 +1,7 @@
 import { useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { ArrowDown, ArrowUp, CalendarDays, Check, Copy, GripVertical, ImageUp, KeyRound, Trash2, X } from 'lucide-react'
 import { cn } from '@/lib/cn'
-import { date as fmtDate, maskSecret } from '@/lib/format'
+import { date as fmtDate, hasMaskChars, maskSecret } from '@/lib/format'
 import { DAY, NOW, dayKey, endOfDay, startOfDay } from '@/data/now'
 import { Button, IconButton } from './Button'
 import { Segmented } from './Controls'
@@ -160,6 +160,9 @@ export function DateRangePicker({
  * Envio de imagem com prévia. Guarda como data URL (no servidor real, seria
  * um upload para o storage). Avisa se o tamanho não bate com o recomendado.
  */
+/** Prévia só de imagem embutida, do navegador, https ou da mesma origem (nada de javascript:, http: ou //host). */
+const PREVIEWABLE_IMAGE = /^(data:image\/|blob:|https:\/\/|\/(?!\/))/i
+
 export function ImageUpload({
   value,
   onChange,
@@ -185,6 +188,9 @@ export function ImageUpload({
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [over, setOver] = useState(false)
+  // imagem que o navegador não carregou (ex.: endereço externo barrado pela CSP img-src): volta ao estado vazio
+  const [failed, setFailed] = useState<string | null>(null)
+  const shown = value && failed !== value && PREVIEWABLE_IMAGE.test(value) ? value : null
 
   const handleFile = (file: File | undefined) => {
     if (!file) return
@@ -243,8 +249,8 @@ export function ImageUpload({
         )}
         style={{ aspectRatio: ratio, maxHeight: 260 }}
       >
-        {value ? (
-          <img src={value} alt={label ? `Prévia: ${label}` : 'Prévia da imagem'} className="h-full w-full object-contain" />
+        {shown ? (
+          <img src={shown} alt={label ? `Prévia: ${label}` : 'Prévia da imagem'} className="h-full w-full object-contain" onError={() => setFailed(shown)} />
         ) : (
           <button
             type="button"
@@ -253,7 +259,7 @@ export function ImageUpload({
             className="flex h-full min-h-[96px] w-full flex-col items-center justify-center gap-1.5 p-4 text-center text-fg-3 hover:text-fg-2 disabled:cursor-not-allowed"
           >
             <ImageUp size={22} aria-hidden />
-            <span className="text-[13px] font-medium">Arraste ou clique para enviar</span>
+            <span className="text-[13px] font-medium">{value ? 'Imagem salva sem prévia. Envie de novo' : 'Arraste ou clique para enviar'}</span>
             {width && height && <span className="text-xs tnum">{width}×{height} px</span>}
           </button>
         )}
@@ -386,9 +392,31 @@ export function CopyButton({ value, label = 'Copiar' }: { value: string; label?:
   )
 }
 
+const SECRET_REQUIRE_NEW = 'O destino desta credencial mudou: digite o segredo de novo.'
+const SECRET_MASK_DRAFT = 'Digite o segredo completo, sem os caracteres de máscara.'
+const SECRET_MIN = 8
+
 /**
- * Segredo mascarado (só os últimos caracteres). Nunca exibe o valor salvo;
- * permite apenas substituir. Segredos são cifrados no servidor.
+ * Erro de um segredo para a validação do formulário (o mesmo texto que o SecretField mostra).
+ * Use no `validate` da tela para não salvar com o segredo pendente:
+ *   validate: (v) => secretFieldError(v.apiSecret, { requireNew: destinoMudou, saved: salvo.apiSecret })
+ *  - requireNew: o destino da credencial mudou (host, conta, ambiente…); o segredo salvo (a máscara)
+ *    não vale mais e um segredo novo precisa ser digitado;
+ *  - valor com • ou *** que não é a máscara salva: nunca é enviado (o servidor recusaria).
+ */
+export function secretFieldError(value: string, opts: { requireNew?: boolean; saved?: string } = {}): string | null {
+  if (opts.requireNew && (!value || hasMaskChars(value) || (opts.saved !== undefined && value === opts.saved))) return SECRET_REQUIRE_NEW
+  if (value && hasMaskChars(value) && opts.saved !== undefined && value !== opts.saved) return SECRET_MASK_DRAFT
+  return null
+}
+
+/**
+ * Segredo mascarado (só pontos; com 16+ caracteres, também os 4 últimos). Nunca exibe o
+ * valor salvo; permite apenas substituir. Segredos são cifrados no servidor.
+ *  - requireNew: o destino mudou e o segredo salvo não vale mais; o campo fica vazio, com o
+ *    aviso, até um segredo novo ser digitado (a tela bloqueia o salvar com secretFieldError).
+ *  - saved: valor salvo (a máscara no modo API), para saber se o segredo já foi trocado.
+ *  - error: erro vindo do servidor para este campo (ex.: details.field 'secret').
  */
 export function SecretField({
   label,
@@ -396,21 +424,41 @@ export function SecretField({
   onChange,
   disabled,
   hint,
+  requireNew,
+  saved,
+  error,
 }: {
   label: string
   value: string
   onChange: (v: string) => void
   disabled?: boolean
   hint?: ReactNode
+  requireNew?: boolean
+  saved?: string
+  error?: string | null
 }) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
+  const problem = secretFieldError(value, { requireNew, saved })
+  // destino mudou: o segredo guardado não conta mais; o campo fica vazio até digitar um novo
+  const pending = problem === SECRET_REQUIRE_NEW
+  const shown = pending ? '' : value
+  const fieldError = problem ?? error ?? null
+  const draftValue = draft.trim()
+  // com • ou ***, só passa a máscara salva exata, intocada (e nunca depois que o destino mudou)
+  const draftError = draftValue && hasMaskChars(draftValue) && (pending || draftValue !== (saved ?? value)) ? SECRET_MASK_DRAFT : null
+  const canSave = draftValue.length >= SECRET_MIN && !draftError
+  const save = () => {
+    if (!canSave) return
+    onChange(draftValue)
+    setOpen(false)
+  }
   return (
-    <Field label={label} hint={hint ?? 'Cifrado no servidor. Só os últimos caracteres aparecem.'}>
+    <Field label={label} required={requireNew} error={fieldError} hint={hint ?? 'Cifrado no servidor. Nunca aparece por inteiro.'}>
       <div className="flex gap-2">
-        <div className="input-base flex min-w-0 items-center gap-2 bg-surface-2 font-mono text-[13px] text-fg-2">
+        <div className={cn('input-base flex min-w-0 items-center gap-2 bg-surface-2 font-mono text-[13px] text-fg-2', fieldError && 'border-danger')}>
           <KeyRound size={14} className="shrink-0 text-fg-3" aria-hidden />
-          <span className="truncate">{value ? maskSecret(value) : 'Não configurado'}</span>
+          <span className={cn('truncate', !shown && 'font-sans text-fg-3')}>{shown ? maskSecret(shown) : pending ? 'Digite o segredo de novo' : 'Não configurado'}</span>
         </div>
         <Button
           disabled={disabled}
@@ -419,34 +467,41 @@ export function SecretField({
             setOpen(true)
           }}
         >
-          {value ? 'Substituir' : 'Definir'}
+          {shown ? 'Substituir' : 'Definir'}
         </Button>
       </div>
       <Modal
         open={open}
         onClose={() => setOpen(false)}
-        title={`${value ? 'Substituir' : 'Definir'} ${label}`}
-        description="O valor novo substitui o atual e não poderá ser visto de novo."
+        title={`${shown ? 'Substituir' : 'Definir'} ${label}`}
+        description={pending ? SECRET_REQUIRE_NEW : 'O valor novo substitui o atual e não poderá ser visto de novo.'}
         icon={KeyRound}
         size="sm"
         footer={
           <>
             <Button onClick={() => setOpen(false)}>Cancelar</Button>
-            <Button
-              variant="primary"
-              disabled={draft.trim().length < 8}
-              onClick={() => {
-                onChange(draft.trim())
-                setOpen(false)
-              }}
-            >
+            <Button variant="primary" disabled={!canSave} onClick={save}>
               Salvar segredo
             </Button>
           </>
         }
       >
-        <Field label="Novo valor" hint="Mínimo de 8 caracteres." htmlFor="secret-new">
-          <Input id="secret-new" data-autofocus type="password" autoComplete="off" value={draft} onChange={(e) => setDraft(e.target.value)} />
+        <Field label="Novo valor" hint={`Mínimo de ${SECRET_MIN} caracteres.`} error={draftError} htmlFor="secret-new">
+          <Input
+            id="secret-new"
+            data-autofocus
+            type="password"
+            autoComplete="off"
+            value={draft}
+            invalid={!!draftError}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                save()
+              }
+            }}
+          />
         </Field>
       </Modal>
     </Field>

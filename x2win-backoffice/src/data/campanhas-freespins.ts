@@ -4,6 +4,7 @@ import type { FreeSpinCampaign, FreeSpinGrant } from '@/domain/campanhas-freespi
 import { seedGames } from './catalog'
 import { DAY, HOUR, NOW, iso } from './now'
 import { seedPlayers } from './players'
+import { demoRecords } from './demo'
 
 export const FS_KEYS = {
   campaigns: 'campanhas.free-spins',
@@ -151,3 +152,7 @@ export function seedFsGrants(): FreeSpinGrant[] {
   }
   return out.sort((a, b) => b.grantedAt.localeCompare(a.grantedAt))
 }
+
+// modo API: registros só do servidor (sem nada gravado, lista vazia; o gerador não roda)
+demoRecords(seedFsCampaigns)
+demoRecords(seedFsGrants)

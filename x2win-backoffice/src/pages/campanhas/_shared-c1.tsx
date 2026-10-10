@@ -5,9 +5,10 @@ import type { LucideIcon } from 'lucide-react'
 import { Check, ChevronsUpDown, Search, UserSearch, X } from 'lucide-react'
 import { Badge, Checkbox, ChipFilter, Input, Popover, normalize } from '@/components/ui'
 import { cn } from '@/lib/cn'
-import { initials, maskEmail, num } from '@/lib/format'
+import { initials, maskEmail, num, plural } from '@/lib/format'
 import { GAME_CATEGORY_LABEL, type Game, type GameCategory, type Provider } from '@/data/catalog'
-import { PLAYER_STATUS_LABEL, type Player } from '@/data/players'
+import { PLAYER_STATUS_LABEL } from '@/data/players'
+import type { CampaignPlayer } from '@/domain/campanhas-jogadores'
 
 // ---------- Jogos ----------
 
@@ -243,7 +244,11 @@ export function GameMultiPicker({
 
 // ---------- Jogadores ----------
 
-/** Busca de jogador por ID, e-mail ou nome. A lista mostra e-mail mascarado (LGPD). */
+/**
+ * Busca de jogador. Demonstração: por ID, e-mail ou nome (a lista mostra o e-mail
+ * mascarado, LGPD). Modo API: o público do servidor não tem nome nem e-mail; busca por
+ * ID ou apelido, e só aparecem jogadores ativos.
+ */
 export function PlayerFinder({
   players,
   value,
@@ -251,31 +256,33 @@ export function PlayerFinder({
   id,
   disabled,
 }: {
-  players: Player[]
-  value: Player | null
-  onChange: (p: Player | null) => void
+  players: CampaignPlayer[]
+  value: CampaignPlayer | null
+  onChange: (p: CampaignPlayer | null) => void
   id?: string
   disabled?: boolean
 }) {
   const [q, setQ] = useState('')
+  const withPersonalData = players.some((p) => p.email !== undefined)
   const results = useMemo(() => {
     const t = q.trim()
     if (t.length < 2) return []
     const nq = normalize(t)
-    const exact = players.filter((p) => p.id === t || p.email.toLowerCase() === t.toLowerCase())
+    const exact = players.filter((p) => p.id === t || p.nickname.toLowerCase() === t.toLowerCase() || (!!p.email && p.email.toLowerCase() === t.toLowerCase()))
     if (exact.length) return exact
-    return players.filter((p) => p.id.includes(t) || normalize(p.email).includes(nq) || normalize(p.name).includes(nq)).slice(0, 6)
+    return players
+      .filter((p) => p.id.includes(t) || normalize(p.nickname).includes(nq) || (!!p.email && normalize(p.email).includes(nq)) || (!!p.name && normalize(p.name).includes(nq)))
+      .slice(0, 6)
   }, [players, q])
+  const what = withPersonalData ? 'ID, e-mail ou nome' : 'ID ou apelido'
 
   if (value) {
     return (
       <div className="flex items-center gap-3 rounded-xl border border-line bg-surface-2 p-3">
-        <PlayerAvatar name={value.name} />
+        <PlayerAvatar name={value.name ?? value.nickname} />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-fg">{value.name}</p>
-          <p className="truncate text-xs text-fg-3">
-            ID {value.id} · {maskEmail(value.email)}
-          </p>
+          <p className="truncate text-sm font-medium text-fg">{value.name ?? value.nickname}</p>
+          <p className="truncate text-xs text-fg-3">{playerSub(value)}</p>
         </div>
         <Badge tone={value.status === 'ativo' ? 'success' : 'danger'} dot>
           {PLAYER_STATUS_LABEL[value.status]}
@@ -288,28 +295,35 @@ export function PlayerFinder({
   }
   return (
     <div>
-      <Input id={id} icon={UserSearch} value={q} disabled={disabled} onChange={(e) => setQ(e.target.value)} placeholder="ID, e-mail ou nome do jogador" autoComplete="off" />
+      <Input id={id} icon={UserSearch} value={q} disabled={disabled} onChange={(e) => setQ(e.target.value)} placeholder={`${what} do jogador`} autoComplete="off" />
       {q.trim().length >= 2 && (
         <ul className="mt-2 divide-y divide-line overflow-hidden rounded-xl border border-line" aria-label="Jogadores encontrados">
           {results.map((p) => (
             <li key={p.id}>
               <button type="button" onClick={() => onChange(p)} className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-surface-2">
-                <PlayerAvatar name={p.name} />
+                <PlayerAvatar name={p.name ?? p.nickname} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-medium text-fg">{p.name}</span>
-                  <span className="block truncate text-xs text-fg-3">
-                    ID {p.id} · {maskEmail(p.email)}
-                  </span>
+                  <span className="block truncate text-[13px] font-medium text-fg">{p.name ?? p.nickname}</span>
+                  <span className="block truncate text-xs text-fg-3">{playerSub(p)}</span>
                 </span>
                 {p.status !== 'ativo' && <Badge tone="danger">{PLAYER_STATUS_LABEL[p.status]}</Badge>}
               </button>
             </li>
           ))}
-          {!results.length && <li className="px-3 py-4 text-center text-[13px] text-fg-3">Nenhum jogador com esse ID, e-mail ou nome.</li>}
+          {!results.length && (
+            <li className="px-3 py-4 text-center text-[13px] text-fg-3">
+              Nenhum jogador com esse {what}.{!withPersonalData && ' Só aparecem jogadores ativos.'}
+            </li>
+          )}
         </ul>
       )}
     </div>
   )
+}
+
+/** Linha de apoio: e-mail mascarado (demonstração) ou quantos depósitos (modo API, sem dado pessoal). */
+function playerSub(p: CampaignPlayer) {
+  return p.email !== undefined ? `ID ${p.id} · ${maskEmail(p.email)}` : `ID ${p.id} · ${p.depositsCount ? plural(p.depositsCount, 'depósito', 'depósitos') : 'sem depósito'}`
 }
 
 function PlayerAvatar({ name }: { name: string }) {

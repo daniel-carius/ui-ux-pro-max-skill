@@ -22,7 +22,8 @@ import {
 } from '@/components/ui'
 import { brl, dateTime, num, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useDb } from '@/lib/store'
+import { isApiMode } from '@/lib/api'
+import { dbSetAndWait, useDb } from '@/lib/store'
 import { useAffiliates } from '@/data/hooks'
 import type { AffiliateType } from '@/data/players'
 import { audit, usePageAccess, useSession } from '@/domain/session'
@@ -61,14 +62,19 @@ export default function Comissoes() {
   const [sim, setSim] = useState({ depositors: SIM_PRESETS.medio.depositors, ggr: SIM_PRESETS.medio.ggr })
   const [preset, setPreset] = useState<SimPreset>('medio')
 
-  // quando um bloco é salvo (aqui ou em outra aba), só ele volta ao valor salvo
+  // quando um bloco é salvo (aqui ou em outra aba), só ele volta ao valor salvo;
+  // o bloco que espera o servidor fica com o rascunho (se a gravação for recusada, nada se perde)
   const prevSaved = useRef(saved)
+  const waiting = useRef<AffiliateType | null>(null)
   useEffect(() => {
     const prev = prevSaved.current
     prevSaved.current = saved
     setDrafts((d) => {
       const next = { ...d }
-      for (const t of AFFILIATE_TYPES) if (!sameRule(prev[t], saved[t]) || prev[t].updatedAt !== saved[t].updatedAt) next[t] = saved[t]
+      for (const t of AFFILIATE_TYPES) {
+        if (t === waiting.current) continue
+        if (!sameRule(prev[t], saved[t]) || prev[t].updatedAt !== saved[t].updatedAt) next[t] = saved[t]
+      }
       return next
     })
   }, [saved])
@@ -96,13 +102,27 @@ export default function Comissoes() {
       return
     }
     setSaving(t)
+    const before = saved[t]
+    const next: CommissionRule = { model: draft.model, value: draft.value, cap: draft.cap, updatedAt: new Date().toISOString(), updatedBy: user.name }
+    const done = () => toast.success(`Comissão de ${TYPE_META[t].label} salva`, { description: `${describeRule(next)}. Vale a partir do próximo fechamento.` })
+    if (isApiMode()) {
+      // o servidor valida a regra, define quem alterou e quando e audita (antes → depois);
+      // recusa: o aviso traz a mensagem do servidor e o bloco continua com o rascunho para corrigir
+      waiting.current = t
+      void dbSetAndWait<CommissionRules>(AFILIADOS_KEYS.commissions, (prev) => ({ ...DEFAULT_COMMISSION_RULES, ...prev, [t]: next }), DEFAULT_COMMISSION_RULES).then(
+        (ok) => {
+          waiting.current = null
+          setSaving(null)
+          if (ok) done()
+        },
+      )
+      return
+    }
     setTimeout(() => {
-      const before = saved[t]
-      const next: CommissionRule = { model: draft.model, value: draft.value, cap: draft.cap, updatedAt: new Date().toISOString(), updatedBy: user.name }
       setStored((prev) => ({ ...DEFAULT_COMMISSION_RULES, ...prev, [t]: next }))
       audit('editar', `Comissão ${TYPE_META[t].label}`, `${describeRule(before)} → ${describeRule(next)}`)
       setSaving(null)
-      toast.success(`Comissão de ${TYPE_META[t].label} salva`, { description: `${describeRule(next)}. Vale a partir do próximo fechamento.` })
+      done()
     }, 400)
   }
 

@@ -1,6 +1,7 @@
 // Estado global do site que aparece em várias telas (barra superior, alertas):
 // modo de ataque, manutenção e faturas. As telas de Segurança e Configurações
 // editam estas chaves; o topo do painel lê para mostrar o status da operação.
+import { apiValue } from '@/data/demo'
 import { useDb } from '@/lib/store'
 
 export const SYSTEM_KEYS = {
@@ -39,13 +40,20 @@ export interface MaintenanceState {
   since: string | null
 }
 
-export const DEFAULT_MAINTENANCE: MaintenanceState = {
-  active: false,
-  message: 'Estamos fazendo melhorias. Voltamos em breve.',
-  returnAt: null,
-  bypassToken: 'teste-9f3a1c',
-  since: null,
-}
+/** Link de testes da demonstração: público no código do painel, nunca vale no modo API. */
+export const DEMO_BYPASS_TOKEN = 'teste-9f3a1c'
+
+export const DEFAULT_MAINTENANCE: MaintenanceState = apiValue<MaintenanceState>(
+  {
+    active: false,
+    message: 'Estamos fazendo melhorias. Voltamos em breve.',
+    returnAt: null,
+    bypassToken: DEMO_BYPASS_TOKEN,
+    since: null,
+  },
+  // modo API, sem nada gravado: sem link de testes (a tela gera um novo na primeira gravação)
+  (): MaintenanceState => ({ active: false, message: 'Estamos fazendo melhorias. Voltamos em breve.', returnAt: null, bypassToken: '', since: null }),
+)
 
 export function useAttackMode() {
   return useDb<AttackModeState>(SYSTEM_KEYS.attackMode, DEFAULT_ATTACK_MODE)
@@ -102,17 +110,21 @@ export interface CompanyState {
 
 export const COMPANY_KEY = 'config.empresa'
 
-export const DEFAULT_COMPANY: CompanyState = {
-  legalName: 'X2Win Entretenimento Digital Ltda.',
-  tradeName: 'X2Win',
-  cnpj: '48123456000175',
-  license: 'SPA/MF nº 0000/2025 (demonstração)',
-  licenseValidUntil: '2030-01-01T12:00:00',
-  address: 'Av. Paulista, 1000, 10º andar · São Paulo/SP · 01310-100',
-  email: 'contato@x2win.bet.br',
-  phone: '1140028922',
-  description: 'Plataforma de apostas de quota fixa e jogos on-line autorizada pela Secretaria de Prêmios e Apostas do Ministério da Fazenda.',
-}
+export const DEFAULT_COMPANY: CompanyState = apiValue<CompanyState>(
+  {
+    legalName: 'X2Win Entretenimento Digital Ltda.',
+    tradeName: 'X2Win',
+    cnpj: '48123456000175',
+    license: 'SPA/MF nº 0000/2025 (demonstração)',
+    licenseValidUntil: '2030-01-01T12:00:00',
+    address: 'Av. Paulista, 1000, 10º andar · São Paulo/SP · 01310-100',
+    email: 'contato@x2win.bet.br',
+    phone: '1140028922',
+    description: 'Plataforma de apostas de quota fixa e jogos on-line autorizada pela Secretaria de Prêmios e Apostas do Ministério da Fazenda.',
+  },
+  // modo API, sem nada gravado: em branco (nunca o CNPJ e a autorização de demonstração; a licença fica pendente)
+  (): CompanyState => ({ legalName: '', tradeName: 'X2Win', cnpj: '', license: '', licenseValidUntil: '', address: '', email: '', phone: '', description: '' }),
+)
 
 export function useCompany() {
   return useDb<CompanyState>(COMPANY_KEY, DEFAULT_COMPANY)
@@ -133,12 +145,21 @@ export interface IntegrationsState {
 
 export const INTEGRATIONS_KEY = 'config.integracoes'
 
-export const DEFAULT_INTEGRATIONS: IntegrationsState = {
-  emailProvider: 'smtp',
-  smtp: { host: 'smtp.plataforma-evox.com', port: 587, user: 'no-reply@x2win.bet.br', password: 'DEMO-smtp-password', fromName: 'X2Win', fromEmail: 'no-reply@x2win.bet.br', secure: true },
-  mailgun: { connected: false, domain: '', apiKey: '', region: 'us' },
-  sendwork: { connected: false, accountId: '', apiKey: '', smsSender: '', rcsAgent: '' },
-}
+export const DEFAULT_INTEGRATIONS: IntegrationsState = apiValue<IntegrationsState>(
+  {
+    emailProvider: 'smtp',
+    smtp: { host: 'smtp.plataforma-evox.com', port: 587, user: 'no-reply@x2win.bet.br', password: 'DEMO-smtp-password', fromName: 'X2Win', fromEmail: 'no-reply@x2win.bet.br', secure: true },
+    mailgun: { connected: false, domain: '', apiKey: '', region: 'us' },
+    sendwork: { connected: false, accountId: '', apiKey: '', smsSender: '', rcsAgent: '' },
+  },
+  // modo API, sem nada gravado: nenhuma conta configurada (nunca o SMTP e a senha DEMO)
+  (): IntegrationsState => ({
+    emailProvider: 'smtp',
+    smtp: { host: '', port: 587, user: '', password: '', fromName: '', fromEmail: '', secure: true },
+    mailgun: { connected: false, domain: '', apiKey: '', region: 'us' },
+    sendwork: { connected: false, accountId: '', apiKey: '', smsSender: '', rcsAgent: '' },
+  }),
+)
 
 export function useIntegrations() {
   return useDb<IntegrationsState>(INTEGRATIONS_KEY, DEFAULT_INTEGRATIONS)

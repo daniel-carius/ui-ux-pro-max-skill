@@ -1,5 +1,6 @@
 // Catálogo de cassino: provedoras, jogos e agregadores.
 import { createRng } from '@/lib/random'
+import { apiValue, demoRecords } from './demo'
 import { daysAgo, iso } from './now'
 
 export type GameCategory = 'slots' | 'ao_vivo' | 'crash' | 'mesa' | 'instantaneo' | 'bingo'
@@ -256,3 +257,10 @@ export function seedSportsbookCredentials(): SportsbookCredentials {
     status: 'conectado',
   }
 }
+
+// modo API: catálogo e agregadores vêm do servidor (DEMO_DATA grava estes mesmos); sem nada gravado,
+// listas vazias. Credenciais do sportsbook sem nada gravado: em branco (nunca as chaves DEMO).
+demoRecords(seedProviders)
+demoRecords(seedGames)
+demoRecords(seedAggregators)
+apiValue(seedSportsbookCredentials, (): SportsbookCredentials => ({ platformId: '', publicKey: '', privateKey: '', webhookSecret: '', status: 'erro' }))

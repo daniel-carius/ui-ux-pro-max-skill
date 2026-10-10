@@ -6,12 +6,13 @@ import { Banknote, BadgePercent, Check, CircleSlash, Coins, Eye, Gift, Percent, 
 import { Badge, Checkbox, Popover, confirm, type Tone } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import { brl, num } from '@/lib/format'
-import { useDb } from '@/lib/store'
+import { dbSetAndWait, useCollection, useDb, type Collection } from '@/lib/store'
 import { GAME_CATEGORY_LABEL, type GameCategory } from '@/data/catalog'
 import { useGames, useProviders } from '@/data/hooks'
 import { C2_KEYS, rewardText, type Reward, type RewardKind } from '@/domain/campanhas2-common'
 import { DEFAULT_COIN_CONFIG, coinInfo, type CoinConfig } from '@/domain/campanhas2-moeda'
 import type { ColorSlot } from '@/domain/campanhas2-roleta'
+import { safeImageSrc } from '@/domain/personalizacao-p1'
 
 // ---------- Moeda do site ----------
 
@@ -25,7 +26,9 @@ export type CoinCtx = ReturnType<typeof useCoin>
 
 /** Ícone da moeda: imagem enviada ou moeda desenhada. */
 export function CoinGlyph({ size = 16, src, className }: { size?: number; src?: string | null; className?: string }) {
-  if (src) return <img src={src} alt="" aria-hidden width={size} height={size} className={cn('shrink-0 rounded-full object-cover', className)} style={{ width: size, height: size }} />
+  // ícone gravado: só imagem embutida, https ou arquivo do painel (nada de javascript: ou http:)
+  const safe = safeImageSrc(src)
+  if (safe) return <img src={safe} alt="" aria-hidden width={size} height={size} className={cn('shrink-0 rounded-full object-cover', className)} style={{ width: size, height: size }} />
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden className={cn('shrink-0 text-gold', className)}>
       <circle cx="12" cy="12" r="11" fill="currentColor" />
@@ -216,6 +219,36 @@ export async function confirmDiscard(dirty: boolean) {
 
 /** Texto do motivo de somente leitura (title de botões). */
 export const READ_ONLY_TITLE = 'Seu cargo pode ver, mas não editar esta tela'
+
+// ---------- Listas gravadas ----------
+
+export interface SavedCollection<T extends { id: string }> extends Collection<T> {
+  /**
+   * Como add/update/remove, mas espera a gravação. Modo API: true quando o servidor aceitou;
+   * false quando recusou (regra da campanha, versão): a tela volta ao valor salvo e o aviso
+   * "Alteração desfeita" já mostra a mensagem do servidor. Campos que o servidor controla
+   * (contadores da plataforma, data de criação, quem encerrou) voltam na resposta e
+   * substituem os enviados. Demonstração: grava na hora e devolve true.
+   */
+  addAndWait: (item: T, position?: 'start' | 'end') => Promise<boolean>
+  updateAndWait: (id: string, patch: Partial<T> | ((item: T) => T)) => Promise<boolean>
+  removeAndWait: (id: string) => Promise<boolean>
+  /** várias mudanças numa gravação só */
+  saveAndWait: (next: (prev: T[]) => T[]) => Promise<boolean>
+}
+
+/** Lista de campanha (missões, torneios, roletas, itens da loja) com gravação que espera o servidor. */
+export function useSavedCollection<T extends { id: string }>(key: string, seed: T[] | (() => T[])): SavedCollection<T> {
+  const col = useCollection<T>(key, seed)
+  const saveAndWait = (next: (prev: T[]) => T[]) => dbSetAndWait<T[]>(key, next, seed)
+  return {
+    ...col,
+    saveAndWait,
+    addAndWait: (item, position = 'start') => saveAndWait((prev) => (position === 'start' ? [item, ...prev] : [...prev, item])),
+    updateAndWait: (id, patch) => saveAndWait((prev) => prev.map((it) => (it.id === id ? (typeof patch === 'function' ? patch(it) : { ...it, ...patch }) : it))),
+    removeAndWait: (id) => saveAndWait((prev) => prev.filter((it) => it.id !== id)),
+  }
+}
 
 // ---------- Seleção de jogos ----------
 

@@ -1,5 +1,6 @@
 // Regras de Configurações › Suporte e contato.
 // A Ouvidoria é canal obrigatório: sem e-mail ou telefone dela, não salva.
+import { apiValue } from '@/data/demo'
 import { isValidEmail } from './config1-empresa'
 
 export const SUPPORT_KEY = 'config.suporte'
@@ -27,15 +28,27 @@ export interface SupportConfig {
   ombudsman: { email: string; phone: string; hours: string }
 }
 
-export const DEFAULT_SUPPORT: SupportConfig = {
-  chat: { provider: 'crisp', widgetId: 'DEMO-7c9e6679-7425-40de-944b', position: 'direita', onlyLoggedIn: false },
-  hours: { always: false, days: [false, true, true, true, true, true, true], open: '08:00', close: '23:00' },
-  email: 'suporte@x2win.bet.br',
-  whatsapp: '5511940028922',
-  phone: '08000000000',
-  helpCenterUrl: 'https://ajuda.x2win.bet.br',
-  ombudsman: { email: 'ouvidoria@x2win.bet.br', phone: '08000000001', hours: 'Dias úteis, das 9h às 18h' },
-}
+export const DEFAULT_SUPPORT: SupportConfig = apiValue<SupportConfig>(
+  {
+    chat: { provider: 'crisp', widgetId: 'DEMO-7c9e6679-7425-40de-944b', position: 'direita', onlyLoggedIn: false },
+    hours: { always: false, days: [false, true, true, true, true, true, true], open: '08:00', close: '23:00' },
+    email: 'suporte@x2win.bet.br',
+    whatsapp: '5511940028922',
+    phone: '08000000000',
+    helpCenterUrl: 'https://ajuda.x2win.bet.br',
+    ombudsman: { email: 'ouvidoria@x2win.bet.br', phone: '08000000001', hours: 'Dias úteis, das 9h às 18h' },
+  },
+  // modo API, sem nada gravado: sem chat e sem contatos de demonstração (a Ouvidoria precisa ser preenchida)
+  (): SupportConfig => ({
+    chat: { provider: 'nenhum', widgetId: '', position: 'direita', onlyLoggedIn: false },
+    hours: { always: false, days: [false, true, true, true, true, true, true], open: '08:00', close: '23:00' },
+    email: '',
+    whatsapp: '',
+    phone: '',
+    helpCenterUrl: '',
+    ombudsman: { email: '', phone: '', hours: '' },
+  }),
+)
 
 const toMin = (hhmm: string) => {
   const [h, m] = hhmm.split(':').map(Number)
