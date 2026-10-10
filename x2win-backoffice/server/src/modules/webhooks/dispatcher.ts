@@ -169,22 +169,31 @@ export async function recordExecution(
   return id
 }
 
-/** Enfileira o evento para todos os destinos ativos dele (chamar dentro da transação da ação). */
+/**
+ * Enfileira o evento para todos os destinos ativos dele (chamar dentro da transação da ação).
+ *
+ * Os destinos lidos ficam travados (FOR KEY SHARE) até o fim da transação de quem chama, e a fila recebe exatamente
+ * esses ids. Assim a gravação da lista de destinos (campanhas.webhooks.destinos), que pode excluir um destino ao
+ * mesmo tempo, nunca derruba a ação com erro de chave estrangeira (23503): a leitura espera a exclusão em andamento
+ * e, depois que ela confirma, o Postgres pula a linha excluída; a linha que voltou não pode mais ser excluída antes
+ * do fim desta transação. A gravação da lista trava os destinos excluídos na mesma ordem (id), sem impasse.
+ */
 export async function enqueueWebhook(db: Db, event: string, payload: Record<string, unknown>): Promise<number> {
   if (!isWebhookEvent(event)) throw new Error(`Evento de webhook desconhecido: ${event}`)
   // o mesmo id de evento vai para todos os destinos (o destino deduplica por ele)
   const envelope = { id: newId('evt'), data: payload }
-  // destino de demonstração (host de terceiro, segredo público no bundle) nunca recebe evento real, mesmo se
-  // estiver gravado e ativo (ex.: gravado antes de a chave recusar o seed do painel)
   const dests = await db.query<{ id: string; url: string }>(
-    'select id, url from webhook_destinations where event = $1 and active order by id',
+    'select id, url from webhook_destinations where event = $1 and active order by id for key share',
     [event],
   )
+  // destino de demonstração (host de terceiro, segredo público no bundle) nunca recebe evento real, mesmo se
+  // estiver gravado e ativo (ex.: gravado antes de a chave recusar o seed do painel)
   const ids = dests.filter((d) => !isDemoWebhookHost(d.url)).map((d) => d.id)
   if (!ids.length) return 0
+  // só os ids travados acima (nada de reler webhook_destinations aqui: a releitura veria outro estado)
   const rows = await db.query<{ id: number }>(
     `insert into webhook_outbox (event, payload, destination_id)
-     select $1, $2::jsonb, d.id from webhook_destinations d where d.event = $1 and d.active and d.id = any($3::text[])
+     select $1::text, $2::jsonb, d.id from unnest($3::text[]) as d(id)
      returning id`,
     [event, JSON.stringify(envelope), ids],
   )

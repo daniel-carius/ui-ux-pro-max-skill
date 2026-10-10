@@ -201,7 +201,11 @@ export const kvHandlers: KvHandlers = {
         }
         const removed = rows.filter((r) => !seen.has(r.id))
         if (removed.length) {
-          await t.query('delete from webhook_destinations where id = any($1::text[])', [removed.map((r) => r.id)])
+          const removedIds = removed.map((r) => r.id)
+          // trava as linhas na ordem do id, a mesma de enqueueWebhook (FOR KEY SHARE ... order by id): uma ação que
+          // enfileira ao mesmo tempo espera ou é esperada, sem impasse entre as duas transações
+          await t.query('select id from webhook_destinations where id = any($1::text[]) order by id for update', [removedIds])
+          await t.query('delete from webhook_destinations where id = any($1::text[])', [removedIds])
         }
 
         const next = current + 1

@@ -3,7 +3,7 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import { ZodError } from 'zod'
 import type { Config } from './config'
-import { connectedAsOwner, migrate, openDb, useRuntimeRole, type Db } from './db'
+import { connectedAsOwner, migrate, openDb, pingDb, useRuntimeRole, type Db } from './db'
 import { AppError, type ErrorBody } from './errors'
 import { createCipher } from './lib/crypto'
 import securityPlugin from './plugins/security'
@@ -39,7 +39,8 @@ export async function buildApp({ config, db, logger = false }: BuildOptions): Pr
   })
 
   const database = db ?? openDb(config.DATABASE_URL)
-  await migrate(database)
+  // sem o papel de execução a API ainda sobe (com o aviso abaixo); "npm run migrate" é quem falha
+  await migrate(database, { requireRuntimeRole: false })
   // depois das migrações a API roda sem ser dona das tabelas (auditoria só com SELECT e INSERT)
   await useRuntimeRole(database)
   if (database.kind === 'postgres' && (await connectedAsOwner(database))) {
@@ -78,7 +79,11 @@ export async function buildApp({ config, db, logger = false }: BuildOptions): Pr
   await app.register(securityPlugin)
   await app.register(sessionPlugin)
 
-  app.get('/api/health', async () => ({ ok: true, db: database.kind }))
+  // HEALTHCHECK do contêiner (Dockerfile.api) e monitoração externa: 200 só com o banco respondendo em até 2 s
+  app.get('/api/health', async (_req, reply) => {
+    if (await pingDb(database, 2000)) return { ok: true, db: database.kind }
+    return reply.status(503).send({ ok: false, db: database.kind, error: { code: 'banco_indisponivel', message: 'Banco de dados indisponível.' } })
+  })
 
   await app.register(authRoutes, { prefix: '/api/auth' })
   await app.register(teamRoutes, { prefix: '/api/team' })

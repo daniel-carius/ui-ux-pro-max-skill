@@ -4,9 +4,22 @@ import { MASK_CHAR } from '@shared/kv-registry'
 
 const BULLETS = MASK_CHAR.repeat(10)
 
-/** Segredo: só os últimos 4 caracteres. */
+/** Máscara de segredo sem nenhum trecho do valor (segredo curto ou valor que não é texto). */
+export const SECRET_BULLETS = BULLETS
+
+/**
+ * Tamanho mínimo para a máscara mostrar o fim do segredo: com 16+ caracteres, os
+ * 4 últimos são no máximo 1/4 do valor. Segredo menor sai só com os pontos.
+ */
+export const SECRET_TAIL_MIN_LENGTH = 16
+
+/** Formato da máscara de segredo emitida pelo servidor (maskSecret). */
+export const SECRET_MASK_RE = new RegExp(`^${MASK_CHAR}{10}(?:[^${MASK_CHAR}]{4})?$`, 'u')
+
+/** Segredo: só pontos; com 16+ caracteres, mais os últimos 4 (nunca mais de 1/4 do valor). */
 export function maskSecret(value: string): string {
   if (!value) return ''
+  if (value.length < SECRET_TAIL_MIN_LENGTH) return BULLETS
   return `${BULLETS}${value.slice(-4)}`
 }
 

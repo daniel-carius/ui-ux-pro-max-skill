@@ -14,11 +14,14 @@ import {
   bumpKvVersion,
   canSeeLastIp,
   changeMemberRole,
+  concurrentWriteConflict,
   deactivateMember,
+  isConcurrencyDbError,
   listMembers,
   lockKvVersion,
   reactivateMember,
   readKvVersion,
+  readSnapshot,
   renameMember,
   SUPERADMIN_ROLE_ID,
   TEAM_VERSION_KEY,
@@ -37,9 +40,13 @@ const incomingMember = z.object({
 
 const incomingList = z.array(incomingMember, 'Envie a lista da equipe.').max(MAX_MEMBERS, 'Lista grande demais.')
 
+/**
+ * Lista e versão da equipe. Chamar numa foto só (readSnapshot) ou dentro da transação que grava com a versão
+ * travada: versão e lista precisam ser do mesmo instante (veja readSnapshot).
+ */
 export async function readTeam(db: Db, auth: AuthContext): Promise<KvValue> {
-  const rows = await listMembers(db)
   const v = await readKvVersion(db, TEAM_VERSION_KEY)
+  const rows = await listMembers(db)
   const showIp = canSeeLastIp(auth)
   const updatedAt = rows.reduce<string | null>((max, r) => (!max || r.updated_at > max ? r.updated_at : max), v.updatedAt)
   return { value: rows.map((r) => toPanelMember(r, showIp)), version: v.version, updatedAt }
@@ -78,7 +85,7 @@ export const kvHandlers: KvHandlers = {
   team: {
     async read(ctx: KvContext) {
       if (!canReadKey(ctx.rule, ctx.auth.perms)) throw Errors.forbidden()
-      return readTeam(ctx.app.db, ctx.auth)
+      return readSnapshot(ctx.app.db, (t) => readTeam(t, ctx.auth))
     },
 
     async write(ctx: KvContext, value: unknown, expectedVersion: number | undefined) {
@@ -91,38 +98,44 @@ export const kvHandlers: KvHandlers = {
       }
       const auth = ctx.auth
 
-      return ctx.app.db.tx(async (t) => {
-        const current = await lockKvVersion(t, TEAM_VERSION_KEY)
-        assertKvVersion(current, expectedVersion)
+      try {
+        return await ctx.app.db.tx(async (t) => {
+          const current = await lockKvVersion(t, TEAM_VERSION_KEY)
+          assertKvVersion(current, expectedVersion)
 
-        const rows = await listMembers(t)
-        const byId = new Map(rows.map((r) => [r.id, r]))
-        const added = incoming.filter((m) => !byId.has(m.id)).map((m) => m.id)
-        const removed = rows.filter((r) => !seen.has(r.id)).map((r) => r.id)
-        if (added.length || removed.length) {
-          throw new AppError(
-            403,
-            'campo_nao_permitido',
-            added.length
-              ? 'Para incluir alguém na equipe, use "Criar acesso" ou "Convidar".'
-              : 'Pessoas não são removidas da equipe: desative o acesso.',
-            { fields: ['id'], added, removed },
-          )
-        }
+          const rows = await listMembers(t)
+          const byId = new Map(rows.map((r) => [r.id, r]))
+          const added = incoming.filter((m) => !byId.has(m.id)).map((m) => m.id)
+          const removed = rows.filter((r) => !seen.has(r.id)).map((r) => r.id)
+          if (added.length || removed.length) {
+            throw new AppError(
+              403,
+              'campo_nao_permitido',
+              added.length
+                ? 'Para incluir alguém na equipe, use "Criar acesso" ou "Convidar".'
+                : 'Pessoas não são removidas da equipe: desative o acesso.',
+              { fields: ['id'], added, removed },
+            )
+          }
 
-        const ops = planChanges(byId, incoming)
-        for (const op of ops) {
-          if (op.kind === 'rename') await renameMember(t, auth, op.id, op.value!)
-          else if (op.kind === 'role') await changeMemberRole(t, auth, op.id, op.value!)
-          else if (op.kind === 'reactivate') await reactivateMember(t, auth, op.id)
-          else await deactivateMember(t, auth, op.id)
-        }
-        if (!ops.length) {
-          await writeAudit(t, auth, { action: 'editar', entity: 'Dados · Equipe', summary: 'Equipe salva sem alterações.' })
-        }
-        await bumpKvVersion(t, TEAM_VERSION_KEY, current, auth.user.id)
-        return readTeam(t, auth)
-      })
+          const ops = planChanges(byId, incoming)
+          for (const op of ops) {
+            if (op.kind === 'rename') await renameMember(t, auth, op.id, op.value!)
+            else if (op.kind === 'role') await changeMemberRole(t, auth, op.id, op.value!)
+            else if (op.kind === 'reactivate') await reactivateMember(t, auth, op.id)
+            else await deactivateMember(t, auth, op.id)
+          }
+          if (!ops.length) {
+            await writeAudit(t, auth, { action: 'editar', entity: 'Dados · Equipe', summary: 'Equipe salva sem alterações.' })
+          }
+          await bumpKvVersion(t, TEAM_VERSION_KEY, current, auth.user.id)
+          return readTeam(t, auth)
+        })
+      } catch (e) {
+        // impasse/serialização/cargo que sumiu no meio: 409 (o painel recarrega), nunca 500
+        if (isConcurrencyDbError(e)) throw await concurrentWriteConflict(ctx.app.db, TEAM_VERSION_KEY)
+        throw e
+      }
     },
   },
 }

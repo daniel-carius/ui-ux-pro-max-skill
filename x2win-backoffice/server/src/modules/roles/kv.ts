@@ -16,7 +16,19 @@ import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { writeAudit } from '../../services/audit'
 import { listRoles, toCents } from '../../services/roles-repo'
 import type { AuthContext } from '../../types'
-import { assertKvVersion, bumpKvVersion, GRANT_PERM, lockKvVersion, readKvVersion, SUPERADMIN_ROLE_ID } from '../team/service'
+import {
+  assertKvVersion,
+  bumpKvVersion,
+  concurrentWriteConflict,
+  GRANT_PERM,
+  isConcurrencyDbError,
+  lockKvVersion,
+  readKvVersion,
+  readSnapshot,
+  SUPERADMIN_ROLE_ID,
+  TEAM_VERSION_KEY,
+  versionConflict,
+} from '../team/service'
 
 /** Linha de settings com a versão da lista de cargos ({ version }). */
 export const ROLES_VERSION_KEY = 'cargos.lista'
@@ -95,9 +107,13 @@ function assertGrant(auth: AuthContext, ...roles: Pick<Role, 'permissions'>[]) {
   }
 }
 
+/**
+ * Lista e versão dos cargos. Chamar numa foto só (readSnapshot) ou dentro da transação que grava com a versão
+ * travada: versão e lista precisam ser do mesmo instante (veja readSnapshot).
+ */
 export async function readRoles(db: Db): Promise<KvValue> {
-  const roles = await listRoles(db)
   const v = await readKvVersion(db, ROLES_VERSION_KEY)
+  const roles = await listRoles(db)
   const row = await db.one<{ at: string | null }>('select max(updated_at) as at from roles')
   const updatedAt = [v.updatedAt, row?.at ?? null].filter((x): x is string => !!x).sort().pop() ?? null
   return { value: roles, version: v.version, updatedAt }
@@ -144,7 +160,7 @@ export const kvHandlers: KvHandlers = {
   roles: {
     async read(ctx: KvContext) {
       if (!canReadKey(ctx.rule, ctx.auth.perms)) throw Errors.forbidden()
-      return readRoles(ctx.app.db)
+      return readSnapshot(ctx.app.db, (t) => readRoles(t))
     },
 
     async write(ctx: KvContext, value: unknown, expectedVersion: number | undefined) {
@@ -165,6 +181,10 @@ export const kvHandlers: KvHandlers = {
 
       try {
         return await ctx.app.db.tx(async (t) => {
+          // mesma trava das alterações da equipe (sempre antes da de cargos: ordem fixa, sem impasse entre elas).
+          // Cargos e equipe leem e gravam as mesmas linhas (users.role_id, roles): sem a trava comum, uma troca de
+          // cargo no meio de uma exclusão levaria uma pessoa ativa para outro cargo sem ninguém aprovar.
+          const teamVersion = await lockKvVersion(t, TEAM_VERSION_KEY)
           const current = await lockKvVersion(t, ROLES_VERSION_KEY)
           assertKvVersion(current, expectedVersion)
           const stored = await listRoles(t)
@@ -214,27 +234,38 @@ export const kvHandlers: KvHandlers = {
           for (const r of deleted) assertGrant(auth, r)
 
           // exclusões primeiro: liberam nomes para os cargos novos
+          let movedTotal = 0
           for (const r of deleted) {
-            const inUse = await t.query<{ name: string; status: string }>(
-              `select name, status from users where role_id = $1 and status in ('ativo', 'convidado') order by name limit 10`,
+            // trava o cargo (novas referências em users.role_id esperam) e as pessoas dele, em ordem fixa de id
+            await t.query('select 1 from roles where id = $1 for update', [r.id])
+            const members = await t.query<{ id: string; name: string; status: string }>(
+              'select id, name, status from users where role_id = $1 order by id for update',
               [r.id],
             )
+            const inUse = members.filter((u) => u.status !== 'desligado').sort((a, b) => a.name.localeCompare(b.name))
             if (inUse.length) {
               throw Errors.invalid(
-                `O cargo ${r.name} ainda é usado por ${inUse.map((u) => `${u.name} (${u.status})`).join(', ')}. Troque o cargo dessas pessoas em Equipe antes de excluir.`,
+                `O cargo ${r.name} ainda é usado por ${inUse
+                  .slice(0, 10)
+                  .map((u) => `${u.name} (${u.status})`)
+                  .join(', ')}. Troque o cargo dessas pessoas em Equipe antes de excluir.`,
                 { id: r.id },
               )
             }
             // pessoas desligadas não impedem a exclusão: passam para o cargo do sistema mais restrito
-            let moved = 0
-            const gone = await t.one<{ n: number }>(`select count(*)::int as n from users where role_id = $1`, [r.id])
-            if (gone?.n) {
+            if (members.length) {
               const fallback = (await listRoles(t))
                 .filter((x) => x.system && x.id !== r.id && !isAdminLevelRole(x))
                 .sort((a, b) => a.permissions.length - b.permissions.length || a.id.localeCompare(b.id))[0]
               if (!fallback) throw Errors.invalid(`Não há cargo do sistema para receber as pessoas desligadas de ${r.name}.`, { id: r.id })
-              const rows = await t.query(`update users set role_id = $2, updated_at = now() where role_id = $1 returning id`, [r.id, fallback.id])
-              moved = rows.length
+              // só quem está desligado muda de cargo; qualquer diferença com o conjunto travado desfaz tudo
+              const rows = await t.query<{ id: string }>(
+                `update users set role_id = $2, updated_at = now() where role_id = $1 and status = 'desligado' returning id`,
+                [r.id, fallback.id],
+              )
+              if (rows.length !== members.length) throw versionConflict(current)
+              const moved = rows.length
+              movedTotal += moved
               await t.query('delete from roles where id = $1', [r.id])
               await writeAudit(t, auth, {
                 action: 'excluir',
@@ -250,6 +281,8 @@ export const kvHandlers: KvHandlers = {
               summary: `Cargo personalizado excluído (${r.permissions.length} permissões).`,
             })
           }
+          // pessoas mudaram de cargo: a lista da equipe mudou junto
+          if (movedTotal) await bumpKvVersion(t, TEAM_VERSION_KEY, teamVersion, auth.user.id)
 
           for (const c of changes) {
             await t.query(
@@ -284,6 +317,8 @@ export const kvHandlers: KvHandlers = {
         })
       } catch (e) {
         if (isUniqueViolation(e)) throw Errors.invalid('Já existe um cargo com este nome.', { field: 'name' })
+        // impasse/serialização/referência que sumiu no meio: 409 (o painel recarrega), nunca 500
+        if (isConcurrencyDbError(e)) throw await concurrentWriteConflict(ctx.app.db, ROLES_VERSION_KEY)
         throw e
       }
     },

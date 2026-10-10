@@ -3,7 +3,7 @@
 // API com o nginx na borda ou atrás de um balanceador. A parte com nginx real é pulada se não houver nginx/openssl.
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
 import net from 'node:net'
@@ -127,6 +127,62 @@ describe('deploy/nginx.conf e deploy/security-headers.conf (estático)', () => {
     expect(read('Dockerfile.api')).toMatch(/esbuild src\/migrate\.ts/)
     expect(read('deploy/db-init/10-x2win-app-role.sh')).toMatch(/create role x2win_app login password :'app_pw' nosuperuser/)
   })
+
+  // r3-process-resilience-and-restart-2: sem a chave restart o Docker usa "no" e um crash da API, do banco ou um
+  // reinício do dockerd/host deixava o painel fora do ar até alguém intervir. "on-failure" não basta: o Docker não o
+  // aplica quando o daemon reinicia.
+  it('compose: db, api e web voltam sozinhos (restart unless-stopped); só o migrate é passo único', () => {
+    const compose = read('docker-compose.yml')
+    const block = (name: string) => {
+      const lines = compose.split('\n')
+      const start = lines.indexOf(`  ${name}:`)
+      expect(start, `serviço ${name}`).toBeGreaterThan(-1)
+      const end = lines.findIndex((l, i) => i > start && /^ {0,2}\S/.test(l))
+      return lines.slice(start + 1, end).join('\n')
+    }
+    for (const name of ['db', 'api', 'web']) expect(block(name), name).toMatch(/^ {4}restart: unless-stopped$/m)
+    expect(block('migrate')).toMatch(/^ {4}restart: "no"$/m)
+    // a sonda do contêiner olha /api/health, que agora consulta o banco (core.test.ts)
+    expect(read('Dockerfile.api')).toMatch(/^HEALTHCHECK .*http:\/\/127\.0\.0\.1:3333\/api\/health/m)
+  })
+
+  // r3-process-resilience-and-restart-3: "proxy_pass http://api:3333;" resolvia "api" uma vez, ao carregar: com a API
+  // parada o nginx nem subia, e com a API recriada em outro IP ficava em 502 até reiniciar o web. O cenário com DNS
+  // do Docker simulado está em core-deploy-dns.test.ts.
+  it('nginx resolve "api" pelo DNS do Docker a cada requisição (variável + resolver), sem fixar o IP na subida', () => {
+    const start = conf.indexOf('location /api/ {')
+    const api = conf.slice(start, conf.indexOf('\n  }', start))
+    expect(api).toMatch(/^\s*resolver 127\.0\.0\.11 valid=10s ipv6=off;$/m)
+    expect(api).toMatch(/^\s*set \$x2w_api http:\/\/api:3333;$/m)
+    expect(api).toMatch(/^\s*proxy_pass \$x2w_api;$/m)
+    // nenhum proxy_pass com nome fixo (resolvido só na subida) em lugar nenhum
+    expect(conf).not.toMatch(/proxy_pass\s+https?:\/\/[a-z]/)
+  })
+})
+
+// O próprio Compose renderiza o arquivo (sem daemon), numa cópia com um deploy/.env falso: a política de reinício
+// vale de fato para db, api e web. Sem o plugin do Compose, pulado (a checagem estática acima continua valendo).
+const HAS_COMPOSE = spawnSync('docker', ['compose', 'version'], { stdio: 'ignore' }).status === 0
+describe.skipIf(!HAS_COMPOSE)('docker compose config (renderizado)', () => {
+  it('db, api e web com restart unless-stopped; migrate sem reinício', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'x2w-compose-'))
+    try {
+      for (const f of ['docker-compose.yml', 'Dockerfile.api', 'Dockerfile.web']) copyFileSync(join(ROOT, f), join(scratch, f))
+      cpSync(join(ROOT, 'deploy'), join(scratch, 'deploy'), { recursive: true })
+      writeFileSync(join(scratch, 'deploy/.env'), `POSTGRES_PASSWORD=p1\nAPP_DB_PASSWORD=p2\nAPP_SECRET=${'x'.repeat(48)}\n`)
+      const out = execFileSync('docker', ['compose', '--env-file', 'deploy/.env', 'config', '--format', 'json'], { cwd: scratch, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      const services = JSON.parse(out).services as Record<string, { restart?: string }>
+      expect(Object.keys(services).sort()).toEqual(['api', 'db', 'migrate', 'web'])
+      expect(Object.fromEntries(Object.entries(services).map(([n, v]) => [n, v.restart]))).toEqual({
+        db: 'unless-stopped',
+        api: 'unless-stopped',
+        web: 'unless-stopped',
+        migrate: 'no',
+      })
+    } finally {
+      rmSync(scratch, { recursive: true, force: true })
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -213,6 +269,29 @@ function request(
 /** Quantas vezes um cabeçalho veio na resposta (duplicado = valores conflitantes). */
 const occurrences = (r: Res, name: string) => r.raw.filter((_, i) => i % 2 === 0).filter((h) => h.toLowerCase() === name).length
 
+// r3-runtime-resilience-nginx-upstream: com "api" fora do DNS (contêiner parado), o nginx recusava a configuração
+// ([emerg] host not found in upstream "api") e o web nem subia. O bloco location /api/ entregue, sem mudanças,
+// agora passa no nginx -t mesmo sem "api" resolvível (o cenário completo, com DNS do Docker, em core-deploy-dns).
+describe.skipIf(!HAS_TOOLS)('location /api/ entregue com "api" fora do DNS', () => {
+  it('nginx -t aceita a configuração (o nome só é resolvido por requisição)', () => {
+    const start = NGINX_CONF.indexOf('location /api/ {')
+    const location = NGINX_CONF.slice(start, NGINX_CONF.indexOf('\n  }', start) + 4)
+    expect(location).toContain('proxy_pass $x2w_api;')
+    const dir = mkdtempSync(join(tmpdir(), 'x2w-nginx-t-'))
+    try {
+      writeFileSync(
+        join(dir, 'nginx.conf'),
+        `pid ${dir}/nginx.pid;\nerror_log ${dir}/error.log;\nevents {}\nhttp {\n  access_log off;\n  client_body_temp_path ${dir}; proxy_temp_path ${dir}; fastcgi_temp_path ${dir}; uwsgi_temp_path ${dir}; scgi_temp_path ${dir};\n  server {\n    listen 127.0.0.1:18990;\n    ${location}\n  }\n}\n`,
+      )
+      const t = spawnSync('nginx', ['-t', '-p', dir, '-c', join(dir, 'nginx.conf')], { encoding: 'utf8' })
+      expect(t.status, t.stderr).toBe(0)
+      expect(t.stderr).not.toContain('host not found')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe.skipIf(!HAS_TOOLS)('deploy/nginx.conf rodando no nginx real', () => {
   let app: FastifyInstance
   let nginx: ChildProcess
@@ -253,7 +332,7 @@ describe.skipIf(!HAS_TOOLS)('deploy/nginx.conf rodando no nginx real', () => {
         .replace('/etc/nginx/certs/fullchain.pem', join(dir, 'fullchain.pem'))
         .replace('/etc/nginx/certs/privkey.pem', join(dir, 'privkey.pem'))
         .replace('root /usr/share/nginx/html;', `root ${html};`)
-        .replace('proxy_pass http://api:3333;', `proxy_pass http://127.0.0.1:${apiPort};`)
+        .replace('set $x2w_api http://api:3333;', `set $x2w_api http://127.0.0.1:${apiPort};`)
         .split(`include ${SNIPPET_PATH};`)
         .join(`include ${join(ROOT, 'deploy/security-headers.conf')};`)
       if (!supportsHttp2On) c = c.replace(/http2 on;/, '')

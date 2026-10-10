@@ -2,9 +2,13 @@
 #  1. copie deploy/.env.example para deploy/.env e preencha os segredos;
 #  2. ponha o certificado do domínio do painel em deploy/certs/fullchain.pem e deploy/certs/privkey.pem.
 # Suba com: docker compose --env-file deploy/.env up -d --build
+# db, api e web têm restart: unless-stopped: voltam sozinhos depois de um crash e quando o dockerd ou o host
+# reiniciam (deixe o Docker ligado no boot: systemctl enable docker). O Compose não reinicia contêiner "unhealthy":
+# monitore de fora https://<painel>/api/health (responde 503 quando a API não alcança o banco).
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: x2win
       # dono das tabelas (superusuário do contêiner): só o serviço "migrate" usa esta senha
@@ -29,6 +33,7 @@ services:
     environment:
       DATABASE_URL: postgres://x2win:${POSTGRES_PASSWORD}@db:5432/x2win
     command: ["node", "dist/migrate.js"]
+    # passo único: sai com erro se o papel x2win_app não existir (crie-o e suba de novo)
     restart: "no"
     depends_on:
       db:
@@ -38,6 +43,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+    restart: unless-stopped
     env_file: deploy/.env
     environment:
       # papel de execução: não é dono de nenhuma tabela; na auditoria só lê e inclui (sem TRUNCATE nem DDL)
@@ -57,6 +63,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
+    restart: unless-stopped
     ports:
       # 80 só redireciona para 443 (o redirecionamento usa a porta padrão do HTTPS)
       - "80:80"

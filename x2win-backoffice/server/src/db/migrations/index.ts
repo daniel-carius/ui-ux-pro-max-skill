@@ -201,29 +201,19 @@ create trigger audit_log_no_truncate before truncate on audit_log
 
 -- Papel de execução da API (${RUNTIME_ROLE}). Quem roda as migrações é o dono das tabelas; a API conecta com um
 -- usuário deste papel, que não é dono de nada: não consegue TRUNCATE, ALTER/DROP TRIGGER nem DROP TABLE.
--- Tabelas de operação: leitura e escrita. Auditoria: só leitura e inclusão. Controle de migrações: só leitura.
 -- O usuário com login e senha é criado pela implantação (deploy/db-init); aqui, se ainda não existir, o papel
--- nasce sem login. Sem permissão para criar papéis, a migração segue sem ele (a API continua com o dono).
+-- nasce sem login. Os privilégios dele não ficam nesta migração: migrate() os reaplica em toda execução
+-- (RUNTIME_GRANTS_SQL), então "crie o papel e rode as migrações de novo" funciona mesmo depois de a 002 constar
+-- como aplicada. (Versões anteriores concediam os privilégios aqui; o estado final do banco é o mesmo.)
 do $$
 begin
   if not exists (select 1 from pg_roles where rolname = '${RUNTIME_ROLE}') then
     begin
       create role ${RUNTIME_ROLE} nologin;
     exception when insufficient_privilege then
-      raise notice 'sem permissão para criar o papel ${RUNTIME_ROLE}: crie-o (deploy/db-init) e rode as migrações de novo';
-      return;
+      raise notice 'sem permissão para criar o papel ${RUNTIME_ROLE}: crie-o (deploy/db-init/10-x2win-app-role.sh) e rode "npm run migrate" de novo';
     end;
   end if;
-  grant usage on schema public to ${RUNTIME_ROLE};
-  grant select, insert, update, delete on all tables in schema public to ${RUNTIME_ROLE};
-  grant usage, select on all sequences in schema public to ${RUNTIME_ROLE};
-  revoke all on table audit_log from ${RUNTIME_ROLE};
-  grant select, insert on table audit_log to ${RUNTIME_ROLE};
-  revoke all on table schema_migrations from ${RUNTIME_ROLE};
-  grant select on table schema_migrations to ${RUNTIME_ROLE};
-  -- tabelas das próximas migrações (criadas pelo mesmo dono). Tabela só de inclusão: revogue na migração dela.
-  alter default privileges in schema public grant select, insert, update, delete on tables to ${RUNTIME_ROLE};
-  alter default privileges in schema public grant usage, select on sequences to ${RUNTIME_ROLE};
 end
 $$;
 `
@@ -232,3 +222,64 @@ export const MIGRATIONS: Migration[] = [
   { id: '001_init', sql: m001 },
   { id: '002_audit_append_only', sql: m002 },
 ]
+
+/**
+ * Tabelas em que o papel de execução tem menos que leitura e escrita, com os privilégios que ele tem nelas.
+ * RUNTIME_GRANTS_SQL reaplica exatamente estes privilégios em toda execução de migrate(). Tabela nova só de
+ * inclusão (ou só leitura): faça o REVOKE na migração que a cria E inclua-a aqui.
+ */
+export const RUNTIME_TABLE_LIMITS: Readonly<Record<string, string>> = {
+  audit_log: 'select, insert',
+  schema_migrations: 'select',
+}
+
+const limitedTables = Object.keys(RUNTIME_TABLE_LIMITS)
+  .map((t) => `'${t}'`)
+  .join(', ')
+const limitStatements = Object.entries(RUNTIME_TABLE_LIMITS)
+  .map(
+    ([t, privs]) => `  if to_regclass('public.${t}') is not null then
+    revoke all on table public.${t} from ${RUNTIME_ROLE};
+    ${privs ? `grant ${privs} on table public.${t} to ${RUNTIME_ROLE};` : ''}
+  end if;`,
+  )
+  .join('\n')
+
+/**
+ * Privilégios do papel de execução, idempotentes: migrate() roda isto depois das migrações, em TODA execução, quando
+ * quem conecta é o dono das tabelas (ou superusuário). Sem o papel, só avisa (migrate() decide se falha).
+ *  - schema public: USAGE;
+ *  - tabelas em que o papel ainda não tem privilégio nenhum (criadas antes de ele existir): leitura e escrita.
+ *    Tabela em que algum privilégio já foi revogado não é alargada;
+ *  - RUNTIME_TABLE_LIMITS: revoga tudo e concede só o que está lá (auditoria: SELECT e INSERT);
+ *  - sequências: USAGE e SELECT; e os mesmos privilégios por padrão para as tabelas das próximas migrações.
+ */
+export const RUNTIME_GRANTS_SQL = `
+do $$
+declare
+  app oid := (select oid from pg_roles where rolname = '${RUNTIME_ROLE}');
+  t record;
+begin
+  if app is null then
+    raise notice 'o papel ${RUNTIME_ROLE} não existe: crie-o (deploy/db-init/10-x2win-app-role.sh) e rode "npm run migrate" de novo';
+    return;
+  end if;
+  grant usage on schema public to ${RUNTIME_ROLE};
+  for t in
+    select c.oid::regclass as rel
+      from pg_class c
+     where c.relnamespace = 'public'::regnamespace
+       and c.relkind in ('r', 'p', 'v', 'm', 'f')
+       and c.relname not in (${limitedTables})
+       and pg_has_role(c.relowner, 'USAGE')
+       and not exists (select 1 from aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a where a.grantee = app)
+  loop
+    execute format('grant select, insert, update, delete on table %s to ${RUNTIME_ROLE}', t.rel);
+  end loop;
+  grant usage, select on all sequences in schema public to ${RUNTIME_ROLE};
+${limitStatements}
+  alter default privileges in schema public grant select, insert, update, delete on tables to ${RUNTIME_ROLE};
+  alter default privileges in schema public grant usage, select on sequences to ${RUNTIME_ROLE};
+end
+$$;
+`

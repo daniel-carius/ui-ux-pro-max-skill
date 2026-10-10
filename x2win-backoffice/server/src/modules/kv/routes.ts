@@ -13,7 +13,7 @@
 // auditoria do servidor ('revelar'), uma vez por sessão e chave a cada 10 minutos.
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { canReadKey, canWriteKey, findKvRule, isLocalOnlyKey, type KvRule } from '@shared/kv-registry'
+import { canReadKey, canWriteKey, findKvRule, isLocalOnlyKey, seesOwnerPage, type KvRule } from '@shared/kv-registry'
 import type { KvGetResponse } from '@shared/api'
 import { AppError, Errors } from '../../errors'
 import { requireActive } from '../../http'
@@ -27,7 +27,7 @@ import { auditEntity, genericHandler } from './generic'
 import { kvHandlers as ggrKv } from './ggr'
 import { assertStorableJson } from './json'
 import { kvHandlers as playersKv, registerPlayerImportRoute } from './players'
-import { readPolicy, redact } from './redact'
+import { project, readPolicy, redact } from './redact'
 import { kvHandlers as statusHistoryKv } from './status-history'
 import { decodeRow, encryptAtRest, encryptPlainRows, HISTORY_ENTRY, historyBaseKey, listHistory, loadHistory } from './store'
 import { kvHandlers as transactionsKv, registerTransactionImportRoute } from './transactions'
@@ -70,8 +70,17 @@ function resolve(req: FastifyRequest): Resolved {
   return { auth, key, rule }
 }
 
+/**
+ * O que a pessoa recebe do valor: projeção mínima (KvRule.teamView) para quem não vê
+ * a tela dona de uma configuração 'equipe', e segredos/dados pessoais mascarados.
+ */
+function visibleValue(key: string, value: unknown, rule: KvRule, auth: AuthContext): unknown {
+  const v = rule.teamView && key === rule.prefix && !seesOwnerPage(rule, auth.perms) ? project(value, rule.teamView) : value
+  return redact(v, readPolicy(rule, auth.perms))
+}
+
 function respond(key: string, out: KvValue, rule: KvRule, auth: AuthContext): KvGetResponse {
-  return { key, value: redact(out.value, readPolicy(rule, auth.perms)), version: out.version, updatedAt: out.updatedAt }
+  return { key, value: visibleValue(key, out.value, rule, auth), version: out.version, updatedAt: out.updatedAt }
 }
 
 /** Quantos registros o valor tem (lista) — para o resumo da auditoria. */
@@ -170,7 +179,7 @@ export default async function routes(app: FastifyInstance, opts: { handlers?: Kv
     const value = decodeRow(row, app.cipher)
     await auditPiiRead(auth, key, rule, value, `versão ${entry as string} lida`)
     reply.header('cache-control', 'no-store')
-    return { key, entry, version: row.version, updatedAt: row.updated_at, value: redact(value, readPolicy(rule, auth.perms)) }
+    return { key, entry, version: row.version, updatedAt: row.updated_at, value: visibleValue(key, value, rule, auth) }
   })
 
   registerAffiliateWithdrawalRoutes(app)

@@ -2,7 +2,9 @@
 // equipe.membros. Toda alteração roda dentro de uma transação que trava a
 // versão da equipe (settings 'equipe.membros'), então duas gravações
 // simultâneas nunca deixam o sistema sem Superadmin nem passam por cima uma
-// da outra.
+// da outra. A gravação de cargos (cargos.lista) pega esta mesma trava antes da
+// dela (ordem fixa: equipe.membros, depois cargos.lista), porque as duas mexem
+// em users.role_id e em roles.
 import { isAdminLevelRole, type Role } from '@shared/permissions'
 import { z } from 'zod'
 import { SECURITY } from '../../config'
@@ -10,7 +12,7 @@ import type { Db } from '../../db'
 import { AppError, Errors } from '../../errors'
 import { hashPassword, newId, passwordProblem, randomToken, sha256, temporaryPassword } from '../../lib/crypto'
 import { writeAudit } from '../../services/audit'
-import { getRole } from '../../services/roles-repo'
+import { getRole, rowToRole, type RoleRow } from '../../services/roles-repo'
 import { revokeUserSessions } from '../../services/sessions'
 import type { AuthContext, AuthUser } from '../../types'
 
@@ -60,14 +62,51 @@ export async function readKvVersion(db: Db, key: string): Promise<{ version: num
   return { version: Number(row?.value?.version ?? 0), updatedAt: row?.updated_at ?? null }
 }
 
+/**
+ * Leitura de uma chave de domínio numa foto só: a versão e os dados saem do mesmo instante do banco
+ * (REPEATABLE READ, somente leitura). Sem isso, duas instruções soltas podem ver momentos diferentes: uma gravação
+ * que termina entre elas faz a leitura devolver o conteúdo velho com a versão nova, e o painel, ao salvar a lista
+ * inteira com essa versão, desfaria em silêncio a alteração da outra pessoa (sem 409).
+ * Chamar com o banco fora de transação (app.db): o SET TRANSACTION precisa ser a primeira instrução.
+ */
+export async function readSnapshot<T>(db: Db, fn: (t: Db) => Promise<T>): Promise<T> {
+  return db.tx(async (t) => {
+    await t.query('set transaction isolation level repeatable read, read only')
+    return fn(t)
+  })
+}
+
+/** Erros do banco causados por gravações simultâneas: impasse, falha de serialização e referência que sumiu no meio. */
+const CONCURRENCY_DB_CODES = new Set(['40P01', '40001', '23503'])
+
+export function isConcurrencyDbError(e: unknown): boolean {
+  return !!e && typeof e === 'object' && CONCURRENCY_DB_CODES.has(String((e as { code?: unknown }).code))
+}
+
+/**
+ * 409 versao_desatualizada para um erro de gravação simultânea (em vez de 500): o painel recarrega a chave e a
+ * pessoa refaz a alteração. A versão em details é a atual (lida depois que a transação foi desfeita).
+ */
+export async function concurrentWriteConflict(db: Db, key: string): Promise<AppError> {
+  const v = await readKvVersion(db, key).catch(() => null)
+  return new AppError(409, 'versao_desatualizada', 'Outra alteração foi gravada ao mesmo tempo que a sua. Recarregue a tela e tente de novo.', {
+    version: v?.version ?? 0,
+  })
+}
+
 /** Executa uma alteração da equipe travando e avançando a versão da lista. */
 export async function withTeamLock<T>(db: Db, actorId: string | null, fn: (t: Db) => Promise<T>): Promise<T> {
-  return db.tx(async (t) => {
-    const current = await lockKvVersion(t, TEAM_VERSION_KEY)
-    const out = await fn(t)
-    await bumpKvVersion(t, TEAM_VERSION_KEY, current, actorId)
-    return out
-  })
+  try {
+    return await db.tx(async (t) => {
+      const current = await lockKvVersion(t, TEAM_VERSION_KEY)
+      const out = await fn(t)
+      await bumpKvVersion(t, TEAM_VERSION_KEY, current, actorId)
+      return out
+    })
+  } catch (e) {
+    if (isConcurrencyDbError(e)) throw await concurrentWriteConflict(db, TEAM_VERSION_KEY)
+    throw e
+  }
 }
 
 // ---------- Leitura no formato do painel ----------
@@ -269,10 +308,20 @@ async function requireMember(t: Db, id: string): Promise<MemberRow> {
   return m
 }
 
-async function requireRole(t: Db, id: string): Promise<Role> {
-  const role = await getRole(t, id)
+/**
+ * Cargo de destino. Com `lock` (dentro da transação que grava) a linha fica travada (FOR SHARE) até o fim: uma
+ * exclusão ou alteração simultânea do cargo espera, e um cargo excluído no meio vira "Cargo não encontrado" (400)
+ * em vez de violação de chave estrangeira (500). A conferência de cargo administrativo vale até o commit.
+ */
+async function requireRole(t: Db, id: string, lock = true): Promise<Role> {
+  const role = lock ? await lockRoleRow(t, id) : await getRole(t, id)
   if (!role) throw TeamErrors.unknownRole()
   return role
+}
+
+async function lockRoleRow(t: Db, id: string): Promise<Role | null> {
+  const r = await t.one<RoleRow>('select * from roles where id = $1 for share', [id])
+  return r ? rowToRole(r) : null
 }
 
 /** Cargo de nível administrativo só com cargos.conceder. */
@@ -425,20 +474,20 @@ export function strongTemporaryPassword(): string {
 /** Cria a pessoa já ativa com senha temporária (troca obrigatória no 1º acesso). */
 export async function createDirectMember(db: Db, auth: AuthContext, input: DirectInput): Promise<{ member: MemberRow; temporaryPassword: string }> {
   const name = memberNameSchema.parse(input.name)
-  const check = async (t: Db) => {
-    const role = await requireRole(t, input.roleId)
+  const check = async (t: Db, lock: boolean) => {
+    const role = await requireRole(t, input.roleId, lock)
     assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos cria acessos com cargo administrativo.')
     await assertEmailFree(t, input.email)
     await assertNameFree(t, name)
     return role
   }
   // o hash é lento: confere o barato antes e calcula fora da transação (que confere de novo, com trava)
-  await check(db)
+  await check(db, false)
   const password = strongTemporaryPassword()
   const hash = await hashPassword(password)
   try {
     const member = await withTeamLock(db, auth.user.id, async (t) => {
-      const role = await check(t)
+      const role = await check(t, true)
       const id = newId('u')
       await t.query(
         `insert into users (id, name, email, role_id, status, password_hash, must_change_password)

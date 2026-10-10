@@ -7,7 +7,16 @@ import { toCents } from './services/roles-repo'
 import { writeAudit } from './services/audit'
 import { computeStage } from './modules/auth/service'
 import { resetAllowlistFromEnv } from './modules/panel-security/kv'
-import { checkMemberName, namesConflict } from './modules/team/service'
+import { ROLES_VERSION_KEY } from './modules/roles/kv'
+import { bumpKvVersion, checkMemberName, lockKvVersion, namesConflict } from './modules/team/service'
+
+/**
+ * Avança a versão de cargos.lista depois de uma mudança feita fora da tela (subida da API). Um painel que leu os
+ * cargos antes do reinício recebe 409 ao salvar e recarrega, em vez de gravar por cima do que a subida acertou.
+ */
+async function bumpRolesVersion(app: FastifyInstance) {
+  await app.db.tx(async (t) => bumpKvVersion(t, ROLES_VERSION_KEY, await lockKvVersion(t, ROLES_VERSION_KEY), null))
+}
 
 /**
  * Cria os cargos que faltam, sem alterar nem recriar os que a operação mexeu.
@@ -20,6 +29,7 @@ import { checkMemberName, namesConflict } from './modules/team/service'
 export async function ensureRoles(app: FastifyInstance) {
   const count = await app.db.one<{ n: number }>('select count(*)::int as n from roles')
   const firstBoot = (count?.n ?? 0) === 0
+  let changed = false
   for (const r of seedRoles()) {
     if (!r.system && !firstBoot) continue
     // sem alvo no "on conflict": vale para o id e para o nome (lower(name))
@@ -28,7 +38,10 @@ export async function ensureRoles(app: FastifyInstance) {
        values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict do nothing returning id`,
       [r.id, r.name, r.description, r.system, r.permissions, r.require2fa, toCents(r.approvalCeiling), r.color],
     )
-    if (inserted.length) continue
+    if (inserted.length) {
+      changed = true
+      continue
+    }
     const sameId = await app.db.one('select 1 from roles where id = $1', [r.id])
     if (!sameId) {
       const clash = await app.db.one<{ id: string; name: string }>('select id, name from roles where lower(name) = lower($1)', [r.name])
@@ -40,7 +53,14 @@ export async function ensureRoles(app: FastifyInstance) {
   }
   // o Superadmin sempre tem todas as permissões do catálogo atual (inclusive as novas)
   const all = seedRoles().find((r) => r.id === SUPERADMIN_ROLE_ID)!.permissions
-  await app.db.query('update roles set permissions = $1, approval_ceiling_cents = null where id = $2', [all, SUPERADMIN_ROLE_ID])
+  const fixed = await app.db.query(
+    `update roles set permissions = $1, approval_ceiling_cents = null
+      where id = $2 and (permissions is distinct from $1::text[] or approval_ceiling_cents is not null) returning id`,
+    [all, SUPERADMIN_ROLE_ID],
+  )
+  if (fixed.length) changed = true
+  // instalação nova: ninguém leu os cargos ainda (versão continua 0)
+  if (changed && !firstBoot) await bumpRolesVersion(app)
 }
 
 /**
@@ -51,6 +71,7 @@ export async function ensureRoles(app: FastifyInstance) {
 export async function enforceSuperadmin2fa(app: FastifyInstance): Promise<boolean> {
   const changed = await app.db.query<{ name: string }>('update roles set require_2fa = true where id = $1 and not require_2fa returning name', [SUPERADMIN_ROLE_ID])
   if (!changed.length) return false
+  await bumpRolesVersion(app)
   await writeAudit(
     app.db,
     { id: null, name: 'Sistema', ip: '' },

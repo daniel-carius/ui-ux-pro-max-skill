@@ -40,7 +40,11 @@ export interface KvRule {
    * 'servidor' = só o servidor grava; o painel recebe 403.
    */
   write?: string[] | 'servidor'
-  /** contém segredos: cifrado em repouso e mascarado na leitura */
+  /**
+   * contém segredos: cifrado em repouso e mascarado na leitura (só pontos; com 16+
+   * caracteres, mais os 4 últimos). Na gravação, só a máscara exata mantém o segredo, e
+   * só se o objeto que o guarda não mudou de destino (host, porta, URL, conta…).
+   */
   secrets?: boolean
   /** contém dados pessoais: mascarados para quem não tem a permissão indicada */
   pii?: { revealPermission: string }
@@ -69,6 +73,12 @@ export interface KvRule {
   history?: boolean
   /** tamanho máximo do valor gravado (bytes do JSON). Padrão: KV_DEFAULT_MAX_BYTES. */
   maxBytes?: number
+  /**
+   * leitura 'equipe' de uma configuração com dados de conta: quem não vê a tela dona
+   * (<page>.ver/.editar) recebe só estes caminhos ("a.b") do valor da chave exata
+   * (projeção mínima feita pelo servidor; o resto nem sai mascarado).
+   */
+  teamView?: string[]
 }
 
 /** Tamanho máximo padrão do valor de uma chave (JSON). */
@@ -264,9 +274,27 @@ export const KV_RULES: KvRule[] = [
   { prefix: 'config.dominios.verificacoes', page: 'dominios', read: 'equipe', write: ['dominios.ver'], history: true },
   { prefix: 'config.paises.bloqueados', page: 'paises', read: 'equipe', history: true },
   { prefix: 'config.tracking', page: 'tracking', read: 'tela', secrets: true, children: ['testes'] },
-  { prefix: 'config.gateways', page: 'gateways', read: 'tela', readPages: ['depositos'], secrets: true, children: ['contas', 'roteamento'] },
-  // status das contas (conectada ou não) é lido por Disparos e Jornadas; segredos saem mascarados
-  { prefix: 'config.integracoes', page: 'integracoes', read: 'equipe', secrets: true, children: ['ultimo-teste'] },
+  // só Gateways lê (a tela de Depósitos usa os nomes fixos dos gateways, não esta configuração)
+  { prefix: 'config.gateways', page: 'gateways', read: 'tela', secrets: true, children: ['contas', 'roteamento'] },
+  // Disparos, Jornadas e Templates de e-mail leem só o remetente e o status das contas (teamView);
+  // servidor, usuário, porta, IDs de conta e chaves só para quem vê Integrações (segredos mascarados)
+  {
+    prefix: 'config.integracoes',
+    page: 'integracoes',
+    read: 'equipe',
+    secrets: true,
+    children: ['ultimo-teste'],
+    teamView: [
+      'emailProvider',
+      'smtp.fromName',
+      'smtp.fromEmail',
+      'mailgun.connected',
+      'mailgun.domain',
+      'sendwork.connected',
+      'sendwork.smsSender',
+      'sendwork.rcsAgent',
+    ],
+  },
   { prefix: 'config.templates-email', page: 'templates-email', read: 'equipe', maxBytes: IMAGES },
   { prefix: 'config.equipe.convites', page: 'equipe', read: 'tela' },
   { prefix: 'equipe.membros', page: 'equipe', read: 'equipe', domain: 'team' },
@@ -302,6 +330,11 @@ export function isLocalOnlyKey(key: string): boolean {
 export function writePermissions(rule: KvRule): string[] {
   if (rule.write === 'servidor') return []
   return rule.write ?? [`${rule.page}.editar`]
+}
+
+/** Vê a tela dona da chave (sem contar readPages)? */
+export function seesOwnerPage(rule: KvRule, perms: ReadonlySet<string>): boolean {
+  return perms.has(`${rule.page}.ver`) || perms.has(`${rule.page}.editar`)
 }
 
 /** Pode ler? 'equipe' = qualquer pessoa logada; 'tela' = vê a tela dona ou uma de readPages. */

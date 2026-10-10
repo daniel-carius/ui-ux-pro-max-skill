@@ -14,7 +14,7 @@ import { newId, sha256 } from '../../lib/crypto'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { invalidateAllowlistCache } from '../../plugins/security'
 import { writeAudit } from '../../services/audit'
-import { assertKvVersion, bumpKvVersion, GRANT_PERM, lockKvVersion, readKvVersion } from '../team/service'
+import { assertKvVersion, bumpKvVersion, GRANT_PERM, lockKvVersion, readKvVersion, readSnapshot } from '../team/service'
 
 /** Linha de settings com a versão da segurança do painel ({ version }). */
 export const PANEL_SECURITY_VERSION_KEY = 'config.seguranca-painel'
@@ -90,9 +90,13 @@ async function loadRow(db: Db, lock = false): Promise<PanelSecurityRow> {
   return row
 }
 
+/**
+ * Configuração e versão. Chamar numa foto só (readSnapshot) ou dentro da transação que grava com a versão travada:
+ * versão e conteúdo precisam ser do mesmo instante (veja readSnapshot).
+ */
 export async function readPanelSecurity(db: Db): Promise<KvValue> {
-  const row = await loadRow(db)
   const v = await readKvVersion(db, PANEL_SECURITY_VERSION_KEY)
+  const row = await loadRow(db)
   return { value: toPanel(row), version: v.version, updatedAt: row.updated_at }
 }
 
@@ -135,7 +139,7 @@ export const kvHandlers: KvHandlers = {
   'panel-security': {
     async read(ctx: KvContext) {
       if (!canReadKey(ctx.rule, ctx.auth.perms)) throw Errors.forbidden()
-      return readPanelSecurity(ctx.app.db)
+      return readSnapshot(ctx.app.db, (t) => readPanelSecurity(t))
     },
 
     async write(ctx: KvContext, value: unknown, expectedVersion: number | undefined) {

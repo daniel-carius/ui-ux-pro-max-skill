@@ -278,8 +278,10 @@ describe('kv: permissões de leitura e gravação', () => {
     // Suporte não vê a tela de MCP
     const s = await get(app, suporte, 'config.mcp')
     expect(s.statusCode).toBe(403)
-    // Suporte vê Depósitos (readPages de config.gateways), então lê (mascarado)
-    expect((await get(app, suporte, 'config.gateways')).statusCode).toBe(200)
+    // Suporte vê Depósitos, mas a tela de Depósitos não lê a configuração dos gateways: 403 (r3)
+    for (const key of ['config.gateways', 'config.gateways.contas', 'config.gateways.roteamento']) {
+      expect((await get(app, suporte, key)).statusCode, key).toBe(403)
+    }
     // Financeiro tem gateways.ver: lê, mas não grava (sem gateways.editar)
     expect((await get(app, financeiro, 'config.gateways')).statusCode).toBe(200)
     const fw = await put(app, financeiro, 'config.gateways', { accounts: [] }, 1)
@@ -357,12 +359,13 @@ describe('kv: segredos (rule.secrets)', () => {
     expect(w.statusCode).toBe(200)
     const v = w.json().value
     expect(v.callbackToken).toBe(`${BULLETS}5678`)
-    expect(v.accounts[0]).toEqual({ id: 'g1', name: 'PixPay', apiKey: `${BULLETS}1234`, clientSecret: `${BULLETS}9999`, url: 'https://pixpay.exemplo.com' })
+    // segredo com menos de 16 caracteres sai sem nenhum trecho (cs_secreto_9999 tem 15)
+    expect(v.accounts[0]).toEqual({ id: 'g1', name: 'PixPay', apiKey: `${BULLETS}1234`, clientSecret: BULLETS, url: 'https://pixpay.exemplo.com' })
     // dentro de um campo de segredo, tudo é segredo
-    expect(v.credentials).toEqual({ user: `${BULLETS}acao`, region: `${BULLETS}st-1` })
+    expect(v.credentials).toEqual({ user: `${BULLETS}acao`, region: BULLETS })
     // nome de campo comum fica em claro; lista em campo de segredo é mascarada
     expect(v.pins).toEqual(['1111', '2222'])
-    expect(v.tokens).toEqual([`${BULLETS}1111`, `${BULLETS}2222`])
+    expect(v.tokens).toEqual([BULLETS, BULLETS])
 
     const row = await rawRow(app, KEY)
     expect(row?.value).toBeNull()
@@ -427,22 +430,33 @@ describe('kv: segredos (rule.secrets)', () => {
     expect(await rawRow(app, 'config.tracking')).toBeNull()
   })
 
-  it('itens sem id casam pela posição', async () => {
-    const w1 = await put(app, admin.cookie, 'config.integracoes', { smtp: [{ host: 'a', password: 'senha-um-1111' }, { host: 'b', password: 'senha-dois-2222' }] })
+  it('itens sem id casam pela posição (e o segredo mantido fica preso ao destino do item)', async () => {
+    const KEY2 = 'config.tracking'
+    const w1 = await put(app, admin.cookie, KEY2, { servers: [{ label: 'A', host: 'a.exemplo.com', password: 'senha-um-1111' }, { label: 'B', host: 'b.exemplo.com', password: 'senha-dois-2222' }] })
     expect(w1.statusCode).toBe(200)
     const masked = w1.json().value
-    expect(masked.smtp[1].password).toBe(`${BULLETS}2222`)
-    masked.smtp[0].host = 'a2'
-    masked.smtp.push({ host: 'c', password: 'senha-tres-3333' })
-    const w2 = await put(app, admin.cookie, 'config.integracoes', masked, 1)
+    expect(masked.servers[1].password).toBe(BULLETS)
+    // campo que não muda o destino: a senha mascarada continua valendo
+    masked.servers[0].label = 'A2'
+    masked.servers.push({ label: 'C', host: 'c.exemplo.com', password: 'senha-tres-3333' })
+    const w2 = await put(app, admin.cookie, KEY2, masked, 1)
     expect(w2.statusCode).toBe(200)
-    expect(await storedPlain(app, 'config.integracoes')).toEqual({
-      smtp: [
-        { host: 'a2', password: 'senha-um-1111' },
-        { host: 'b', password: 'senha-dois-2222' },
-        { host: 'c', password: 'senha-tres-3333' },
+    expect(await storedPlain(app, KEY2)).toEqual({
+      servers: [
+        { label: 'A2', host: 'a.exemplo.com', password: 'senha-um-1111' },
+        { label: 'B', host: 'b.exemplo.com', password: 'senha-dois-2222' },
+        { label: 'C', host: 'c.exemplo.com', password: 'senha-tres-3333' },
       ],
     })
+    // servidor trocado com a senha mascarada → 400; digitando a senha de novo → 200
+    const next = structuredClone(w2.json().value)
+    next.servers[0].host = 'outro.exemplo.com'
+    const w3 = await put(app, admin.cookie, KEY2, next, 2)
+    expect(w3.statusCode).toBe(400)
+    expect(w3.json().error.details).toEqual({ path: 'servers.0', field: 'host' })
+    next.servers[0].password = 'senha-nova-0000'
+    expect((await put(app, admin.cookie, KEY2, next, 2)).statusCode).toBe(200)
+    expect(((await storedPlain(app, KEY2)) as { servers: unknown[] }).servers[0]).toEqual({ label: 'A2', host: 'outro.exemplo.com', password: 'senha-nova-0000' })
   })
 })
 
@@ -1110,10 +1124,10 @@ describe('kv: máscara, restauração e resumo (unidades)', () => {
     expect(writePolicy(players)).toEqual({ secrets: false, pii: true })
   })
 
-  it('máscara é idempotente e não toca números em campos de segredo', () => {
-    const v = { apiKey: 'abcdefgh1234', password: 1234, nested: { token: `${BULLETS}9999` } }
+  it('máscara é idempotente e cobre número e booleano em campos de segredo', () => {
+    const v = { apiKey: 'abcdefgh-ijkl-1234', password: 1234, secretFlags: { on: true }, nested: { token: `${BULLETS}9999` } }
     const once = redact(v, { secrets: true, pii: false })
-    expect(once).toEqual({ apiKey: `${BULLETS}1234`, password: 1234, nested: { token: `${BULLETS}9999` } })
+    expect(once).toEqual({ apiKey: `${BULLETS}1234`, password: BULLETS, secretFlags: { on: BULLETS }, nested: { token: `${BULLETS}9999` } })
     expect(redact(once, { secrets: true, pii: false })).toEqual(once)
     // dado pessoal numérico também sai mascarado
     expect(redact({ cpf: 12345678909 }, { secrets: false, pii: true })).toEqual({ cpf: '123.***.***-09' })
@@ -1122,12 +1136,14 @@ describe('kv: máscara, restauração e resumo (unidades)', () => {
   })
 
   it('restauração não mexe no protótipo e só restaura campos sensíveis', () => {
-    const incoming = JSON.parse('{"__proto__": {"x": 1}, "note": "a *** b", "apiKey": "••••1234"}')
-    const out = restoreMasked(incoming, { apiKey: 'real-1234' }, { secrets: true, pii: false }) as Record<string, unknown>
+    const incoming = JSON.parse(`{"__proto__": {"x": 1}, "note": "a *** b", "apiKey": "${BULLETS}1234"}`)
+    const out = restoreMasked(incoming, { apiKey: 'real-secret-value-1234' }, { secrets: true, pii: false }) as Record<string, unknown>
     expect(Object.getPrototypeOf(out)).toBe(Object.prototype)
     expect(({} as Record<string, unknown>).x).toBeUndefined()
     expect(out.note).toBe('a *** b')
-    expect(out.apiKey).toBe('real-1234')
+    expect(out.apiKey).toBe('real-secret-value-1234')
+    // texto com máscara que não é a máscara atual do gravado → 400
+    expect(() => restoreMasked({ apiKey: '••••1234' }, { apiKey: 'real-secret-value-1234' }, { secrets: true, pii: false })).toThrow(/máscara/)
   })
 
   it('resumos', () => {

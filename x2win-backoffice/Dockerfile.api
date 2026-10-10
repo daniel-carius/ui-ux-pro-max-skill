@@ -22,5 +22,6 @@ COPY --from=build /app/server/dist ./dist
 COPY --from=build /app/server/package.json ./package.json
 USER node
 EXPOSE 3333
+# /api/health só responde 200 com o banco respondendo (select 1 em até 2 s); senão 503 e o contêiner fica unhealthy
 HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://127.0.0.1:3333/api/health || exit 1
 CMD ["node", "dist/index.js"]
