@@ -5,7 +5,16 @@ import https from 'node:https'
 import type { FastifyInstance } from 'fastify'
 import type { Db } from '../../db'
 import { hmacSha256, newId } from '../../lib/crypto'
-import { BLOCKED_PRIVATE_CODE, hostOf, INTERNAL_TARGET_MESSAGE, isWebhookEvent, safeLookup, webhookStrictMode, webhookTargetProblem } from './url'
+import {
+  BLOCKED_PRIVATE_CODE,
+  hostOf,
+  INTERNAL_TARGET_MESSAGE,
+  isDemoWebhookHost,
+  isWebhookEvent,
+  safeLookup,
+  webhookStrictMode,
+  webhookTargetProblem,
+} from './url'
 
 export const USER_AGENT = 'X2Win-Webhooks/1.0'
 export const DELIVERY_TIMEOUT_MS = 5000
@@ -165,11 +174,19 @@ export async function enqueueWebhook(db: Db, event: string, payload: Record<stri
   if (!isWebhookEvent(event)) throw new Error(`Evento de webhook desconhecido: ${event}`)
   // o mesmo id de evento vai para todos os destinos (o destino deduplica por ele)
   const envelope = { id: newId('evt'), data: payload }
+  // destino de demonstração (host de terceiro, segredo público no bundle) nunca recebe evento real, mesmo se
+  // estiver gravado e ativo (ex.: gravado antes de a chave recusar o seed do painel)
+  const dests = await db.query<{ id: string; url: string }>(
+    'select id, url from webhook_destinations where event = $1 and active order by id',
+    [event],
+  )
+  const ids = dests.filter((d) => !isDemoWebhookHost(d.url)).map((d) => d.id)
+  if (!ids.length) return 0
   const rows = await db.query<{ id: number }>(
     `insert into webhook_outbox (event, payload, destination_id)
-     select $1, $2::jsonb, d.id from webhook_destinations d where d.event = $1 and d.active
+     select $1, $2::jsonb, d.id from webhook_destinations d where d.event = $1 and d.active and d.id = any($3::text[])
      returning id`,
-    [event, JSON.stringify(envelope)],
+    [event, JSON.stringify(envelope), ids],
   )
   return rows.length
 }
@@ -194,6 +211,14 @@ async function deliverItem(app: FastifyInstance, item: OutboxItem, dest: Destina
   const db = app.db
   if (!dest || !dest.active) {
     await db.query(`update webhook_outbox set status = 'falhou', last_error = $2 where id = $1`, [item.id, 'Destino desativado antes do envio.'])
+    return
+  }
+  // item enfileirado antes da trava (destino de demonstração gravado pelo seed do painel): não sai
+  if (isDemoWebhookHost(dest.url)) {
+    await db.query(`update webhook_outbox set status = 'falhou', last_error = $2 where id = $1`, [
+      item.id,
+      'Destino de demonstração (host de terceiro): evento real não enviado.',
+    ])
     return
   }
   const body = buildBody({

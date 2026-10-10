@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
-import { findKvRule } from '@shared/kv-registry'
+import { findKvRule, KV_DEFAULT_MAX_BYTES } from '@shared/kv-registry'
 import type { KvHandler } from '../src/kv/types'
 import kvRoutes from '../src/modules/kv/routes'
 import { MISSING, summarizeChange } from '../src/modules/kv/json'
@@ -43,7 +43,30 @@ async function customRole(app: FastifyInstance, id: string, permissions: string[
   await app.db.query('insert into roles (id, name, permissions) values ($1, $2, $3)', [id, `Cargo ${id}`, permissions])
 }
 
+/** Superadmin com 2FA ativo (único que importa a base de jogadores e o extrato). */
+async function importer(app: FastifyInstance): Promise<{ cookie: string }> {
+  return { cookie: (await loginAs(app, 'superadmin', { totp: true, name: 'Importador' })).cookie }
+}
+
 const BULLETS = '••••••••••'
+
+/** Cupom que passa nas regras do painel/servidor. */
+const validCoupon = (id: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  code: `CUPOM-${id.toUpperCase()}`,
+  reward: 'bonus_pct',
+  value: 100,
+  maxBonus: 500,
+  rollover: 10,
+  maxUses: 100,
+  perPlayer: 1,
+  startsAt: '2026-01-01T00:00:00.000Z',
+  endsAt: '2099-01-01T00:00:00.000Z',
+  audience: 'todos',
+  minDeposit: 20,
+  paused: false,
+  ...extra,
+})
 const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000).toISOString()
 
 // ---------- regras gerais da rota ----------
@@ -106,51 +129,61 @@ describe('kv: acesso, chaves e versão', () => {
   it('grava, lê e controla versão', async () => {
     const v1 = [{ id: 'c1', code: 'BEMVINDO', active: true }]
     // primeira gravação aceita qualquer versão e cria a versão 1
-    const w1 = await put(app, admin.cookie, 'campanhas.cupons', v1, 7)
+    const w1 = await put(app, admin.cookie, 'campanhas.jornadas', v1, 7)
     expect(w1.statusCode).toBe(200)
-    expect(w1.json()).toMatchObject({ key: 'campanhas.cupons', value: v1, version: 1 })
+    expect(w1.json()).toMatchObject({ key: 'campanhas.jornadas', value: v1, version: 1 })
     expect(typeof w1.json().updatedAt).toBe('string')
     expect(w1.headers['cache-control']).toBe('no-store')
 
-    const r1 = await get(app, admin.cookie, 'campanhas.cupons')
+    const r1 = await get(app, admin.cookie, 'campanhas.jornadas')
     expect(r1.statusCode).toBe(200)
-    expect(r1.json()).toEqual({ key: 'campanhas.cupons', value: v1, version: 1, updatedAt: w1.json().updatedAt, stored: true })
+    expect(r1.json()).toEqual({ key: 'campanhas.jornadas', value: v1, version: 1, updatedAt: w1.json().updatedAt, stored: true })
     expect(r1.headers['cache-control']).toBe('no-store')
 
-    const row = await rawRow(app, 'campanhas.cupons')
+    const row = await rawRow(app, 'campanhas.jornadas')
     expect(row).toMatchObject({ value: v1, value_enc: null, version: 1, updated_by: admin.user.id })
 
     // sem versão ou versão velha → 409 com a versão atual
-    const noVersion = await put(app, admin.cookie, 'campanhas.cupons', [])
+    const noVersion = await put(app, admin.cookie, 'campanhas.jornadas', [])
     expect(noVersion.statusCode).toBe(409)
     expect(noVersion.json().error).toMatchObject({ code: 'versao_desatualizada', details: { version: 1 } })
-    const stale = await put(app, admin.cookie, 'campanhas.cupons', [], 0)
+    const stale = await put(app, admin.cookie, 'campanhas.jornadas', [], 0)
     expect(stale.statusCode).toBe(409)
     expect(stale.json().error.details.version).toBe(1)
-    const ahead = await put(app, admin.cookie, 'campanhas.cupons', [], 2)
+    const ahead = await put(app, admin.cookie, 'campanhas.jornadas', [], 2)
     expect(ahead.statusCode).toBe(409)
 
     const v2 = [...v1, { id: 'c2', code: 'DOBRO', active: false }]
-    const w2 = await put(app, admin.cookie, 'campanhas.cupons', v2, 1)
+    const w2 = await put(app, admin.cookie, 'campanhas.jornadas', v2, 1)
     expect(w2.statusCode).toBe(200)
     expect(w2.json().version).toBe(2)
-    expect((await get(app, admin.cookie, 'campanhas.cupons')).json().value).toEqual(v2)
-    const again = await put(app, admin.cookie, 'campanhas.cupons', v1, 1)
+    expect((await get(app, admin.cookie, 'campanhas.jornadas')).json().value).toEqual(v2)
+    const again = await put(app, admin.cookie, 'campanhas.jornadas', v1, 1)
     expect(again.statusCode).toBe(409)
     expect(again.json().error.details.version).toBe(2)
   })
 
-  it('chave filha é guardada separada e segue a regra da mãe', async () => {
-    const w = await put(app, admin.cookie, 'campanhas.cupons.resgates', [{ id: 'r1' }])
+  it('só as chaves filhas declaradas (children) seguem a regra da mãe; outras são desconhecidas', async () => {
+    // filha declarada: guardada separada, com a regra (e a tela) da mãe
+    const w = await put(app, admin.cookie, 'cassino.agregadores.testes', [{ id: 'r1' }])
     expect(w.statusCode).toBe(200)
     expect(w.json().version).toBe(1)
-    expect(await rawRow(app, 'campanhas.cupons.resgates')).toMatchObject({ version: 1 })
-    expect((await lastAudit(app)).entity).toBe('Dados · Cupons')
+    expect(await rawRow(app, 'cassino.agregadores.testes')).toMatchObject({ version: 1 })
+    expect((await lastAudit(app)).entity).toBe('Dados · Agregadores de jogos')
+    // filha não declarada: 404, nada gravado
+    for (const key of ['campanhas.cupons.qualquer', 'campanhas.promocoes.flood-1', 'cassino.agregadores.testes.x', 'geral.jogadores.extra']) {
+      const r = await put(app, admin.cookie, key, { a: 1 })
+      expect(r.statusCode, key).toBe(404)
+      expect(r.json().error.code, key).toBe('chave_desconhecida')
+      expect((await get(app, admin.cookie, key)).statusCode, key).toBe(404)
+    }
+    expect(await app.db.query(`select key from kv_store where key like 'campanhas.promocoes.%'`)).toEqual([])
   })
 
   it('aceita qualquer JSON (objeto, lista, texto, número, null)', async () => {
+    const keys = ['campanhas.missoes', 'campanhas.templates', 'campanhas.roleta', 'campanhas.notificacoes.historico', 'campanhas.popups-inbox.popups', 'campanhas.popups-inbox.inbox']
     for (const [i, value] of [{ a: { b: [1, 2] } }, 'texto', 42, true, null, []].entries()) {
-      const key = `campanhas.missoes.teste${i}`
+      const key = keys[i]
       const w = await put(app, admin.cookie, key, value)
       expect(w.statusCode, key).toBe(200)
       const r = await get(app, admin.cookie, key)
@@ -188,7 +221,7 @@ describe('kv: acesso, chaves e versão', () => {
     expect((await put(app, admin.cookie, key, ok)).statusCode).toBe(200)
   })
 
-  it('aceita alguns MB de dados', async () => {
+  it('aceita alguns MB de dados nas chaves com imagens; as demais têm limite menor (413)', async () => {
     const big = Array.from({ length: 3000 }, (_, i) => ({ id: `b${i}`, image: `data:image/png;base64,${'A'.repeat(1000)}` }))
     const w = await put(app, admin.cookie, 'personalizacao.banners', big)
     expect(w.statusCode).toBe(200)
@@ -196,6 +229,12 @@ describe('kv: acesso, chaves e versão', () => {
     expect(r.statusCode).toBe(200)
     expect(r.json().value).toHaveLength(3000)
     expect(r.json().value[2999]).toEqual(big[2999])
+    // chave sem imagens: acima de KV_DEFAULT_MAX_BYTES → 413, nada gravado
+    const blob = { blob: 'B'.repeat(KV_DEFAULT_MAX_BYTES + 10) }
+    const t = await put(app, admin.cookie, 'campanhas.promocoes', blob)
+    expect(t.statusCode).toBe(413)
+    expect(t.json().error.code).toBe('dados_grandes_demais')
+    expect(await rawRow(app, 'campanhas.promocoes')).toBeNull()
   })
 })
 
@@ -220,8 +259,8 @@ describe('kv: permissões de leitura e gravação', () => {
   afterAll(async () => app.close())
 
   it('Marketing grava campanhas.cupons mas não config.gateways nem config.empresa', async () => {
-    const w = await put(app, marketing, 'campanhas.cupons', [{ id: 'c1' }])
-    expect(w.statusCode).toBe(200)
+    const w = await put(app, marketing, 'campanhas.cupons', [validCoupon('c1')])
+    expect(w.statusCode, w.body).toBe(200)
     const g = await put(app, marketing, 'config.gateways', { accounts: [] }, 1)
     expect(g.statusCode).toBe(403)
     expect(g.json().error.code).toBe('sem_permissao')
@@ -255,7 +294,16 @@ describe('kv: permissões de leitura e gravação', () => {
   })
 
   it("chaves 'servidor' recusam gravação de qualquer cargo (inclusive Superadmin)", async () => {
-    for (const key of ['esportes.apostas', 'operacao.saques', 'auditoria.registros', 'campanhas.webhooks.execucoes']) {
+    for (const key of [
+      'esportes.apostas',
+      'operacao.saques',
+      'auditoria.registros',
+      'campanhas.webhooks.execucoes',
+      'afiliados.saques',
+      'operacao.depositos',
+      'campanhas.cupons.resgates',
+      'campanhas.roleta.giros',
+    ]) {
       const r = await put(app, admin, key, [])
       expect(r.statusCode, key).toBe(403)
       expect(r.json().error.code, key).toBe('sem_permissao')
@@ -402,40 +450,40 @@ describe('kv: segredos (rule.secrets)', () => {
 
 describe('kv: dados pessoais (rule.pii)', () => {
   let app: FastifyInstance
-  let admin: string
+  let admin: { user: { id: string }; cookie: string }
   let marketing: string
-  let comissoes: string
-  let gerente: string
-  const KEY = 'crescimento.afiliados'
+  let leitor: string
+  let editor: string
+  const KEY = 'campanhas.indicacao'
   const list = [
     { id: 'a1', name: 'Ana Silva', email: 'ana.silva@exemplo.com', cpf: '12345678909', phone: '11987654321', pixKey: 'ana@pix.com', city: 'São Paulo' },
     { id: 'a2', name: 'Bruno', email: 'bruno@exemplo.com', cpf: '98765432100', phone: '21912345678', pixKey: '+5521912345678', city: 'Rio' },
   ]
   beforeAll(async () => {
     app = await createTestApp()
-    admin = (await loginAs(app, 'administrador')).cookie
+    admin = await loginAs(app, 'administrador')
     marketing = (await loginAs(app, 'marketing')).cookie
-    await customRole(app, 'comissoes-leitura', ['comissoes.ver'])
-    comissoes = (await loginAs(app, 'comissoes-leitura')).cookie
-    await customRole(app, 'gerente-afiliados', ['afiliados-gerentes.ver', 'afiliados-gerentes.editar'])
-    gerente = (await loginAs(app, 'gerente-afiliados')).cookie
+    await customRole(app, 'indicacao-leitura', ['indicacao.ver'])
+    leitor = (await loginAs(app, 'indicacao-leitura')).cookie
+    await customRole(app, 'indicacao-editor', ['indicacao.ver', 'indicacao.editar'])
+    editor = (await loginAs(app, 'indicacao-editor')).cookie
   })
   afterAll(async () => app.close())
 
   it('cifra em repouso; quem tem a permissão de revelar vê em claro', async () => {
-    const w = await put(app, admin, KEY, list)
+    const w = await put(app, admin.cookie, KEY, list)
     expect(w.statusCode).toBe(200)
     expect(w.json().value).toEqual(list)
     const row = await rawRow(app, KEY)
     expect(row?.value).toBeNull()
     expect(JSON.stringify(row)).not.toContain('12345678909')
     expect(JSON.stringify(row)).not.toContain('ana.silva')
-    expect((await get(app, admin, KEY)).json().value).toEqual(list)
+    expect((await get(app, admin.cookie, KEY)).json().value).toEqual(list)
   })
 
-  it('quem não tem a permissão recebe mascarado; quem não vê nenhuma tela de afiliados não lê', async () => {
+  it('quem não tem a permissão recebe mascarado; quem não vê a tela não lê', async () => {
     expect((await get(app, marketing, KEY)).statusCode).toBe(403)
-    const r = await get(app, comissoes, KEY)
+    const r = await get(app, leitor, KEY)
     expect(r.statusCode).toBe(200)
     const [a1, a2] = r.json().value
     expect(a1).toEqual({
@@ -453,23 +501,39 @@ describe('kv: dados pessoais (rule.pii)', () => {
   })
 
   it('gravação com dado pessoal mascarado preserva o gravado', async () => {
-    const cur = (await get(app, gerente, KEY)).json()
+    const cur = (await get(app, editor, KEY)).json()
     expect(cur.value[0].cpf).toBe('123.***.***-09')
     const next = structuredClone(cur.value)
     next[0].name = 'Ana S.'
-    const w = await put(app, gerente, KEY, next, cur.version)
+    const w = await put(app, editor, KEY, next, cur.version)
     expect(w.statusCode).toBe(200)
     expect(w.json().value[0]).toMatchObject({ name: 'Ana S.', cpf: '123.***.***-09' })
     expect(await storedPlain(app, KEY)).toEqual([{ ...list[0], name: 'Ana S.' }, list[1]])
-    expect((await lastAudit(app)).summary).toBe(`${KEY} — Itens: 1 alterado (a1)`)
+    expect((await lastAudit(app)).summary).toBe(`${KEY} — Itens: 1 alterado (a1) (v1→v2)`)
   })
 
   it('máscara num item novo é recusada', async () => {
-    const cur = (await get(app, gerente, KEY)).json()
+    const cur = (await get(app, editor, KEY)).json()
     const next = [...cur.value, { id: 'a3', name: 'Novo', cpf: '111.***.***-11' }]
-    const w = await put(app, gerente, KEY, next, cur.version)
+    const w = await put(app, editor, KEY, next, cur.version)
     expect(w.statusCode).toBe(400)
     expect(w.json().error.details.path).toBe('2.cpf')
+  })
+
+  it('leitura com dados pessoais em claro fica na auditoria do servidor (uma vez por sessão e chave no intervalo)', async () => {
+    const reveals = async () =>
+      (await app.db.query<{ n: number }>(`select count(*)::int as n from audit_log where actor_id = $1 and action = 'revelar' and source = 'servidor'`, [admin.user.id]))[0].n
+    const other = await sessionCookie(app, admin.user.id)
+    const before = await reveals()
+    for (let i = 0; i < 4; i++) expect((await get(app, other, KEY)).statusCode).toBe(200)
+    expect(await reveals()).toBe(before + 1)
+    const a = (await audits(app)).find((x) => x.action === 'revelar')!
+    expect(a).toMatchObject({ entity: 'Dados · Indicação', source: 'servidor' })
+    expect(a.summary).toBe(`${KEY} — leitura com dados pessoais completos (2 registros)`)
+    // leitura mascarada não gera registro
+    const n = (await audits(app)).length
+    await get(app, leitor, KEY)
+    expect((await audits(app)).length).toBe(n)
   })
 })
 
@@ -485,33 +549,33 @@ describe('kv: auditoria das gravações', () => {
   afterAll(async () => app.close())
 
   it('registra quem, IP, entidade e resumo (listas com id)', async () => {
-    const w1 = await put(app, admin.cookie, 'campanhas.cupons', [{ id: 'c1', v: 1 }, { id: 'c2', v: 1 }])
+    const w1 = await put(app, admin.cookie, 'campanhas.missoes', [{ id: 'c1', v: 1 }, { id: 'c2', v: 1 }])
     expect(w1.statusCode).toBe(200)
     const a1 = await lastAudit(app)
     expect(a1).toMatchObject({
       actor_id: admin.user.id,
       action: 'editar',
-      entity: 'Dados · Cupons',
-      summary: 'campanhas.cupons — Primeira gravação com 2 itens',
+      entity: 'Dados · Missões',
+      summary: 'campanhas.missoes — Primeira gravação com 2 itens (v0→v1)',
       ip: '127.0.0.1',
       source: 'servidor',
     })
-    const w2 = await put(app, admin.cookie, 'campanhas.cupons', [{ id: 'c1', v: 2 }, { id: 'c3', v: 1 }], 1)
+    const w2 = await put(app, admin.cookie, 'campanhas.missoes', [{ id: 'c1', v: 2 }, { id: 'c3', v: 1 }], 1)
     expect(w2.statusCode).toBe(200)
-    expect((await lastAudit(app)).summary).toBe('campanhas.cupons — Itens: 1 incluído (c3); 1 alterado (c1); 1 removido (c2)')
-    await put(app, admin.cookie, 'campanhas.cupons', [{ id: 'c3', v: 1 }, { id: 'c1', v: 2 }], 2)
-    expect((await lastAudit(app)).summary).toBe('campanhas.cupons — Itens: ordem alterada')
-    await put(app, admin.cookie, 'campanhas.cupons', [{ id: 'c3', v: 1 }, { id: 'c1', v: 2 }], 3)
-    expect((await lastAudit(app)).summary).toBe('campanhas.cupons — Salvo sem alterações')
+    expect((await lastAudit(app)).summary).toBe('campanhas.missoes — Itens: 1 incluído (c3); 1 alterado (c1); 1 removido (c2) (v1→v2)')
+    await put(app, admin.cookie, 'campanhas.missoes', [{ id: 'c3', v: 1 }, { id: 'c1', v: 2 }], 2)
+    expect((await lastAudit(app)).summary).toBe('campanhas.missoes — Itens: ordem alterada (v2→v3)')
+    await put(app, admin.cookie, 'campanhas.missoes', [{ id: 'c3', v: 1 }, { id: 'c1', v: 2 }], 3)
+    expect((await lastAudit(app)).summary).toBe('campanhas.missoes — Salvo sem alterações (v3→v4)')
   })
 
   it('objetos: campos de 1º nível alterados', async () => {
     await put(app, admin.cookie, 'config.empresa', { name: 'X2Win', cnpj: '00.000.000/0001-00', address: { city: 'SP' } })
-    expect((await lastAudit(app)).summary).toBe('config.empresa — Primeira gravação. Campos: name, cnpj, address')
+    expect((await lastAudit(app)).summary).toBe('config.empresa — Primeira gravação. Campos: name, cnpj, address (v0→v1)')
     await put(app, admin.cookie, 'config.empresa', { name: 'X2Win', cnpj: '11.111.111/0001-11', address: { city: 'RJ' }, phone: '1' }, 1)
     const a = await lastAudit(app)
     expect(a.entity).toBe('Dados · Empresa e licença')
-    expect(a.summary).toBe('config.empresa — Campos alterados: cnpj, address, phone (incluído)')
+    expect(a.summary).toBe('config.empresa — Campos alterados: cnpj, address, phone (incluído) (v1→v2)')
   })
 
   it('gravação recusada não audita', async () => {
@@ -639,24 +703,47 @@ describe('kv: jogadores (geral.jogadores)', () => {
 
   const current = async (cookie: string) => (await get(app, cookie, KEY)).json() as { value: typeof players; version: number }
 
-  it('sem permissão de gravação → 403; máscara na base → 400', async () => {
+  it('sem permissão de gravação → 403; a tela nunca cria a base (nada gravado = lista vazia)', async () => {
     const m = await put(app, marketing, KEY, players)
     expect(m.statusCode).toBe(403)
     expect(m.json().error.code).toBe('sem_permissao')
+    // Superadmin, Suporte: a lista enviada pela tela não vira base (cada jogador seria uma inclusão)
+    for (const cookie of [admin, suporte]) {
+      const w = await put(app, cookie, KEY, players)
+      expect(w.statusCode).toBe(403)
+      expect(w.json().error).toMatchObject({ code: 'campo_nao_permitido', details: { added: ['p1', 'p2'] } })
+    }
     const masked = await put(app, admin, KEY, [{ ...players[0], cpf: '123.***.***-09' }])
-    expect(masked.statusCode).toBe(400)
+    expect(masked.statusCode).toBe(403)
     expect(await rawRow(app, KEY)).toBeNull()
   })
 
-  it('primeira gravação aceita a lista inteira como base, cifrada', async () => {
-    const w = await put(app, admin, KEY, players)
-    expect(w.statusCode).toBe(200)
-    expect(w.json()).toMatchObject({ key: KEY, value: players, version: 1 })
+  it('importação: só Superadmin com 2FA; valida, recusa máscara e ids repetidos; cifrada e auditada', async () => {
+    const url = `/api/kv/${KEY}/import`
+    // Suporte e Superadmin sem 2FA não importam
+    for (const cookie of [suporte, admin]) {
+      const r = await api(app, 'POST', url, { cookie, body: { players } })
+      expect(r.statusCode).toBe(403)
+      expect(r.json().error.code).toBe('sem_permissao')
+    }
+    const imp = (await importer(app)).cookie
+    expect((await api(app, 'POST', url, { cookie: imp, body: { players: [{ ...players[0], cpf: '123.***.***-09' }] } })).statusCode).toBe(400)
+    expect((await api(app, 'POST', url, { cookie: imp, body: { players: [{ ...players[0], status: 'sumido' }] } })).statusCode).toBe(400)
+    expect((await api(app, 'POST', url, { cookie: imp, body: { players: [{ ...players[0], balanceReal: -1 }] } })).statusCode).toBe(400)
+    expect(await rawRow(app, KEY)).toBeNull()
+    const w = await api(app, 'POST', url, { cookie: imp, body: { players } })
+    expect(w.statusCode, w.body).toBe(200)
+    expect(w.json()).toMatchObject({ ok: true, imported: 2, version: 1 })
     const row = await rawRow(app, KEY)
     expect(row?.value).toBeNull()
     expect(row?.value_enc).toBeTruthy()
     expect(JSON.stringify(row)).not.toContain('12345678909')
-    expect((await lastAudit(app)).summary).toBe(`${KEY} — Base inicial com 2 jogadores`)
+    expect(await storedPlain(app, KEY)).toEqual(players)
+    const a = await lastAudit(app)
+    expect(a).toMatchObject({ action: 'criar', entity: 'Dados · Usuários' })
+    expect(a.summary).toBe(`${KEY} — Importação de 2 jogadores da plataforma (saldo real R$ 150,50, bônus R$ 10,00): p1, p2 (v0→v1)`)
+    // id já gravado → 400
+    expect((await api(app, 'POST', url, { cookie: imp, body: { players: [players[0]] } })).statusCode).toBe(400)
   })
 
   it('leitura mascara dados pessoais para quem não tem usuarios.ver-dados; quem não vê as telas de jogadores não lê', async () => {
@@ -780,6 +867,21 @@ describe('kv: jogadores (geral.jogadores)', () => {
     expect(stale.statusCode).toBe(409)
     expect(stale.json().error.details.version).toBe(cur.version)
   })
+  it('correção de base (remover jogador): só Superadmin com 2FA, com motivo; auditada', async () => {
+    const url = `/api/kv/${KEY}/remove`
+    expect((await api(app, 'POST', url, { cookie: admin, body: { ids: ['p2'], reason: 'Dado de demonstração' } })).statusCode).toBe(403)
+    expect((await api(app, 'POST', url, { cookie: suporte, body: { ids: ['p2'], reason: 'Dado de demonstração' } })).statusCode).toBe(403)
+    const imp = (await importer(app)).cookie
+    expect((await api(app, 'POST', url, { cookie: imp, body: { ids: ['p2'] } })).statusCode).toBe(400)
+    expect((await api(app, 'POST', url, { cookie: imp, body: { ids: ['nao-existe'], reason: 'Dado de demonstração' } })).statusCode).toBe(400)
+    const r = await api(app, 'POST', url, { cookie: imp, body: { ids: ['p2'], reason: 'Dado de demonstração' } })
+    expect(r.statusCode, r.body).toBe(200)
+    expect(r.json()).toMatchObject({ ok: true, removed: 1 })
+    expect(((await storedPlain(app, KEY)) as { id: string }[]).map((p) => p.id)).toEqual(['p1'])
+    const a = await lastAudit(app)
+    expect(a).toMatchObject({ action: 'excluir', entity: 'Dados · Usuários' })
+    expect(a.summary).toMatch(/^geral\.jogadores — 1 jogador removido da base \(Dado de demonstração\): p2 \(v\d+→v\d+\)$/)
+  })
 })
 
 // ---------- domínio transactions ----------
@@ -791,6 +893,7 @@ describe('kv: transações (geral.transacoes)', () => {
   let financeiro: string
   let marketing: string
   let estornos: string
+  let imp: string
   const KEY = 'geral.transacoes'
   const base = [
     { id: 'TX1', at: daysAgo(1), playerId: 'p1', playerName: 'Joana', playerEmail: 'j@x.com', type: 'deposito', amount: 100, wallet: 'real', balanceBefore: 0, balanceAfter: 100, gameId: null, gameName: null, providerName: null, reference: 'DEP-1' },
@@ -829,7 +932,8 @@ describe('kv: transações (geral.transacoes)', () => {
   beforeAll(async () => {
     app = await createTestApp()
     admin = (await loginAs(app)).cookie
-    expect((await put(app, admin, 'geral.jogadores', playerBase)).statusCode).toBe(200)
+    imp = (await importer(app)).cookie
+    expect((await api(app, 'POST', '/api/kv/geral.jogadores/import', { cookie: imp, body: { players: playerBase } })).statusCode).toBe(200)
     suporte = (await loginAs(app, 'suporte')).cookie
     financeiro = (await loginAs(app, 'financeiro')).cookie
     marketing = (await loginAs(app, 'marketing')).cookie
@@ -840,20 +944,31 @@ describe('kv: transações (geral.transacoes)', () => {
 
   const current = async (cookie = admin) => (await get(app, cookie, KEY)).json() as { value: Record<string, unknown>[]; version: number }
 
-  it('leitura conforme a regra; base inicial', async () => {
+  it('leitura conforme a regra; nada gravado = extrato vazio (a tela não cria base); histórico só pela importação', async () => {
     expect((await get(app, marketing, KEY)).statusCode).toBe(403)
     expect((await get(app, suporte, KEY)).json().stored).toBe(false)
-    // base com item inválido → 400
-    expect((await put(app, admin, KEY, [{ id: 'X', type: 'inventado', amount: 1, playerId: 'p' }])).statusCode).toBe(400)
-    const w = await put(app, admin, KEY, base)
-    expect(w.statusCode).toBe(200)
-    expect(w.json()).toMatchObject({ value: base, version: 1 })
+    // pela tela, todo item é lançamento novo: tipo fora da lista → 403, nada gravado
+    expect((await put(app, admin, KEY, [{ id: 'X', type: 'inventado', amount: 1, playerId: 'p' }])).statusCode).toBe(403)
+    const viaTela = await put(app, admin, KEY, base)
+    expect(viaTela.statusCode).toBe(403)
+    expect(viaTela.json().error).toMatchObject({ code: 'campo_nao_permitido', details: { fields: ['type'] } })
+    expect(await rawRow(app, KEY)).toBeNull()
+    // importação do histórico: Superadmin com 2FA; item inválido → 400; não mexe em saldo
+    const url = `/api/kv/${KEY}/import`
+    expect((await api(app, 'POST', url, { cookie: admin, body: { transactions: base } })).statusCode).toBe(403)
+    expect((await api(app, 'POST', url, { cookie: imp, body: { transactions: [{ id: 'X', type: 'inventado', amount: 1, playerId: 'p', at: daysAgo(1) }] } })).statusCode).toBe(400)
+    const w = await api(app, 'POST', url, { cookie: imp, body: { transactions: base } })
+    expect(w.statusCode, w.body).toBe(200)
+    expect(w.json()).toMatchObject({ imported: 3, version: 1 })
     // tem e-mail de jogador: cifrado em repouso
     const row = await rawRow(app, KEY)
     expect(row?.value).toBeNull()
     expect(JSON.stringify(row)).not.toContain('j@x.com')
     expect(await storedPlain(app, KEY)).toEqual(base)
-    expect((await lastAudit(app)).summary).toBe(`${KEY} — Base inicial do extrato com 3 transações`)
+    const a = await lastAudit(app)
+    expect(a.action).toBe('criar')
+    expect(a.summary).toBe(`${KEY} — Importação de 3 transações da plataforma (saldos não mudam) — deposito: 1 (R$ 100,00), aposta: 2 (-R$ 25,00) (v0→v1)`)
+    expect(((await storedPlain(app, 'geral.jogadores')) as { balanceReal: number }[])[0].balanceReal).toBe(75)
     expect((await get(app, financeiro, KEY)).statusCode).toBe(200)
   })
 
@@ -897,7 +1012,7 @@ describe('kv: transações (geral.transacoes)', () => {
     const ro = await put(app, admin, KEY, reordered, cur.version)
     expect(ro.statusCode).toBe(200)
     expect((ro.json().value as { id: string }[]).map((t) => t.id)).toEqual(cur.value.map((t) => t.id))
-    expect((await lastAudit(app)).summary).toBe(`${KEY} — Extrato salvo sem lançamentos novos`)
+    expect((await lastAudit(app)).summary).toMatch(/^geral\.transacoes — Extrato salvo sem lançamentos novos \(v\d+→v\d+\)$/)
   })
 
   it('tipos novos fora da lista → 403 campo_nao_permitido; estorno sem transacoes.editar → 403', async () => {

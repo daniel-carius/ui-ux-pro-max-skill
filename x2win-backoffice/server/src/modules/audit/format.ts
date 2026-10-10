@@ -1,6 +1,6 @@
 // Auditoria: conversão para AuditEntry (shared/audit.ts), filtros de consulta e CSV.
 import { z } from 'zod'
-import { AUDIT_ACTION_LABEL, isAuditAction, type AuditAction, type AuditEntry } from '@shared/audit'
+import { AUDIT_ACTION_LABEL, AUDIT_SOURCE_LABEL, isAuditAction, type AuditAction, type AuditEntry } from '@shared/audit'
 
 export interface AuditRow {
   id: number | string
@@ -145,7 +145,8 @@ export function auditCsv(entries: AuditEntry[]): string {
   const lines = [CSV_HEADER.map(csvCell).join(';')]
   for (const e of entries) {
     lines.push(
-      [csvDate(e.at), e.actorName, AUDIT_ACTION_LABEL[e.action] ?? e.action, e.entity, e.summary, e.ip, e.source ?? 'servidor']
+      // Origem: deixa explícito que o relatado pelo painel não foi verificado pelo servidor
+      [csvDate(e.at), e.actorName, AUDIT_ACTION_LABEL[e.action] ?? e.action, e.entity, e.summary, e.ip, AUDIT_SOURCE_LABEL[e.source ?? 'servidor']]
         .map(csvCell)
         .join(';'),
     )

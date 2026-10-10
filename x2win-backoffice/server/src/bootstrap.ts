@@ -7,6 +7,7 @@ import { toCents } from './services/roles-repo'
 import { writeAudit } from './services/audit'
 import { computeStage } from './modules/auth/service'
 import { resetAllowlistFromEnv } from './modules/panel-security/kv'
+import { checkMemberName, namesConflict } from './modules/team/service'
 
 /**
  * Cria os cargos que faltam, sem alterar nem recriar os que a operação mexeu.
@@ -67,13 +68,16 @@ export async function ensureAdmin(app: FastifyInstance): Promise<'criado' | 'exi
   if (!ADMIN_EMAIL || !ADMIN_PASSWORD) return 'sem-credenciais'
   const problem = passwordProblem(ADMIN_PASSWORD, SECURITY.passwordMinLength)
   if (problem) throw new Error(`ADMIN_PASSWORD fraca: ${problem}`)
+  // mesma regra de nome da tela Equipe (o nome identifica a pessoa na auditoria)
+  const checked = checkMemberName(ADMIN_NAME)
+  if ('problem' in checked) throw new Error(`ADMIN_NAME inválido: ${checked.problem}`)
   const hash = await hashPassword(ADMIN_PASSWORD)
   await app.db.tx(async (t) => {
     // instalação nova: os cargos de acesso total e de aprovação de saques já nascem exigindo 2FA
     await t.query('update roles set require_2fa = true where id = any($1::text[])', [[...INSTALL_REQUIRE_2FA_ROLE_IDS]])
     await t.query(`insert into users (id, name, email, role_id, status, password_hash) values ($1, $2, lower($3), $5, 'ativo', $4)`, [
       newId('u'),
-      ADMIN_NAME,
+      checked.name,
       ADMIN_EMAIL,
       hash,
       SUPERADMIN_ROLE_ID,
@@ -95,12 +99,34 @@ async function logCreatedAdmin(app: FastifyInstance) {
   }
 }
 
+/**
+ * Instalações anteriores à regra de nome único podem ter pessoas com nomes iguais ou que se confundem (a auditoria
+ * e os saques mostram só o nome). Avisa no log quem precisa ser renomeado na tela Equipe; não altera nada.
+ */
+export async function warnLookAlikeNames(app: FastifyInstance): Promise<string[][]> {
+  const rows = await app.db.query<{ id: string; name: string; email: string }>('select id, name, email from users order by created_at, id')
+  const groups: string[][] = []
+  const grouped = new Set<string>()
+  for (const r of rows) {
+    if (grouped.has(r.id)) continue
+    const same = rows.filter((o) => o.id !== r.id && !grouped.has(o.id) && namesConflict(o.name, r.name))
+    if (!same.length) continue
+    for (const o of [r, ...same]) grouped.add(o.id)
+    groups.push([r, ...same].map((o) => `${o.name} <${o.email}>`))
+  }
+  for (const g of groups) {
+    app.log.warn({ people: g }, `Pessoas da equipe com nomes que se confundem: ${g.join(', ')}. Renomeie em Equipe para a auditoria identificar cada uma.`)
+  }
+  return groups
+}
+
 export async function bootstrap(app: FastifyInstance, env: NodeJS.ProcessEnv = process.env) {
   await ensureRoles(app)
   const admin = await ensureAdmin(app)
   await enforceSuperadmin2fa(app)
   if (admin === 'criado') await logCreatedAdmin(app)
   if (admin === 'sem-credenciais') app.log.warn('Nenhum usuário cadastrado: defina ADMIN_EMAIL e ADMIN_PASSWORD e reinicie para criar o Superadmin.')
+  await warnLookAlikeNames(app)
   // recuperação de acesso (lista de IPs que deixou todos de fora), controlada só por quem opera o servidor
   await resetAllowlistFromEnv(app, env.PANEL_ALLOWLIST_RESET)
 }

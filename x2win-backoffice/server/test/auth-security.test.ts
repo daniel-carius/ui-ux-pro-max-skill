@@ -13,6 +13,7 @@ import {
   hashRecoveryCode,
   normalizeRecoveryCode,
 } from '../src/modules/auth/service'
+import { PASSWORD_GATE_LIMITS } from '../src/modules/auth/password-gate'
 import { LoginThrottle, ipBucket, loginThrottleFor } from '../src/modules/auth/throttle'
 import { TEST_ENV, api, cookieFrom, createTestApp, createUser, sessionCookie } from './helpers'
 
@@ -153,23 +154,25 @@ describe('segurança do login e do 2FA', () => {
 
   // ------------------------------------------------------------ r1-authn-2
   describe('freio do login sob concorrência (r1-authn-2)', () => {
-    it('rajada de 30 senhas erradas: no máximo 5 avaliadas; a senha certa enviada depois da rajada não entra nem limpa o bloqueio', async () => {
+    it('rajada de senhas erradas: no máximo 5 avaliadas; a senha certa enviada depois da rajada não entra nem limpa o bloqueio', async () => {
       const u = await createUser(app, { roleId: 'suporte' })
-      // atacante com muitos IPs da mesma faixa /24 (um por requisição)
+      // atacante com muitos IPs da mesma faixa /24 (um por requisição). A rajada cabe inteira na fila do scrypt
+      // (password-gate.ts: o que passa dela recebe 503 sem ser avaliado), então todas chegam ao freio ao mesmo tempo.
+      const burst = PASSWORD_GATE_LIMITS.maxActive + PASSWORD_GATE_LIMITS.maxQueued - 1
       const ip = (n: number) => `10.77.200.${n + 1}`
-      const wrong = Array.from({ length: 30 }, (_, i) => api(app, 'POST', '/api/auth/login', { body: { email: u.email, password: 'senha-errada-123' }, ip: ip(i) }))
+      const wrong = Array.from({ length: burst }, (_, i) => api(app, 'POST', '/api/auth/login', { body: { email: u.email, password: 'senha-errada-123' }, ip: ip(i) }))
       // o injetor só despacha no .then: a senha certa vai por último, depois de todas as erradas
-      const correct = api(app, 'POST', '/api/auth/login', { body: { email: u.email, password: u.password }, ip: ip(31) })
+      const correct = api(app, 'POST', '/api/auth/login', { body: { email: u.email, password: u.password }, ip: ip(burst + 1) })
       const [results, right] = await Promise.all([Promise.all(wrong), correct])
       const evaluated = results.filter((r) => r.statusCode === 401).length
       const blocked = results.filter((r) => r.statusCode === 423).length
       expect(evaluated).toBeLessThanOrEqual(SECURITY.maxFailedLogins)
-      expect(evaluated + blocked).toBe(30)
+      expect(evaluated + blocked).toBe(burst)
       expectError(right, 423, 'conta_bloqueada')
       expect(cookieFrom(right)).toBeNull()
 
       // a origem segue bloqueada (a senha certa não limpou nada) ...
-      expectError(await login(app, u.email, u.password, ip(40)), 423, 'conta_bloqueada')
+      expectError(await login(app, u.email, u.password, ip(burst + 2)), 423, 'conta_bloqueada')
       // ... mas a pessoa entra da própria rede
       const own = await login(app, u.email, u.password, '192.0.2.77')
       expect(own.statusCode, own.body).toBe(200)

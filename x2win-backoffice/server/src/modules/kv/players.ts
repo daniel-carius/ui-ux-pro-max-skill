@@ -11,15 +11,26 @@
 //    permissão só faz as transições dela → 403 transicao_nao_permitida;
 //  - jogador autoexcluído não recebe moedas;
 //  - qualquer outro campo alterado → 403 campo_nao_permitido (details.fields);
-//  - primeira gravação (nada gravado) aceita a lista inteira como base.
+//  - nada gravado = lista vazia: a gravação pela tela nunca cria a base (o painel
+//    não manda mais dados de demonstração como base de produção).
 // Dados pessoais que voltam mascarados são restaurados do gravado.
+//
+// Jogadores entram pela plataforma, ou pela importação explícita
+// POST /api/kv/geral.jogadores/import { players } — só Superadmin com 2FA ativo;
+// valida os campos, recusa ids já gravados e dados mascarados, e audita quem importou.
+// Correção de base (dados de demonstração gravados por engano, pedido do titular
+// pela LGPD art. 18): POST /api/kv/geral.jogadores/remove { ids, reason } — mesma
+// exigência; o extrato (geral.transacoes) não muda e a remoção fica na auditoria.
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { canWriteKey } from '@shared/kv-registry'
+import { canWriteKey, findKvRule } from '@shared/kv-registry'
 import { brl } from '@shared/money'
+import { SUPERADMIN_ROLE_ID } from '@shared/permissions'
 import { AppError, Errors } from '../../errors'
+import { requireActive } from '../../http'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { writeAudit } from '../../services/audit'
-import { auditEntity, genericHandler } from './generic'
+import { auditEntity, auditSummary, genericHandler } from './generic'
 import { deepEqual, hasOwn, isPlainObject, MISSING, setOwn, type JsonObject } from './json'
 import { applyPauseRules, checkTransition, PAUSES_KEY, PLAYER_STATUSES, PLAYERS_KEY, STATUS_HISTORY_KEY, toPauseStore } from './player-status'
 import { restoreMasked, writePolicy } from './redact'
@@ -114,15 +125,7 @@ export const kvHandlers: KvHandlers = {
         const stored = storedValue(row, app.cipher)
         let summary: string
 
-        if (stored === MISSING) {
-          // primeira gravação: a lista inteira vira a base (máscaras sem valor gravado são recusadas)
-          const next = restoreMasked(list, MISSING, writePolicy(rule))
-          const saved = await saveRow(t, app.cipher, key, next, true, row, auth.user.id)
-          summary = `Base inicial com ${list.length} ${list.length === 1 ? 'jogador' : 'jogadores'}`
-          await writeAudit(t, auth, { action: 'editar', entity: auditEntity(rule.page), summary: `${key} — ${summary}` })
-          return { value: next, version: saved.version, updatedAt: saved.updatedAt }
-        }
-
+        // nada gravado = lista vazia (incluir jogador pela tela → 403 abaixo)
         const storedList = (Array.isArray(stored) ? stored : []).filter(isPlainObject)
         const oldById = new Map<string, JsonObject>()
         for (const p of storedList) if (typeof p.id === 'string') oldById.set(p.id, p)
@@ -227,9 +230,120 @@ export const kvHandlers: KvHandlers = {
         if (ignoredBalance.length) {
           summary += `; saldo enviado ignorado (o saldo só muda por lançamento no extrato): ${clipIds(ignoredBalance).join(', ')}`
         }
-        await writeAudit(t, auth, { action: 'editar', entity: auditEntity(rule.page), summary: `${key} — ${summary}` })
+        await writeAudit(t, auth, { action: 'editar', entity: auditEntity(rule.page), summary: auditSummary(key, summary, row?.version ?? 0, saved.version) })
         return { value: next, version: saved.version, updatedAt: saved.updatedAt }
       })
     },
   },
+}
+
+// Importação explícita de jogadores -------------------------------------------------
+
+export const MAX_IMPORT_PLAYERS = 5000
+
+const importedPlayer = z.looseObject({
+  id: z.string('Jogador sem identificador.').trim().min(1, 'Jogador sem identificador.').max(64, 'Identificador de jogador inválido.'),
+  name: z.string('Nome inválido.').trim().min(1, 'Informe o nome do jogador.').max(120, 'Nome com mais de 120 caracteres.'),
+  status: z.enum(PLAYER_STATUSES, { error: 'Status de jogador inválido.' }),
+  email: z.string('E-mail inválido.').max(254, 'E-mail inválido.').optional(),
+  cpf: z.string('CPF inválido.').max(20, 'CPF inválido.').optional(),
+  phone: z.string('Telefone inválido.').max(30, 'Telefone inválido.').optional(),
+  balanceReal: z.number('Saldo real inválido.').min(0, 'Saldo real não pode ser negativo.').max(1e9, 'Saldo real acima do permitido.').optional(),
+  balanceBonus: z.number('Saldo bônus inválido.').min(0, 'Saldo bônus não pode ser negativo.').max(1e9, 'Saldo bônus acima do permitido.').optional(),
+  coins: FIELD_SCHEMA.coins.optional(),
+  tags: FIELD_SCHEMA.tags.optional(),
+})
+const importBody = z.object(
+  { players: z.array(importedPlayer, 'Envie a lista de jogadores.').min(1, 'Envie pelo menos um jogador.').max(MAX_IMPORT_PLAYERS, `No máximo ${MAX_IMPORT_PLAYERS} jogadores por importação.`) },
+  'Envie { players }.',
+)
+
+/** Importação de base (jogadores ou extrato): só Superadmin com 2FA ativo. */
+export function requireImporter(req: FastifyRequest) {
+  const auth = requireActive(req)
+  if (auth.role.id !== SUPERADMIN_ROLE_ID || !auth.user.totpEnabled) {
+    throw Errors.forbidden('Só o Superadmin com 2FA ativo importa dados da plataforma.')
+  }
+  return auth
+}
+
+const removeBody = z.object(
+  {
+    ids: z.array(z.string().trim().min(1).max(64), 'Envie os jogadores a remover.').min(1, 'Envie pelo menos um jogador.').max(MAX_IMPORT_PLAYERS, `No máximo ${MAX_IMPORT_PLAYERS} por vez.`),
+    reason: z.string('Informe o motivo.').trim().min(3, 'O motivo precisa ter pelo menos 3 caracteres.').max(300, 'O motivo pode ter no máximo 300 caracteres.'),
+  },
+  'Envie { ids, reason }.',
+)
+
+export function registerPlayerImportRoute(app: FastifyInstance) {
+  app.post(`/${PLAYERS_KEY}/remove`, async (req, reply) => {
+    const auth = requireImporter(req)
+    const { ids, reason } = removeBody.parse(req.body ?? {})
+    const rule = findKvRule(PLAYERS_KEY)!
+    const out = await app.db.tx(async (t) => {
+      const row = await loadRow(t, PLAYERS_KEY, true)
+      if (!row) throw Errors.notFound('Jogador')
+      const stored = storedValue(row, app.cipher)
+      const current = (Array.isArray(stored) ? stored : []).filter(isPlainObject)
+      const wanted = new Set(ids)
+      const found = current.filter((p) => wanted.has(String(p.id))).map((p) => String(p.id))
+      const missing = ids.filter((id) => !found.includes(id))
+      if (missing.length) throw Errors.invalid('Estes jogadores não estão na base.', { ids: clipIds(missing) })
+      const next = current.filter((p) => !wanted.has(String(p.id)))
+      const saved = await saveRow(t, app.cipher, PLAYERS_KEY, next, true, row, auth.user.id)
+      await writeAudit(t, auth, {
+        action: 'excluir',
+        entity: auditEntity(rule.page),
+        summary: auditSummary(
+          PLAYERS_KEY,
+          `${found.length} ${found.length === 1 ? 'jogador removido' : 'jogadores removidos'} da base (${reason}): ${clipIds(found).join(', ')}${found.length > 20 ? ` e mais ${found.length - 20}` : ''}`,
+          row.version,
+          saved.version,
+        ),
+      })
+      return { removed: found.length, version: saved.version }
+    })
+    reply.header('cache-control', 'no-store')
+    return { ok: true as const, ...out }
+  })
+
+  app.post(`/${PLAYERS_KEY}/import`, async (req, reply) => {
+    const auth = requireImporter(req)
+    const { players } = importBody.parse(req.body ?? {})
+    const rule = findKvRule(PLAYERS_KEY)!
+    const out = await app.db.tx(async (t) => {
+      const row = await loadRow(t, PLAYERS_KEY, true)
+      const stored = storedValue(row, app.cipher)
+      const current = (Array.isArray(stored) ? stored : []).filter(isPlainObject)
+      const existing = new Set(current.map((p) => String(p.id)))
+      const seen = new Set<string>()
+      for (const p of players) {
+        if (seen.has(p.id)) throw Errors.invalid(`Jogador repetido na importação (${p.id}).`, { id: p.id })
+        seen.add(p.id)
+      }
+      const dup = players.filter((p) => existing.has(p.id)).map((p) => p.id)
+      if (dup.length) throw Errors.invalid('Estes jogadores já estão na base.', { ids: clipIds(dup) })
+      if (current.length + players.length > MAX_PLAYERS) throw Errors.invalid(`No máximo ${MAX_PLAYERS} jogadores.`)
+      // valor mascarado nunca vira dado real
+      const imported = restoreMasked(players, MISSING, writePolicy(rule)) as JsonObject[]
+      const next = [...current, ...imported]
+      const saved = await saveRow(t, app.cipher, PLAYERS_KEY, next, true, row, auth.user.id)
+      const real = imported.reduce((s, p) => s + (typeof p.balanceReal === 'number' ? p.balanceReal : 0), 0)
+      const bonus = imported.reduce((s, p) => s + (typeof p.balanceBonus === 'number' ? p.balanceBonus : 0), 0)
+      const ids = imported.map((p) => String(p.id))
+      await writeAudit(t, auth, {
+        action: 'criar',
+        entity: auditEntity(rule.page),
+        summary: auditSummary(
+          PLAYERS_KEY,
+          `Importação de ${ids.length} ${ids.length === 1 ? 'jogador' : 'jogadores'} da plataforma (saldo real ${brl(real)}, bônus ${brl(bonus)}): ${clipIds(ids).join(', ')}${ids.length > 20 ? ` e mais ${ids.length - 20}` : ''}`,
+          row?.version ?? 0,
+          saved.version,
+        ),
+      })
+      return { imported: ids.length, version: saved.version }
+    })
+    reply.header('cache-control', 'no-store')
+    return { ok: true as const, ...out }
+  })
 }

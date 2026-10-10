@@ -20,6 +20,25 @@ export function isWebhookEvent(v: unknown): v is WebhookEvent {
 }
 
 /**
+ * Destinos de demonstração (src/domain/webhooks.ts › seedWebhookDestinations e seed.ts): hosts de terceiros e
+ * segredos publicados no bundle do painel. Nunca viram destino real por uma gravação da tela (ex.: o painel
+ * mostrou o seed depois de uma leitura que falhou e mandou a lista de volta).
+ */
+export const DEMO_WEBHOOK_HOSTS = ['hooks.x2win-crm.com', 'api.leadflow.app'] as const
+export const DEMO_SECRET_PATTERN = /^DEMO-hmac-/i
+
+/** URL aponta para um host de demonstração (ou subdomínio dele). */
+export function isDemoWebhookHost(url: string): boolean {
+  let host: string
+  try {
+    host = new URL(url.trim()).hostname.toLowerCase().replace(/\.$/, '')
+  } catch {
+    return false
+  }
+  return DEMO_WEBHOOK_HOSTS.some((d) => host === d || host.endsWith(`.${d}`))
+}
+
+/**
  * Proteção estrita contra SSRF (só https, só host público, DNS conferido na conexão).
  * Fica LIGADA por padrão: não depende de NODE_ENV=production (que pode faltar num
  * `npm start` fora do Docker). Só desliga nos testes automatizados (NODE_ENV=test) ou

@@ -5,13 +5,15 @@ import type { FastifyInstance } from 'fastify'
 import { seedTeam } from '@/data/team'
 import { hashPassword, newId } from '../../lib/crypto'
 import { writeAudit } from '../../services/audit'
-import { strongTemporaryPassword, withTeamLock } from './service'
+import { memberNameKeys, strongTemporaryPassword, withTeamLock } from './service'
 
 export async function seedDemo(app: FastifyInstance): Promise<string> {
   const demo = seedTeam()
   const existing = new Set(
     (await app.db.query<{ email: string }>('select lower(email) as email from users')).map((r) => r.email),
   )
+  // nome exibido é único na equipe (a auditoria identifica a pessoa por ele): não cria xará de quem já existe
+  const names = new Set((await app.db.query<{ name: string }>('select name from users')).flatMap((r) => memberNameKeys(r.name)))
   const roles = new Set((await app.db.query<{ id: string }>('select id from roles')).map((r) => r.id))
   // o Superadmin real vem de ADMIN_EMAIL: não cria um segundo de demonstração
   const hasSuperadmin = !!(await app.db.one(`select 1 from users where role_id = 'superadmin' and status = 'ativo'`))
@@ -31,7 +33,12 @@ export async function seedDemo(app: FastifyInstance): Promise<string> {
       skipped.push(`${email} (cargo ${m.roleId} não existe)`)
       continue
     }
+    if (memberNameKeys(m.name).some((k) => names.has(k))) {
+      skipped.push(`${email} (nome ${m.name} já usado)`)
+      continue
+    }
     existing.add(email)
+    for (const k of memberNameKeys(m.name)) names.add(k)
     const password = strongTemporaryPassword()
     prepared.push({ m: { ...m, email }, password, hash: await hashPassword(password) })
   }

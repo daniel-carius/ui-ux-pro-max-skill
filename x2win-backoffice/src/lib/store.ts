@@ -8,7 +8,9 @@
 // GET /api/kv/:key (a tela espera com o esqueleto de carregamento via Suspense);
 // gravações são otimistas, com PUT + versão, enfileiradas por chave. Chaves
 // locais (preferências de tela e rascunhos, ver shared/kv-registry.ts) continuam
-// no localStorage, como no modo demonstração.
+// no localStorage, como no modo demonstração. Se a leitura falhar (rede, 5xx,
+// 429), a tela mostra o valor padrão, mas a chave fica só para leitura até
+// carregar de novo (isLoadFailed/useLoadFailed): nada é decidido sobre o padrão.
 
 import { useCallback, useSyncExternalStore } from 'react'
 import type { KvGetResponse, KvPutResponse } from '@shared/api'
@@ -177,6 +179,26 @@ export function prefetchKeys(keys: string[]) {
   for (const key of keys) if (isRemote(key) && !cache.has(key) && !outcomes.has(key)) void ensureLoad(key)
 }
 
+/** Texto para ações bloqueadas porque a chave não carregou do servidor. */
+export const LOAD_FAILED_MESSAGE = 'Estes dados não foram carregados do servidor (o que aparece é o padrão). Recarregue a página e tente de novo.'
+
+/**
+ * Modo API: true quando a leitura da chave falhou e a tela mostra o valor padrão no lugar
+ * do servidor. Gravações ficam bloqueadas; telas de dinheiro mostram erro em vez do padrão.
+ * Uma recarga que dê certo (refreshKey) libera a chave. Modo demonstração: sempre false.
+ */
+export function isLoadFailed(key: string): boolean {
+  return isRemote(key) && loadFailed.has(key)
+}
+
+/** isLoadFailed como estado da tela (atualiza quando a chave recarrega). */
+export function useLoadFailed(key: string): boolean {
+  return useSyncExternalStore(
+    (cb) => subscribe(key, cb),
+    () => isLoadFailed(key),
+  )
+}
+
 /**
  * Atualiza o valor em memória sem gravar no servidor (ex.: depois de uma ação
  * de domínio como aprovar saque, que o servidor já gravou).
@@ -184,6 +206,11 @@ export function prefetchKeys(keys: string[]) {
 export function patchCache<T>(key: string, next: T | ((prev: T) => T), seed?: T | (() => T)) {
   // modo API: chave ainda não carregada vem do servidor já com a mudança
   if (isRemote(key) && !cache.has(key) && !materialize(key, seed ?? seeds.get(key))) return
+  // a leitura falhou e a tela mostra o padrão: aplicar a mudança sobre ele inventaria dados; busca o valor real
+  if (isRemote(key) && loadFailed.has(key)) {
+    void refetchNow(key)
+    return
+  }
   const prev = read<T>(key, seed as T)
   const value = typeof next === 'function' ? (next as (p: T) => T)(prev) : next
   cache.set(key, value)
@@ -215,6 +242,11 @@ const seeds = new Map<string, unknown>()
 const placeholders = new Map<string, unknown>()
 /** chaves que o cargo não pode ler: valor vazio, nunca gravado */
 const forbidden = new Set<string>()
+/**
+ * chaves cuja leitura falhou (rede, 5xx, 429) e que mostram o valor padrão no lugar do servidor:
+ * gravações bloqueadas até uma leitura dar certo (o padrão nunca vira dado nem base de decisão)
+ */
+const loadFailed = new Set<string>()
 /** fila de gravações por chave (mantém as versões em ordem) */
 const queues = new Map<string, Promise<void>>()
 const inflight = new Map<string, number>()
@@ -244,7 +276,10 @@ function notifyLoadError(e: unknown) {
   if (now - lastLoadErrorToast < 15_000) return
   lastLoadErrorToast = now
   const message = e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor.'
-  toast.error('Não foi possível carregar alguns dados', { description: `${message} Mostrando os valores padrão por enquanto.`, duration: 6000 })
+  toast.error('Não foi possível carregar alguns dados', {
+    description: `${message} Essas telas ficam só para leitura até os dados carregarem. Recarregue a página para tentar de novo.`,
+    duration: 6000,
+  })
 }
 
 async function fetchKey(key: string): Promise<Outcome> {
@@ -279,8 +314,10 @@ function materialize(key: string, seed: unknown, keepOnFail = false): boolean {
     confirmed.set(key, o.value)
     versions.set(key, o.version)
     forbidden.delete(key)
+    loadFailed.delete(key)
     return true
   }
+  // recarga que falhou: o que está na tela continua (valor do servidor, ou o padrão ainda bloqueado)
   if (o.kind === 'failed' && keepOnFail && cache.has(key)) return true
   const base = resolveSeed(seed)
   // sem leitura: lista vazia (ou o padrão, para objetos de configuração)
@@ -289,6 +326,9 @@ function materialize(key: string, seed: unknown, keepOnFail = false): boolean {
   confirmed.set(key, value)
   if (o.kind === 'forbidden') forbidden.add(key)
   else forbidden.delete(key)
+  // erro: o valor padrão só ocupa a tela; não é dado do servidor e não pode ser gravado
+  if (o.kind === 'failed') loadFailed.add(key)
+  else loadFailed.delete(key)
   // 404/erro: versão desconhecida. Gravar sem versão é aceito só se nada foi gravado;
   // se já existir valor, o servidor responde 409 e a chave é recarregada.
   versions.delete(key)
@@ -341,6 +381,10 @@ function remoteSet<T>(key: string, next: T | ((prev: T) => T), seed?: T | (() =>
   }
   if (forbidden.has(key)) {
     toast.error('Alteração não salva', { description: 'Seu cargo não tem acesso a estes dados.' })
+    return Promise.resolve(false)
+  }
+  if (loadFailed.has(key)) {
+    toast.error('Alteração não salva', { description: LOAD_FAILED_MESSAGE })
     return Promise.resolve(false)
   }
   const prev = cache.get(key) as T
@@ -429,6 +473,7 @@ function resetRemote(notify: boolean, serverDataOnly: boolean) {
   if (serverDataOnly) keys.forEach((k) => cache.delete(k))
   else cache.clear()
   forbidden.clear()
+  loadFailed.clear()
   if (notify) keys.forEach(emit)
 }
 

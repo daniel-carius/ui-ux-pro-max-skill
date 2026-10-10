@@ -1,16 +1,19 @@
 // Regras do programa de afiliados (Crescimento + Programa de afiliados).
 // Funções puras de cálculo e validação, mais as decisões de saque de comissão.
-// Na recriação com servidor, estas mesmas regras devem rodar no back-end.
+// Modo demonstração: a decisão roda aqui e grava no navegador.
+// Modo API: pagar e recusar são do servidor (POST /api/kv/afiliados.saques/:id/pay|reject),
+// que confere o status, grava a lista (e o saldo, na recusa) e audita numa transação.
 import type { Affiliate, AffiliateType } from '@/data/players'
 import { seedAffiliates } from '@/data/players'
 import { DATA_KEYS } from '@/data/hooks'
 import { seedAffiliateWithdrawals, type AffiliateWithdrawal, type PayoutMethod, type PeriodStats } from '@/data/afiliados'
 import { DAY, NOW, startOfDay } from '@/data/now'
 import { slugify } from '@/data/names'
+import { ApiError, api, isApiMode } from '@/lib/api'
 import { brl, maskCpf, maskEmail, maskPhone } from '@/lib/format'
-import { dbSet, useCollection, useDb } from '@/lib/store'
+import { LOAD_FAILED_MESSAGE, dbSetAndWait, isLoadFailed, patchCache, refreshKey, useCollection, useDb } from '@/lib/store'
 import { uid } from '@/lib/random'
-import { audit } from './session'
+import { KEYS as SESSION_KEYS, audit } from './session'
 import type { Role } from './roles'
 
 export const AFILIADOS_KEYS = {
@@ -369,13 +372,76 @@ export function canDecideAffiliateWithdrawals(role: Role) {
   return role.permissions.includes('afiliados-saques.aprovar')
 }
 
-function patchWithdrawal(id: string, p: Partial<AffiliateWithdrawal>) {
-  dbSet<AffiliateWithdrawal[]>(AFILIADOS_KEYS.withdrawals, (prev) => prev.map((w) => (w.id === id ? { ...w, ...p } : w)), seedAffiliateWithdrawals)
+/** Resposta de POST /api/kv/afiliados.saques/:id/pay|reject. */
+interface AffiliateWithdrawalDecisionResponse {
+  ok: true
+  message: string
+  /** pedido já decidido, no formato da lista (mascarado como na leitura) */
+  withdrawal: AffiliateWithdrawal
+  version: number
 }
 
-export function payAffiliateWithdrawal(w: AffiliateWithdrawal, role: Role, actorName: string): DecisionResult {
+const NOT_SAVED = 'A decisão não foi salva. Nada foi pago nem devolvido; confira a lista e tente de novo.'
+
+/** Modo API: o servidor decide; a tela só muda depois da resposta dele. */
+async function decideOnServer(w: AffiliateWithdrawal, action: 'pay' | 'reject', body?: { reason: string }): Promise<DecisionResult> {
+  try {
+    const res = await api<AffiliateWithdrawalDecisionResponse>(
+      'POST',
+      `/api/kv/${encodeURIComponent(AFILIADOS_KEYS.withdrawals)}/${encodeURIComponent(w.id)}/${action}`,
+      body,
+    )
+    const updated = res.withdrawal
+    patchCache<AffiliateWithdrawal[]>(
+      AFILIADOS_KEYS.withdrawals,
+      (prev) => prev.map((x) => (x.id === updated.id ? updated : x)),
+      seedAffiliateWithdrawals,
+    )
+    // a recusa devolveu o valor ao saldo de comissão no servidor; a auditoria ganhou a linha do servidor
+    if (action === 'reject') refreshKey(DATA_KEYS.affiliates).catch(() => {})
+    refreshKey(SESSION_KEYS.audit).catch(() => {})
+    return { ok: true, message: res.message }
+  } catch (e) {
+    // já decidido por outra pessoa ou pedido que não existe no servidor: mostra a lista real
+    if (e instanceof ApiError && (e.code === 'ja_decidido' || e.status === 404)) refreshKey(AFILIADOS_KEYS.withdrawals).catch(() => {})
+    const why = e instanceof ApiError ? e.message : 'Erro inesperado ao falar com o servidor.'
+    return { ok: false, message: `${why} ${NOT_SAVED}` }
+  }
+}
+
+/**
+ * Modo demonstração: aplica a decisão só se o pedido ainda está pendente no valor gravado
+ * (não no que a tela tinha) e devolve se gravou.
+ */
+async function decideLocally(id: string, p: Partial<AffiliateWithdrawal>): Promise<boolean> {
+  let stillPending = false
+  const saved = await dbSetAndWait<AffiliateWithdrawal[]>(
+    AFILIADOS_KEYS.withdrawals,
+    (prev) => {
+      stillPending = prev.some((x) => x.id === id && x.status === 'pendente')
+      return stillPending ? prev.map((x) => (x.id === id ? { ...x, ...p } : x)) : prev
+    },
+    seedAffiliateWithdrawals,
+  )
+  return saved && stillPending
+}
+
+function preconditions(w: AffiliateWithdrawal): DecisionResult | null {
   if (w.status !== 'pendente') return { ok: false, message: 'Este pedido já foi decidido.' }
+  // a lista na tela é o padrão (a leitura falhou): nada é decidido sobre ela
+  if (isLoadFailed(AFILIADOS_KEYS.withdrawals)) return { ok: false, message: LOAD_FAILED_MESSAGE }
+  return null
+}
+
+/**
+ * Paga um pedido. Resolve depois que a decisão foi gravada (modo API: pelo servidor, que também
+ * audita); ok:false quando nada foi gravado. A tela só confirma o pagamento com ok:true.
+ */
+export async function payAffiliateWithdrawal(w: AffiliateWithdrawal, role: Role, actorName: string): Promise<DecisionResult> {
+  const blocked = preconditions(w)
+  if (blocked) return blocked
   if (!canDecideAffiliateWithdrawals(role)) return { ok: false, message: `O cargo ${role.name} não paga saques de afiliados.` }
+  if (isApiMode()) return decideOnServer(w, 'pay')
   const now = new Date()
   const reference =
     w.method === 'pix'
@@ -383,24 +449,30 @@ export function payAffiliateWithdrawal(w: AffiliateWithdrawal, role: Role, actor
       : w.method === 'ted'
         ? `TED-${Date.now().toString().slice(-9)}`
         : `CRED-${Date.now().toString().slice(-7)}`
-  patchWithdrawal(w.id, { status: 'pago', decidedAt: now.toISOString(), decidedBy: actorName, reason: null, reference })
+  const saved = await decideLocally(w.id, { status: 'pago', decidedAt: now.toISOString(), decidedBy: actorName, reason: null, reference })
+  if (!saved) return { ok: false, message: `Este pedido já foi decidido ou não está mais na lista. ${NOT_SAVED}` }
   audit('aprovar', `Saque de afiliado #${w.id}`, `Pagamento de ${brl(w.amount)} para ${w.affiliateName} (${w.method.toUpperCase()})`)
   const how = w.method === 'pix' ? 'O PIX foi enviado.' : w.method === 'ted' ? 'A TED foi agendada.' : 'O valor entrou no saldo do jogo.'
   return { ok: true, message: `${brl(w.amount)} pagos a ${w.affiliateName}. ${how}` }
 }
 
-export function rejectAffiliateWithdrawal(w: AffiliateWithdrawal, role: Role, actorName: string, reason: string): DecisionResult {
-  if (w.status !== 'pendente') return { ok: false, message: 'Este pedido já foi decidido.' }
+/** Recusa um pedido e devolve o valor ao saldo de comissão. Mesmas garantias de payAffiliateWithdrawal. */
+export async function rejectAffiliateWithdrawal(w: AffiliateWithdrawal, role: Role, actorName: string, reason: string): Promise<DecisionResult> {
+  const blocked = preconditions(w)
+  if (blocked) return blocked
   if (!canDecideAffiliateWithdrawals(role)) return { ok: false, message: `O cargo ${role.name} não decide saques de afiliados.` }
-  if (!reason.trim()) return { ok: false, message: 'Informe o motivo da recusa.' }
-  patchWithdrawal(w.id, { status: 'recusado', decidedAt: new Date().toISOString(), decidedBy: actorName, reason: reason.trim() })
+  const why = reason.trim()
+  if (!why) return { ok: false, message: 'Informe o motivo da recusa.' }
+  if (isApiMode()) return decideOnServer(w, 'reject', { reason: why })
+  const saved = await decideLocally(w.id, { status: 'recusado', decidedAt: new Date().toISOString(), decidedBy: actorName, reason: why })
+  if (!saved) return { ok: false, message: `Este pedido já foi decidido ou não está mais na lista. ${NOT_SAVED}` }
   // o valor reservado volta para o saldo de comissão do afiliado
-  dbSet<Affiliate[]>(
+  await dbSetAndWait<Affiliate[]>(
     DATA_KEYS.affiliates,
     (prev) => prev.map((a) => (a.id === w.affiliateId ? { ...a, balance: round2(a.balance + w.amount) } : a)),
     seedAffiliates,
   )
-  audit('recusar', `Saque de afiliado #${w.id}`, `Pedido de ${brl(w.amount)} de ${w.affiliateName} recusado: ${reason.trim()}`)
+  audit('recusar', `Saque de afiliado #${w.id}`, `Pedido de ${brl(w.amount)} de ${w.affiliateName} recusado: ${why}`)
   return { ok: true, message: `${brl(w.amount)} voltaram para o saldo de comissão de ${w.affiliateName}.` }
 }
 

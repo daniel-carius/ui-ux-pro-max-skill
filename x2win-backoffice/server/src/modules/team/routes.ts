@@ -29,14 +29,20 @@ const directBody = z.object({ name: memberNameSchema, email: emailSchema, roleId
 const inviteBody = z.object({
   email: emailSchema,
   roleId: roleIdSchema,
-  name: z.string('Nome inválido.').trim().max(100, 'Use no máximo 100 caracteres no nome.').optional(),
+  // vazio = nome montado a partir do e-mail; digitado = mesma regra do cadastro direto
+  name: z
+    .string('Nome inválido.')
+    .max(300, 'Nome longo demais.')
+    .optional()
+    .transform((v) => (v?.trim() ? v : undefined))
+    .pipe(memberNameSchema.optional()),
 })
 
 const roleBody = z.object({ roleId: roleIdSchema })
 
+// `name` é aceito por compatibilidade e ignorado: o nome é o que quem convidou registrou (veja acceptInvite)
 const acceptBody = z.object({
   token: z.string('Convite inválido.').trim().min(16, 'Convite inválido.').max(200, 'Convite inválido.'),
-  name: memberNameSchema,
   password: z.string('Informe a senha.').max(256, 'Senha longa demais.'),
 })
 
@@ -84,8 +90,8 @@ export default async function routes(app: FastifyInstance) {
 
   // ---------- POST /invites/accept (pública) ----------
   app.post('/invites/accept', TEN_PER_MINUTE, async (req) => {
-    const body = acceptBody.parse(req.body ?? {})
-    await acceptInvite(app.db, body, req.clientIp)
+    const { token, password } = acceptBody.parse(req.body ?? {})
+    await acceptInvite(app.db, { token, password }, req.clientIp)
     return { ok: true as const }
   })
 

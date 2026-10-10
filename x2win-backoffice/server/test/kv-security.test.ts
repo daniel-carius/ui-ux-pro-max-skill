@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { findKvRule, isPiiField, KV_RULES } from '@shared/kv-registry'
 import { isMasked, maskIp, maskPii, maskUrlTokens } from '../src/lib/mask'
+import { encryptAtRest, loadRow, saveRow } from '../src/modules/kv/store'
 import { api, createTestApp, loginAs } from './helpers'
 
 // ---------- utilitários ----------
@@ -26,6 +27,18 @@ async function storedPlain<T = Row[]>(app: FastifyInstance, key: string): Promis
   return (r?.value_enc ? JSON.parse(app.cipher.decrypt(r.value_enc)) : r?.value) as T
 }
 const byId = (list: Row[], id: string) => list.find((x) => x.id === id)!
+
+/**
+ * Grava a chave direto no banco, como a plataforma (jogadores, extrato, depósitos e
+ * registros de campanha não são criados pela tela): cifrada conforme a regra.
+ */
+async function seed(app: FastifyInstance, key: string, value: unknown) {
+  const rule = findKvRule(key)!
+  await app.db.tx(async (t) => {
+    const row = await loadRow(t, key, true)
+    await saveRow(t, app.cipher, key, value, encryptAtRest(rule), row, 'plataforma')
+  })
+}
 async function current(app: FastifyInstance, cookie: string, key: string) {
   const r = await get(app, cookie, key)
   expect(r.statusCode, `${key}: ${r.body}`).toBe(200)
@@ -84,7 +97,7 @@ describe('kv: status do jogador segue o jogo responsável (r1-authz-1, r1-logic-
     admin = (await loginAs(app)).cookie
     suporte = (await loginAs(app, 'suporte', { name: 'Sara Suporte' })).cookie
     antifraude = await customRole(app, 'antifraude-only', ['antifraude.ver', 'antifraude.banir'])
-    expect((await put(app, admin, P, players)).statusCode).toBe(200)
+    await seed(app, P, players)
   })
   afterAll(async () => app.close())
 
@@ -203,10 +216,12 @@ describe('kv: status do jogador segue o jogo responsável (r1-authz-1, r1-logic-
   })
 
   it('chaves filhas dos domínios de jogador/extrato/histórico e as pausas não são graváveis pelo painel', async () => {
-    for (const key of ['geral.jogadores.copia', 'geral.transacoes.copia', 'geral.usuarios.status.copia', 'geral.jogadores.pausas']) {
+    // filhas não registradas nem existem (404); as pausas são só do servidor (403)
+    for (const key of ['geral.jogadores.copia', 'geral.transacoes.copia', 'geral.usuarios.status.copia']) {
       const r = await put(app, admin, key, [player('a1', 'ativo')])
-      expect(r.statusCode, key).toBe(403)
+      expect(r.statusCode, key).toBe(404)
     }
+    expect((await put(app, admin, 'geral.jogadores.pausas', [player('a1', 'ativo')])).statusCode).toBe(403)
   })
 
   it('jogador autoexcluído não recebe moedas', async () => {
@@ -221,7 +236,6 @@ describe('kv: status do jogador segue o jogo responsável (r1-authz-1, r1-logic-
 
 describe('kv: saldo só muda pelo extrato, montado pelo servidor (r1-authz-2, r1-logic-2, r1-authz-8, r1-logic-5)', () => {
   let app: FastifyInstance
-  let admin: string
   let suporte: string
   let suporteId: string
   let estornos: string
@@ -262,13 +276,13 @@ describe('kv: saldo só muda pelo extrato, montado pelo servidor (r1-authz-2, r1
 
   beforeAll(async () => {
     app = await createTestApp()
-    admin = (await loginAs(app, 'superadmin', { name: 'Daniel Superadmin' })).cookie
+    await loginAs(app, 'superadmin', { name: 'Daniel Superadmin' })
     const s = await loginAs(app, 'suporte', { name: 'Sara Suporte' })
     suporte = s.cookie
     suporteId = s.user.id
     estornos = await customRole(app, 'estornos', ['transacoes.ver', 'transacoes.editar'])
-    expect((await put(app, admin, P, players)).statusCode).toBe(200)
-    expect((await put(app, admin, T, ledger)).statusCode).toBe(200)
+    await seed(app, P, players)
+    await seed(app, T, ledger)
   })
   afterAll(async () => app.close())
 
@@ -427,13 +441,12 @@ describe('kv: e-mail de jogador mascarado e cifrado em extrato, depósitos e reg
     marketing = (await loginAs(app, 'marketing')).cookie
     soDashboard = await customRole(app, 'so-dashboard', ['dashboard.ver'])
     for (const [key, value] of writes) {
-      // esportes.apostas é gravada só pelo servidor
+      // esportes.apostas fica em claro (como a plataforma gravava antes de a regra ganhar `pii`)
       if (key === 'esportes.apostas') {
         await app.db.query(`insert into kv_store (key, value, version) values ($1, $2::jsonb, 1)`, [key, JSON.stringify(value)])
         continue
       }
-      const r = await put(app, admin, key, value)
-      expect(r.statusCode, `${key}: ${r.body}`).toBe(200)
+      await seed(app, key, value)
     }
   })
   afterAll(async () => app.close())
@@ -532,7 +545,7 @@ describe('kv: afiliados.saques mascara e-mail e dados bancários sem afiliados-s
   beforeAll(async () => {
     app = await createTestApp()
     admin = (await loginAs(app)).cookie
-    expect((await put(app, admin, 'afiliados.saques', ITEMS)).statusCode).toBe(200)
+    await seed(app, 'afiliados.saques', ITEMS)
   })
   afterAll(async () => app.close())
 
@@ -547,13 +560,17 @@ describe('kv: afiliados.saques mascara e-mail e dados bancários sem afiliados-s
     }
   })
 
-  it('aprovador sem ver-pix devolve o item mascarado: dados reais preservados', async () => {
+  it('aprovador sem ver-pix paga pela rota do servidor: dados reais preservados e resposta mascarada', async () => {
     const cookie = await customRole(app, 'aprovador', ['afiliados-saques.ver', 'afiliados-saques.aprovar'])
     const cur = await current(app, cookie, 'afiliados.saques')
-    const next = cur.value.map((w) => (w.id === 'w-ted' ? { ...w, status: 'aprovado' } : w))
-    expect((await put(app, cookie, 'afiliados.saques', next, cur.version)).statusCode).toBe(200)
+    // a lista não é gravada pela tela
+    const next = cur.value.map((w) => (w.id === 'w-ted' ? { ...w, status: 'pago' } : w))
+    expect((await put(app, cookie, 'afiliados.saques', next, cur.version)).statusCode).toBe(403)
+    const pay = await api(app, 'POST', '/api/kv/afiliados.saques/w-ted/pay', { cookie })
+    expect(pay.statusCode, pay.body).toBe(200)
+    expect(pay.json().withdrawal.bank).toEqual({ bank: '341 · Itaú', agency: '••34', account: '•••65-4', holder: 'J*** S***' })
     const stored = await storedPlain(app, 'afiliados.saques')
-    expect(byId(stored, 'w-ted')).toEqual({ ...ITEMS[0], status: 'aprovado' })
+    expect(byId(stored, 'w-ted')).toMatchObject({ ...ITEMS[0], status: 'pago', decidedBy: 'Pessoa Teste', decidedAt: expect.any(String), reference: expect.stringMatching(/^TED-/) })
     expect(byId(stored, 'w-pix')).toEqual(ITEMS[1])
   })
 })
@@ -573,8 +590,8 @@ describe("kv: bases de jogadores e afiliados não são 'equipe' (r1-authz-4, r1-
     cookies.tema = await customRole(app, 'tema-only', ['tema.ver'])
     cookies.none = await customRole(app, 'no-perms', [])
     cookies.comissoes = await customRole(app, 'comissoes-only', ['comissoes.ver'])
-    expect((await put(app, cookies.admin, 'geral.jogadores', [player('p1', 'autoexcluido', { balanceReal: 15234.77, city: 'Campinas' })])).statusCode).toBe(200)
-    expect((await put(app, cookies.admin, 'crescimento.afiliados', [{ id: 'a1', name: 'Afiliado', balance: 98000, cpa: 150, revShare: 35 }])).statusCode).toBe(200)
+    await seed(app, 'geral.jogadores', [player('p1', 'autoexcluido', { balanceReal: 15234.77, city: 'Campinas' })])
+    await seed(app, 'crescimento.afiliados', [{ id: 'a1', name: 'Afiliado', balance: 98000, cpa: 150, revShare: 35 }])
   })
   afterAll(async () => app.close())
 
@@ -633,13 +650,12 @@ describe('kv: máscara de IP cobre IPv6, porta e listas (r1-exposure-6)', () => 
   it('ponta a ponta: leitor sem usuarios.ver-dados não recebe o IP completo; a máscara volta ao gravado', async () => {
     const app = await createTestApp()
     try {
-      const admin = (await loginAs(app)).cookie
       const suporte = (await loginAs(app, 'suporte')).cookie
       const list = [
         player('p1', 'ativo', { ip: IPV6, lastIp: IPV6_SHORT }),
         player('p2', 'ativo', { ip: '189.45.12.207, 10.0.0.1', lastIp: '189.45.12.207:51234' }),
       ]
-      expect((await put(app, admin, 'geral.jogadores', list)).statusCode).toBe(200)
+      await seed(app, 'geral.jogadores', list)
       const cur = await current(app, suporte, 'geral.jogadores')
       expect(cur.value[0]).toMatchObject({ ip: '2804:14c:****:****:****:****:****:****', lastIp: '2804:7f4:****:****:****:****:****:****' })
       expect(JSON.stringify(cur.value)).not.toContain('189.45.12.207')

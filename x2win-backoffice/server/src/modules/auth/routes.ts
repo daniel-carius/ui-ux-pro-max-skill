@@ -1,5 +1,5 @@
 // Login, 2FA, troca de senha, sessão atual e saída. Prefixo /api/auth.
-import type { FastifyInstance, FastifyRequest } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import type {
   LoginResponse,
@@ -11,6 +11,7 @@ import { SECURITY } from '../../config'
 import { Errors } from '../../errors'
 import { hashPassword, passwordProblem, sha256, verifyPassword } from '../../lib/crypto'
 import { newTotpSecret, otpauthUrl, verifyTotp } from '../../lib/totp'
+import { PRE_AUTH_BODY_LIMIT } from '../../plugins/session'
 import { writeAudit } from '../../services/audit'
 import {
   clearSessionCookie,
@@ -39,10 +40,14 @@ import {
   toAuthUser,
   type UserRow,
 } from './service'
+import { withPasswordSlot } from './password-gate'
 import { ipBucket, loginThrottleFor } from './throttle'
 
+/** Corpos destas rotas têm menos de 1 KB: nem uma sessão ativa manda o corpo de 12 MB das imagens para cá. */
+const SMALL_BODY = { bodyLimit: PRE_AUTH_BODY_LIMIT }
+
 /** 10 por minuto por IP (a chave do limite é o IP do cliente). */
-const TEN_PER_MINUTE = { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }
+const TEN_PER_MINUTE = { ...SMALL_BODY, config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }
 
 const RECOVERY_CODES = 8
 
@@ -104,10 +109,17 @@ export default async function routes(app: FastifyInstance) {
    * bloqueio da conta; o erro que bloqueia também encerra esta sessão (um cookie roubado não vira um
    * oráculo de senha).
    */
-  async function confirmCurrentPassword(req: FastifyRequest, auth: AuthContext, user: UserRow, currentPassword: string | undefined, reason: string) {
+  async function confirmCurrentPassword(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    auth: AuthContext,
+    user: UserRow,
+    currentPassword: string | undefined,
+    reason: string,
+  ) {
     if (!currentPassword) throw Errors.invalid('Informe a senha atual.')
     if (user.locked && user.locked_until) throw AuthErrors.locked(user.locked_until)
-    if (await verifyPassword(currentPassword, user.password_hash)) return
+    if (await withPasswordSlot(reply, () => verifyPassword(currentPassword, user.password_hash))) return
     const lock = await registerFailure(app.db, user, req.clientIp, reason)
     if (lock) {
       await revokeSession(app.db, auth.sessionId)
@@ -124,8 +136,9 @@ export default async function routes(app: FastifyInstance) {
     const usable = !!user && user.status === 'ativo'
 
     // sempre calcula o hash (mesmo sem pessoa e com a origem bloqueada): o tempo de resposta não revela
-    // quem existe nem o estado do bloqueio
-    const ok = await verifyPassword(body.password, user?.password_hash ?? null)
+    // quem existe nem o estado do bloqueio. O cálculo passa pela fila do processo (password-gate.ts): os limites
+    // acima são por IP, e logins de muitas origens não podem ocupar o pool de threads inteiro.
+    const ok = await withPasswordSlot(reply, () => verifyPassword(body.password, user?.password_hash ?? null))
 
     // freio por (e-mail, origem), decidido depois do hash e sem await entre ler e gravar
     const outcome = throttle.settle(throttle.key(email, req.clientIp), usable && ok)
@@ -184,7 +197,7 @@ export default async function routes(app: FastifyInstance) {
   })
 
   // ---------- POST /2fa/setup ----------
-  app.post('/2fa/setup', TEN_PER_MINUTE, async (req) => {
+  app.post('/2fa/setup', TEN_PER_MINUTE, async (req, reply) => {
     const auth = requireStage(req, 'enroll', 'active')
     const body = setupBody.parse(req.body ?? undefined)
     const user = await loadUser(app.db, auth.user.id)
@@ -193,7 +206,7 @@ export default async function routes(app: FastifyInstance) {
     // sessão ativa: reautenticação antes de ligar um autenticador (um cookie roubado não cadastra o
     // aplicativo de outra pessoa nem leva os códigos de recuperação)
     if (auth.stage === 'active') {
-      await confirmCurrentPassword(req, auth, user, body?.currentPassword, 'Senha atual incorreta ao cadastrar o 2FA')
+      await confirmCurrentPassword(req, reply, auth, user, body?.currentPassword, 'Senha atual incorreta ao cadastrar o 2FA')
     }
     const secret = newTotpSecret()
     const row = await app.db.tx(async (db) => {
@@ -275,18 +288,22 @@ export default async function routes(app: FastifyInstance) {
   })
 
   // ---------- POST /password ----------
-  app.post('/password', TEN_PER_MINUTE, async (req) => {
+  app.post('/password', TEN_PER_MINUTE, async (req, reply) => {
     const auth = requireStage(req, 'password', 'active')
     const body = passwordBody.parse(req.body ?? {})
     const user = await loadUser(app.db, auth.user.id)
     if (!user) throw Errors.unauthenticated()
     // com sessão ativa a senha atual é obrigatória e o erro conta para o bloqueio da conta
-    if (auth.stage === 'active') await confirmCurrentPassword(req, auth, user, body.currentPassword, 'Senha atual incorreta ao trocar a senha')
+    if (auth.stage === 'active') {
+      await confirmCurrentPassword(req, reply, auth, user, body.currentPassword, 'Senha atual incorreta ao trocar a senha')
+    }
     const problem = passwordProblem(body.newPassword, SECURITY.passwordMinLength)
     if (problem) throw Errors.invalid(problem)
-    if (await verifyPassword(body.newPassword, user.password_hash)) throw Errors.invalid('A nova senha precisa ser diferente da atual.')
+    if (await withPasswordSlot(reply, () => verifyPassword(body.newPassword, user.password_hash))) {
+      throw Errors.invalid('A nova senha precisa ser diferente da atual.')
+    }
 
-    const hash = await hashPassword(body.newPassword)
+    const hash = await withPasswordSlot(reply, () => hashPassword(body.newPassword))
     const stage = await app.db.tx(async (db) => {
       if (auth.stage === 'active') {
         await assertNotLocked(db, user.id)
@@ -311,7 +328,7 @@ export default async function routes(app: FastifyInstance) {
   })
 
   // ---------- POST /logout ----------
-  app.post('/logout', async (req, reply) => {
+  app.post('/logout', SMALL_BODY, async (req, reply) => {
     const token = req.cookies[SECURITY.sessionCookie]
     if (token) await revokeSession(app.db, sha256(token))
     clearSessionCookie(reply, app.config)

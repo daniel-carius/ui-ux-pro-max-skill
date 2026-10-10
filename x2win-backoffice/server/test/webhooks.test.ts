@@ -643,3 +643,140 @@ describe('seed de demonstração', () => {
     await app.close()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Regressão r2-api-mode-seed-fallback-3: depois de uma leitura que falhou (502 do nginx, 429, queda de rede) o
+// painel mostrava seedWebhookDestinations() e, na primeira edição, mandava o seed inteiro num PUT SEM versão. O
+// servidor aceitava (nada gravado -> qualquer versão) e passava a enfileirar saque.pago/rejeitado para
+// hooks.x2win-crm.com / api.leadflow.app (terceiros), assinados com segredos públicos no bundle.
+// ---------------------------------------------------------------------------
+
+describe('regressão r2-api-mode-seed-fallback-3: destinos de demonstração não viram destinos reais', () => {
+  const created = '2026-07-11T23:04:13.771Z'
+  // exatamente o que o painel enviou (src/domain/webhooks.ts seedWebhookDestinations, wh5 desligado pela pessoa)
+  const PANEL_SEED = [
+    { id: 'wh1', event: 'saque.solicitado', url: 'https://hooks.x2win-crm.com/in/saques', active: true, secret: 'DEMO-hmac-1f9a2c', createdAt: created },
+    { id: 'wh2', event: 'saque.pago', url: 'https://hooks.x2win-crm.com/in/saques', active: true, secret: 'DEMO-hmac-8b2d4f', createdAt: created },
+    { id: 'wh3', event: 'saque.rejeitado', url: 'https://hooks.x2win-crm.com/in/saques', active: true, secret: 'DEMO-hmac-3c5e7a', createdAt: created },
+    { id: 'wh4', event: 'saque.expirado', url: 'https://hooks.x2win-crm.com/in/saques', active: true, secret: 'DEMO-hmac-6d8f1b', createdAt: created },
+    { id: 'wh5', event: 'deposito.primeiro', url: 'https://api.leadflow.app/v1/ftd/a8c3f1d92e7b', active: false, secret: 'DEMO-hmac-9e1a3c', createdAt: created },
+  ]
+  const THIRD_PARTY = /hooks\.x2win-crm\.com|api\.leadflow\.app/
+  const GOOD_SECRET = 'whsec_0123456789abcdef0123456789abcdef'
+
+  let app: FastifyInstance
+  let root: Awaited<ReturnType<typeof loginAs>>
+  beforeAll(async () => {
+    app = await createTestApp()
+    root = await loginAs(app, 'superadmin', { name: 'Admin PoC' })
+  })
+  afterAll(async () => app.close())
+
+  const put = (body: unknown) => api(app, 'PUT', `/api/kv/${DEST_KEY}`, { cookie: root.cookie, body })
+
+  it('PUT do seed sem versão numa instalação nova → 409; nada gravado, nenhum saque real vai para terceiro', async () => {
+    // instalação nova: a chave responde stored:true, lista vazia, versão 0
+    const get = await api(app, 'GET', `/api/kv/${DEST_KEY}`, { cookie: root.cookie })
+    expect(get.json()).toMatchObject({ value: [], version: 0, stored: true })
+
+    const blind = await put({ value: PANEL_SEED })
+    expect(blind.statusCode).toBe(409)
+    expect(blind.json().error).toMatchObject({ code: 'versao_desatualizada', details: { version: 0 } })
+    // versão diferente da atual também não passa (a única aceita numa instalação nova é 0)
+    expect((await put({ value: [], version: 7 })).statusCode).toBe(409)
+
+    // saques reais aprovados/rejeitados depois disso
+    for (const [id, action] of [
+      ['SQ-POC-1', 'approve'],
+      ['SQ-POC-2', 'reject'],
+    ] as const) {
+      await app.db.query(
+        `insert into withdrawals (id, player_id, player_name, player_email, amount_cents, status, risk_level, risk_score, pix_key_type, pix_key_enc, reference, created_at, updated_at)
+         values ($1, 'p1', 'J', 'j@x.com', 25050, 'pendente', 'baixo', 1, 'CPF', $2, 'E1', now(), now())`,
+        [id, app.cipher.encrypt('12345678909')],
+      )
+      const r = await api(app, 'POST', `/api/withdrawals/${id}/${action}`, {
+        cookie: root.cookie,
+        body: action === 'reject' ? { reason: 'Documento divergente do titular' } : undefined,
+      })
+      expect(r.statusCode, r.body).toBe(200)
+    }
+    const rows = await app.db.query<{ url: string }>('select url from webhook_destinations')
+    expect(rows.filter((r) => THIRD_PARTY.test(r.url)), 'destinos de demonstração gravados como reais').toEqual([])
+    const queued = await app.db.query<{ url: string }>(`select d.url from webhook_outbox o join webhook_destinations d on d.id = o.destination_id`)
+    expect(queued.filter((o) => THIRD_PARTY.test(o.url)), 'eventos reais de saque enfileirados para terceiro').toEqual([])
+  })
+
+  it('mesmo com a versão certa: host de demonstração ou segredo de demonstração → 400', async () => {
+    const withVersion = await put({ value: PANEL_SEED, version: 0 })
+    expect(withVersion.statusCode).toBe(400)
+    expect(withVersion.json().error.code).toBe('dados_invalidos')
+
+    // só o host (segredo novo, gerado pelo painel)
+    const host = await put({ value: [{ ...PANEL_SEED[1], id: 'n1', secret: GOOD_SECRET }], version: 0 })
+    expect(host.statusCode).toBe(400)
+    expect(host.json().error).toMatchObject({ code: 'dados_invalidos', details: { id: 'n1', field: 'url' } })
+    const sub = await put({ value: [{ id: 'n2', event: 'saque.pago', url: 'https://in.API.LeadFlow.app./x', active: true, secret: GOOD_SECRET }], version: 0 })
+    expect(sub.statusCode).toBe(400)
+
+    // só o segredo (público no bundle do painel)
+    const secret = await put({ value: [{ id: 'n3', event: 'saque.pago', url: 'https://hooks.exemplo.com/in', active: true, secret: 'demo-HMAC-8b2d4f' }], version: 0 })
+    expect(secret.statusCode).toBe(400)
+    expect(secret.json().error).toMatchObject({ code: 'dados_invalidos', details: { id: 'n3', field: 'secret' } })
+    expect(await app.db.query('select id from webhook_destinations')).toHaveLength(0)
+
+    // caminho normal do painel: leu versão 0, manda versão 0, destino real
+    const ok = await put({ value: [{ id: 'n4', event: 'saque.pago', url: 'https://hooks.exemplo.com/in', active: true, secret: GOOD_SECRET }], version: 0 })
+    expect(ok.statusCode, ok.body).toBe(200)
+    expect(ok.json().version).toBe(1)
+    // trocar o endereço de um destino existente para host de demonstração também é recusado
+    const cur = ok.json().value as { id: string; url: string }[]
+    const moved = await put({ value: cur.map((d) => ({ ...d, url: 'https://hooks.x2win-crm.com/in/saques' })), version: 1 })
+    expect(moved.statusCode).toBe(400)
+    expect((await app.db.query<{ url: string }>('select url from webhook_destinations'))[0].url).toBe('https://hooks.exemplo.com/in')
+  })
+
+  it('destino de demonstração já gravado e ativo (ex.: antes desta trava) não recebe evento real', async () => {
+    const probe = await createTestApp()
+    try {
+      const demo = await insertDestination(probe, { id: 'wh2', event: 'saque.pago', url: 'https://hooks.x2win-crm.com/in/saques', secret: 'DEMO-hmac-8b2d4f' })
+      const real = await insertDestination(probe, { id: 'real1', event: 'saque.pago', url: `${base}/real`, secret: 'segredo-real-123456' })
+      // item que já estava na fila para o destino de demonstração
+      await probe.db.query(`insert into webhook_outbox (event, payload, destination_id) values ('saque.pago', '{"id":"evt_old","data":{}}'::jsonb, $1)`, [demo])
+      expect(await enqueueWebhook(probe.db, 'saque.pago', { id: 'SQ-1', amount: 4800, playerId: 'p1' })).toBe(1)
+      const queued = await outbox(probe)
+      expect(queued.filter((o) => o.destination_id === real)).toHaveLength(1)
+      expect(queued.filter((o) => o.destination_id === demo)).toHaveLength(1) // só o antigo
+      await processOutboxOnce(probe)
+      const after = await outbox(probe)
+      expect(after.find((o) => o.destination_id === demo)).toMatchObject({ status: 'falhou', attempts: 0 })
+      expect(after.find((o) => o.destination_id === demo)?.last_error).toContain('demonstração')
+      expect(after.find((o) => o.destination_id === real)?.status).toBe('entregue')
+      expect(received.map((r) => r.url)).toEqual(['/real'])
+      expect((await executions(probe)).every((e) => e.destination_id === real)).toBe(true)
+    } finally {
+      await probe.close()
+    }
+  })
+
+  it('instalação com DEMO_DATA (destinos semeados direto no banco): a lista volta mascarada e continua editável', async () => {
+    const demo = await createTestApp()
+    try {
+      await seedDemo(demo)
+      const admin = await authFor(demo, 'superadmin')
+      const cur = (await kvHandlers['webhook-destinations']!.read(kvCtx(demo, admin, DEST_KEY)))!
+      const list = cur.value as { id: string; active: boolean }[]
+      // desligar um destino semeado (mesma URL, segredo mascarado) é aceito
+      const saved = await kvHandlers['webhook-destinations']!.write!(
+        kvCtx(demo, admin, DEST_KEY),
+        list.map((d) => (d.id === 'wh5' ? { ...d, active: false } : d)),
+        cur.version,
+      )
+      expect(saved.version).toBe(cur.version + 1)
+      const wh5 = await demo.db.one<{ active: boolean }>(`select active from webhook_destinations where id = 'wh5'`)
+      expect(wh5?.active).toBe(false)
+    } finally {
+      await demo.close()
+    }
+  })
+})

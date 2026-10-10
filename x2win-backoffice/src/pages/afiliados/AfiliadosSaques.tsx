@@ -1,13 +1,32 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Ban, CalendarClock, Check, CheckCircle2, Clock, Eye, EyeOff, Hourglass, ListChecks, Lock, ShieldCheck, TriangleAlert, X, XCircle } from 'lucide-react'
+import {
+  Ban,
+  CalendarClock,
+  Check,
+  CheckCircle2,
+  Clock,
+  CloudOff,
+  Eye,
+  EyeOff,
+  Hourglass,
+  ListChecks,
+  Lock,
+  RefreshCw,
+  ShieldCheck,
+  TriangleAlert,
+  X,
+  XCircle,
+} from 'lucide-react'
 import {
   Alert,
   Badge,
   Button,
+  Card,
   DataTable,
   DescriptionList,
   Drawer,
+  EmptyState,
   IconButton,
   KpiCard,
   Mono,
@@ -26,7 +45,8 @@ import {
 } from '@/components/ui'
 import { brl, brlCompact, cpf, dateTime, num, phone, relative } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { useAffiliates } from '@/data/hooks'
+import { DATA_KEYS, useAffiliates } from '@/data/hooks'
+import { refreshKey, useLoadFailed } from '@/lib/store'
 import {
   AFFILIATE_REJECT_REASONS,
   AFFILIATE_WITHDRAWAL_STATUS_LABEL,
@@ -37,6 +57,7 @@ import {
 import type { Affiliate } from '@/data/players'
 import { audit, useSession } from '@/domain/session'
 import {
+  AFILIADOS_KEYS,
   addBusinessDays,
   isLate,
   maskAccount,
@@ -86,6 +107,18 @@ export default function AfiliadosSaques() {
   const canDecide = can('afiliados-saques.aprovar')
   const canReveal = can('afiliados-saques.ver-pix')
   const affById = useMemo(() => new Map(affiliates.map((a) => [a.id, a])), [affiliates])
+  // modo API: leitura que falhou mostra o padrão no lugar do servidor; aqui isso vira erro, nunca lista decidível
+  const withdrawalsFailed = useLoadFailed(AFILIADOS_KEYS.withdrawals)
+  const affiliatesFailed = useLoadFailed(DATA_KEYS.affiliates)
+  const [retrying, setRetrying] = useState(false)
+  // pedidos com decisão em andamento (o ref barra o clique duplo antes de a tela redesenhar)
+  const deciding = useRef(new Set<string>())
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set())
+  const markBusy = (id: string, on: boolean) => {
+    if (on) deciding.current.add(id)
+    else deciding.current.delete(id)
+    setBusy(new Set(deciding.current))
+  }
 
   const now = new Date()
   const month = presetRange('mes')
@@ -127,6 +160,16 @@ export default function AfiliadosSaques() {
       toast.error('Seu cargo não paga saques de afiliados.')
       return
     }
+    if (deciding.current.has(w.id)) return
+    markBusy(w.id, true)
+    try {
+      await payFlow(w)
+    } finally {
+      markBusy(w.id, false)
+    }
+  }
+
+  const payFlow = async (w: AffiliateWithdrawal) => {
     const issues = withdrawalIssues(w, cfg, affById.get(w.affiliateId))
     const dest = destination(w, false)
     const ok = await confirm({
@@ -160,7 +203,8 @@ export default function AfiliadosSaques() {
       ),
     })
     if (!ok) return
-    const r = payAffiliateWithdrawal(w, role, user.name)
+    // o aviso de sucesso só sai com a confirmação do servidor
+    const r = await payAffiliateWithdrawal(w, role, user.name)
     if (r.ok) toast.success('Saque pago', { description: r.message })
     else toast.error('Não foi possível pagar', { description: r.message })
   }
@@ -170,6 +214,16 @@ export default function AfiliadosSaques() {
       toast.error('Seu cargo não recusa saques de afiliados.')
       return
     }
+    if (deciding.current.has(w.id)) return
+    markBusy(w.id, true)
+    try {
+      await rejectFlow(w)
+    } finally {
+      markBusy(w.id, false)
+    }
+  }
+
+  const rejectFlow = async (w: AffiliateWithdrawal) => {
     const r = await confirmWithInput({
       title: `Recusar o pedido de ${brl(w.amount)}?`,
       description: `O valor volta para o saldo de comissão de ${w.affiliateName}, que recebe o motivo por e-mail.`,
@@ -179,7 +233,7 @@ export default function AfiliadosSaques() {
       input: { label: 'Motivo', required: true, options: AFFILIATE_REJECT_REASONS.map((x) => ({ value: x, label: x })) },
     })
     if (!r.confirmed) return
-    const res = rejectAffiliateWithdrawal(w, role, user.name, r.value)
+    const res = await rejectAffiliateWithdrawal(w, role, user.name, r.value)
     if (res.ok) toast.success('Pedido recusado', { description: res.message })
     else toast.error('Não foi possível recusar', { description: res.message })
   }
@@ -294,10 +348,18 @@ export default function AfiliadosSaques() {
       cell: (w) =>
         w.status === 'pendente' ? (
           <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
-            <Button size="sm" variant="success" icon={Check} onClick={() => pay(w)} disabled={!canDecide} title={decideTitle}>
+            <Button size="sm" variant="success" icon={Check} onClick={() => pay(w)} disabled={!canDecide || busy.has(w.id)} title={decideTitle}>
               Pagar
             </Button>
-            <Button size="sm" variant="secondary" icon={X} onClick={() => reject(w)} disabled={!canDecide} title={decideTitle} className="text-danger">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={X}
+              onClick={() => reject(w)}
+              disabled={!canDecide || busy.has(w.id)}
+              title={decideTitle}
+              className="text-danger"
+            >
               Recusar
             </Button>
           </div>
@@ -311,6 +373,34 @@ export default function AfiliadosSaques() {
   ]
 
   const open = openId ? items.find((w) => w.id === openId) : undefined
+
+  if (withdrawalsFailed || affiliatesFailed) {
+    const retry = async () => {
+      setRetrying(true)
+      try {
+        await Promise.all([refreshKey(AFILIADOS_KEYS.withdrawals), refreshKey(DATA_KEYS.affiliates)])
+      } finally {
+        setRetrying(false)
+      }
+    }
+    return (
+      <>
+        <PageHeader />
+        <Card>
+          <EmptyState
+            icon={CloudOff}
+            title={withdrawalsFailed ? 'Não foi possível carregar os pedidos de saque' : 'Não foi possível carregar a base de afiliados'}
+            description="Sem os dados do servidor, nenhum pedido pode ser pago ou recusado por aqui: a lista na tela não seria a real. Tente de novo ou recarregue a página."
+            action={
+              <Button variant="secondary" icon={RefreshCw} onClick={retry} disabled={retrying}>
+                {retrying ? 'Carregando…' : 'Tentar de novo'}
+              </Button>
+            }
+          />
+        </Card>
+      </>
+    )
+  }
 
   return (
     <>
@@ -426,6 +516,7 @@ export default function AfiliadosSaques() {
           revealed={revealed.has(open.id)}
           canReveal={canReveal}
           canDecide={canDecide}
+          deciding={busy.has(open.id)}
           onReveal={() => reveal(open)}
           onHide={() => hide(open)}
           onPay={() => pay(open)}
@@ -444,6 +535,7 @@ function WithdrawalDrawer({
   revealed,
   canReveal,
   canDecide,
+  deciding,
   onReveal,
   onHide,
   onPay,
@@ -456,6 +548,7 @@ function WithdrawalDrawer({
   revealed: boolean
   canReveal: boolean
   canDecide: boolean
+  deciding: boolean
   onReveal: () => void
   onHide: () => void
   onPay: () => void
@@ -480,10 +573,10 @@ function WithdrawalDrawer({
       footer={
         w.status === 'pendente' ? (
           <>
-            <Button icon={X} onClick={onReject} disabled={!canDecide} className="text-danger">
+            <Button icon={X} onClick={onReject} disabled={!canDecide || deciding} className="text-danger">
               Recusar
             </Button>
-            <Button variant="success" icon={Check} onClick={onPay} disabled={!canDecide}>
+            <Button variant="success" icon={Check} onClick={onPay} disabled={!canDecide || deciding}>
               Pagar {brl(w.amount)}
             </Button>
           </>

@@ -296,7 +296,7 @@ describe('r1-web-4: proteção estrita não depende de NODE_ENV=production', () 
       const url = `http://127.0.0.1:${portOf(httpInternal)}/admin/internal`
       const put = await api(target, 'PUT', '/api/kv/campanhas.webhooks.destinos', {
         cookie: c,
-        body: { value: [{ id: 'ssrf1', event: 'saque.pago', url, active: true, secret: 'segredo-ssrf-123456' }] },
+        body: { value: [{ id: 'ssrf1', event: 'saque.pago', url, active: true, secret: 'segredo-ssrf-123456' }], version: 0 },
       })
       expect(put.statusCode).toBe(400)
       expect(put.json().error.code).toBe('dados_invalidos')

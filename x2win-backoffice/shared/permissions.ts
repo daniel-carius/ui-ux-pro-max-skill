@@ -179,8 +179,19 @@ export function ceilingLabel(role: Role) {
   return role.approvalCeiling.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 }
 
-/** Permissões que dão poder administrativo sobre pessoas e acessos. */
-export const ADMIN_LEVEL_PERMISSIONS = ['cargos.conceder', 'cargos.editar', 'equipe.editar', 'seguranca-painel.editar', 'mcp.editar'] as const
+/**
+ * Permissões que dão poder administrativo sobre pessoas e acessos, ou sobre para onde vão as ordens de pagamento
+ * assinadas (webhooks.editar troca o endereço/evento dos destinos de saque.pago): só quem tem cargos.conceder
+ * dá, tira ou mexe em cargo que tenha alguma delas.
+ */
+export const ADMIN_LEVEL_PERMISSIONS = [
+  'cargos.conceder',
+  'cargos.editar',
+  'equipe.editar',
+  'seguranca-painel.editar',
+  'mcp.editar',
+  'webhooks.editar',
+] as const
 
 /** Cargos com poder de conceder/retirar cargos administrativos ou de mexer em acessos. */
 export function isAdminLevelRole(role: Pick<Role, 'permissions'>) {

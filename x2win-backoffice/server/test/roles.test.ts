@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { findKvRule } from '@shared/kv-registry'
-import { effectivePermissions, seedRoles, type Role } from '@shared/permissions'
+import { ADMIN_LEVEL_PERMISSIONS, effectivePermissions, isAdminLevelRole, seedRoles, type Role } from '@shared/permissions'
 import { bootstrap, ensureRoles } from '../src/bootstrap'
 import type { KvContext, KvValue } from '../src/kv/types'
 import { totpCode } from '../src/lib/totp'
@@ -245,6 +245,54 @@ describe('cargos.lista', () => {
       { id: 'z', name: 'Atendimento VIP', description: '', system: false, permissions: ['usuarios.ver'], require2fa: false, approvalCeiling: 0, color: 'sky' },
     ])
     expect((created.value as Role[]).some((r) => r.name === 'Atendimento VIP')).toBe(true)
+  })
+
+  // Regressão r2-payout-flow-cross-module-2 (parte de cargos): webhooks.editar troca para onde vão as ordens de
+  // saque.pago assinadas com o segredo de produção; quem tem só cargos.editar não pode dar essa permissão a ninguém.
+  it('webhooks.editar é de nível administrativo: só quem tem cargos.conceder concede', async () => {
+    expect(ADMIN_LEVEL_PERMISSIONS).toContain('webhooks.editar')
+    expect(isAdminLevelRole({ permissions: ['webhooks.ver', 'webhooks.editar'] })).toBe(true)
+    expect(isAdminLevelRole({ permissions: ['webhooks.ver'] })).toBe(false)
+    // cargos da semente que não são administrativos continuam sem webhooks.editar
+    for (const r of seedRoles().filter((x) => !['superadmin', 'administrador'].includes(x.id))) {
+      expect(r.permissions, r.id).not.toContain('webhooks.editar')
+      expect(isAdminLevelRole(r), r.id).toBe(false)
+    }
+
+    const mk = (rs: Role[]) => rs.find((r) => r.id === 'marketing')!.permissions
+    await expect(save(adm, (rs) => patch(rs, 'marketing', { permissions: [...mk(rs), 'webhooks.ver', 'webhooks.editar'] }))).rejects.toMatchObject({
+      status: 403,
+      code: 'sem_permissao',
+    })
+    await expect(
+      save(adm, (rs) => [
+        ...rs,
+        { id: 'w', name: 'Integrações', description: '', system: false, permissions: ['webhooks.ver', 'webhooks.editar'], require2fa: false, approvalCeiling: 0, color: 'blue' },
+      ]),
+    ).rejects.toMatchObject({ status: 403 })
+    expect(await getRole(app.db, 'marketing')).toMatchObject({ permissions: expect.not.arrayContaining(['webhooks.editar']) })
+    expect((await roles.read(ctx(app, sa)))!.value as Role[]).not.toContainEqual(expect.objectContaining({ name: 'Integrações' }))
+
+    // Superadmin concede; depois disso o Administrador não mexe mais no cargo
+    const s = await save(sa, (rs) => [
+      ...rs,
+      { id: 'w', name: 'Integrações', description: '', system: false, permissions: ['webhooks.ver', 'webhooks.editar'], require2fa: true, approvalCeiling: 0, color: 'blue' },
+    ])
+    const integ = (s.value as Role[]).find((r) => r.name === 'Integrações')!
+    await expect(save(adm, (rs) => patch(rs, integ.id, { require2fa: false }))).rejects.toMatchObject({ status: 403 })
+    await expect(save(adm, (rs) => rs.filter((r) => r.id !== integ.id))).rejects.toMatchObject({ status: 403 })
+
+    // e pela equipe: o Administrador não coloca ninguém nesse cargo
+    const target = await createUser(app, { roleId: 'suporte', name: 'Alvo Webhooks' })
+    const admCookie = (await loginAs(app, 'administrador', { name: 'Adm Webhooks' })).cookie
+    const moved = await api(app, 'POST', `/api/team/${target.id}/role`, { cookie: admCookie, body: { roleId: integ.id } })
+    expect(moved.statusCode).toBe(403)
+    const created = await api(app, 'POST', '/api/team/direct', {
+      cookie: admCookie,
+      body: { name: 'Nova Integradora', email: 'integra@x2win.bet', roleId: integ.id },
+    })
+    expect(created.statusCode).toBe(403)
+    expect((await app.db.one<{ role_id: string }>('select role_id from users where id = $1', [target.id]))?.role_id).toBe('suporte')
   })
 
   it('tudo ou nada: um erro na lista desfaz as outras mudanças', async () => {

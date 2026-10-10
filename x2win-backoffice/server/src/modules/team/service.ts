@@ -143,11 +143,75 @@ export function toPanelMember(r: MemberRow, showIp: boolean): PanelMember {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
 
-export const memberNameSchema = z
-  .string('Informe o nome.')
-  .trim()
-  .min(2, 'O nome precisa de pelo menos 2 letras.')
-  .max(100, 'Use no máximo 100 caracteres no nome.')
+// ---------- Nome exibido ----------
+// O nome aparece como "quem fez" na auditoria, nos saques e nos CSVs: precisa identificar uma pessoa só.
+// Por isso ele é normalizado (NFKC, espaços colapsados), não aceita caracteres invisíveis/de controle nem
+// letras de outros alfabetos que imitam as latinas (ex.: "а" cirílico), e é único na equipe comparando sem
+// maiúsculas, acentos, pontuação, espaços e com as trocas visuais mais comuns (I/l/1, 0/O, rn/m, vv/w).
+
+/** Controle (Cc), formatação (Cf: zero-width, bidi, BOM, soft hyphen), uso privado, não atribuídos e separadores de linha. */
+const NAME_FORBIDDEN_RE = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Zl}\p{Zp}]/u
+/** Letras latinas que não se decompõem em letra + acento. */
+const NAME_LETTER_FOLD: Record<string, string> = { ß: 'ss', æ: 'ae', œ: 'oe', ø: 'o', ł: 'l', đ: 'd', ð: 'd', þ: 'th', ı: 'i', ĸ: 'k' }
+const NAME_BASE_RE = /^[a-z0-9 .'’-]$/
+
+/** Texto-base (sem acentos, minúsculo, só a-z 0-9 espaço . ' ’ -) ou null se tiver caractere fora disso. */
+function nameBase(name: string, keepCase = false): string | null {
+  const stripped = name.normalize('NFD').replace(/\p{M}/gu, '')
+  let out = ''
+  for (const ch of stripped) {
+    const lower = ch.toLowerCase()
+    const folded = NAME_BASE_RE.test(lower) ? lower : NAME_LETTER_FOLD[lower]
+    if (folded === undefined) return null
+    out += keepCase && ch !== lower && folded === lower ? ch : folded
+  }
+  return out
+}
+
+/** Normaliza e confere o nome. Devolve o nome pronto para gravar ou o problema (mensagem para a pessoa). */
+export function checkMemberName(raw: string): { name: string } | { problem: string } {
+  if (raw.length > 400) return { problem: 'Use no máximo 100 caracteres no nome.' }
+  const nfkc = raw.normalize('NFKC')
+  if (NAME_FORBIDDEN_RE.test(nfkc)) return { problem: 'O nome tem caracteres invisíveis ou de controle. Digite o nome de novo, sem colar de outro lugar.' }
+  const name = nfkc.replace(/\s+/g, ' ').trim()
+  if (name.length < 2) return { problem: 'O nome precisa de pelo menos 2 letras.' }
+  if (name.length > 100) return { problem: 'Use no máximo 100 caracteres no nome.' }
+  if (/\p{M}{3,}/u.test(name.normalize('NFD'))) return { problem: 'O nome tem acentos demais numa mesma letra.' }
+  const base = nameBase(name)
+  if (base === null) return { problem: 'Use no nome só letras do alfabeto latino (com ou sem acento), números, espaços, ponto, hífen e apóstrofo.' }
+  if (!/^[a-z]/.test(base)) return { problem: 'O nome precisa começar com uma letra.' }
+  return { name }
+}
+
+/**
+ * Chaves de comparação do nome: dois nomes que compartilham alguma chave se confundem na tela.
+ *  - "k:" ignora maiúsculas, acentos, espaços e pontuação, com 1 → l, 0 → o, rn → m e vv → w;
+ *  - "s:" (esqueleto visual) mantém maiúsculas e troca I maiúsculo e 1 por l, 0 por O, rn por m e vv por w
+ *    ("DanieI" com I maiúsculo se lê "Daniel").
+ * Nomes antigos fora da regra também ganham chaves.
+ */
+export function memberNameKeys(raw: string): string[] {
+  const name = raw.normalize('NFKC').replace(NAME_FORBIDDEN_RE, '').replace(/\s+/g, ' ').trim()
+  const base = nameBase(name, true) ?? name.normalize('NFD').replace(/\p{M}/gu, '')
+  const alnum = base.replace(/[^\p{L}\p{N}]/gu, '')
+  const fold = (v: string) => v.replace(/1/g, 'l').replace(/rn/g, 'm').replace(/vv/g, 'w')
+  return [`k:${fold(alnum.toLowerCase().replace(/0/g, 'o'))}`, `s:${fold(alnum.replace(/I/g, 'l').replace(/0/g, 'O'))}`]
+}
+
+/** Os dois nomes se confundem (mesma pessoa aos olhos de quem lê a auditoria)? */
+export function namesConflict(a: string, b: string): boolean {
+  const ka = memberNameKeys(a)
+  return memberNameKeys(b).some((k) => ka.includes(k))
+}
+
+export const memberNameSchema = z.string('Informe o nome.').transform((raw, ctx) => {
+  const r = checkMemberName(raw)
+  if ('problem' in r) {
+    ctx.issues.push({ code: 'custom', message: r.problem, input: raw })
+    return z.NEVER
+  }
+  return r.name
+})
 
 export const emailSchema = z
   .string('Informe o e-mail.')
@@ -161,15 +225,16 @@ export const roleIdSchema = z.string('Escolha um cargo.').trim().min(1, 'Escolha
 
 export const memberIdSchema = z.string().trim().min(1, 'Pessoa inválida.').max(64, 'Pessoa inválida.')
 
-/** Nome provisório a partir do e-mail ("ana.paula@x" → "Ana Paula"). */
+/** Nome provisório a partir do e-mail ("ana.paula@x" → "Ana Paula"); só letras e números de cada parte. */
 export function nameFromEmail(email: string) {
   const local = email.split('@')[0] ?? email
-  const name = local
+  return local
     .split(/[._+-]+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ''))
     .filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(' ')
-  return (name || local).slice(0, 100)
+    .slice(0, 100)
 }
 
 // ---------- Erros ----------
@@ -183,6 +248,13 @@ export const TeamErrors = {
   inviteInvalid: () => Errors.invalid('Convite inválido. Peça um novo link a quem convidou você.'),
   inviteUsed: () => Errors.invalid('Este convite já foi usado. Entre com seu e-mail e senha.'),
   inviteExpired: () => Errors.invalid('Este convite expirou. Peça um novo link a quem convidou você.'),
+  nameInUse: () =>
+    new AppError(
+      409,
+      'nome_em_uso',
+      'Já existe uma pessoa na equipe com este nome ou com um nome que se confunde com ele. Use um nome que identifique a pessoa sem dúvida (por exemplo, com o sobrenome completo).',
+      { field: 'name' },
+    ),
 }
 
 function isUniqueViolation(e: unknown) {
@@ -221,6 +293,20 @@ async function assertNotLastSuperadmin(t: Db, m: Pick<MemberRow, 'id' | 'role_id
 async function assertEmailFree(t: Db, email: string) {
   const dup = await t.one('select id from users where lower(email) = lower($1)', [email])
   if (dup) throw TeamErrors.emailInUse()
+}
+
+/** Nomes que a auditoria usa para ações sem pessoa (ninguém da equipe pode se chamar assim). */
+const RESERVED_NAMES = ['Sistema', 'Recuperação de acesso (servidor)']
+
+/**
+ * Recusa (409 nome_em_uso) se o nome se confunde com o de outra pessoa da equipe, em qualquer status (quem foi
+ * desligado continua na auditoria e pode ser reativado). Chamar dentro da trava da equipe (TEAM_VERSION_KEY):
+ * toda gravação de users.name passa por ela, então duas gravações simultâneas não escapam da conferência.
+ */
+export async function assertNameFree(t: Db, name: string, exceptUserId: string | null = null) {
+  if (RESERVED_NAMES.some((r) => namesConflict(r, name))) throw TeamErrors.nameInUse()
+  const rows = await t.query<{ id: string; name: string }>('select id, name from users where id <> coalesce($1, \'\')', [exceptUserId])
+  if (rows.some((r) => namesConflict(r.name, name))) throw TeamErrors.nameInUse()
 }
 
 const entityOf = (m: Pick<MemberRow, 'name'>) => `Equipe · ${m.name}`
@@ -288,6 +374,7 @@ export async function renameMember(t: Db, auth: AuthContext, id: string, rawName
   const m = await requireMember(t, id)
   assertMayHandleRole(auth, await getRole(t, m.role_id))
   if (m.name === name) return m
+  await assertNameFree(t, name, m.id)
   await t.query(`update users set name = $2, updated_at = now() where id = $1`, [m.id, name])
   await writeAudit(t, auth, { action: 'editar', entity: `Equipe · ${name}`, summary: `Nome alterado: ${m.name} → ${name}.` })
   return requireMember(t, m.id)
@@ -337,10 +424,12 @@ export function strongTemporaryPassword(): string {
 
 /** Cria a pessoa já ativa com senha temporária (troca obrigatória no 1º acesso). */
 export async function createDirectMember(db: Db, auth: AuthContext, input: DirectInput): Promise<{ member: MemberRow; temporaryPassword: string }> {
+  const name = memberNameSchema.parse(input.name)
   const check = async (t: Db) => {
     const role = await requireRole(t, input.roleId)
     assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos cria acessos com cargo administrativo.')
     await assertEmailFree(t, input.email)
+    await assertNameFree(t, name)
     return role
   }
   // o hash é lento: confere o barato antes e calcula fora da transação (que confere de novo, com trava)
@@ -354,11 +443,11 @@ export async function createDirectMember(db: Db, auth: AuthContext, input: Direc
       await t.query(
         `insert into users (id, name, email, role_id, status, password_hash, must_change_password)
          values ($1, $2, $3, $4, 'ativo', $5, true)`,
-        [id, input.name, input.email, role.id, hash],
+        [id, name, input.email, role.id, hash],
       )
       await writeAudit(t, auth, {
         action: 'criar',
-        entity: `Equipe · ${input.name}`,
+        entity: `Equipe · ${name}`,
         summary: `Acesso direto criado (${input.email}) com o cargo ${role.name}; troca de senha obrigatória no 1º acesso.`,
       })
       return requireMember(t, id)
@@ -383,14 +472,23 @@ export function inviteUrl(origin: string, token: string) {
   return `${origin.replace(/\/+$/, '')}/#/convite?token=${encodeURIComponent(token)}`
 }
 
+/** Nome do convite: o digitado por quem convida ou, sem ele, o montado a partir do e-mail (com a mesma regra). */
+function inviteName(input: InviteInput): string {
+  if (input.name?.trim()) return memberNameSchema.parse(input.name)
+  const r = checkMemberName(nameFromEmail(input.email))
+  if ('problem' in r) throw Errors.invalid('Não deu para montar o nome a partir do e-mail. Informe o nome da pessoa convidada.', { field: 'name' })
+  return r.name
+}
+
 /** Convida: pessoa com status convidado e link de aceite válido por 72 h (só o hash do token fica no banco). */
 export async function inviteMember(db: Db, auth: AuthContext, input: InviteInput, origin: string): Promise<{ member: MemberRow; inviteUrl: string }> {
-  const name = input.name?.trim() ? input.name.trim() : nameFromEmail(input.email)
+  const name = inviteName(input)
   try {
     return await withTeamLock(db, auth.user.id, async (t) => {
       const role = await requireRole(t, input.roleId)
       assertMayHandleRole(auth, role, 'Só quem pode conceder cargos administrativos convida pessoas para cargo administrativo.')
       await assertEmailFree(t, input.email)
+      await assertNameFree(t, name)
       const id = newId('u')
       await t.query(
         `insert into users (id, name, email, role_id, status, password_hash, must_change_password)
@@ -434,6 +532,7 @@ interface InviteRow {
   used_at: string | null
   expired: boolean
   status: MemberStatus
+  name: string
   email: string
   role_id: string
   totp_enabled: boolean
@@ -442,7 +541,7 @@ interface InviteRow {
 async function findInvite(db: Db, token: string, lock: boolean): Promise<InviteRow | null> {
   return db.one<InviteRow>(
     `select i.token_hash, i.user_id, i.used_at, (i.expires_at <= now()) as expired,
-            u.status, u.email, u.role_id, u.totp_enabled
+            u.status, u.name, u.email, u.role_id, u.totp_enabled
        from invites i join users u on u.id = i.user_id
       where i.token_hash = $1${lock ? ' for update of i, u' : ''}`,
     [sha256(token)],
@@ -456,8 +555,12 @@ function assertInviteUsable(inv: InviteRow | null): asserts inv is InviteRow {
   if (inv.status !== 'convidado') throw TeamErrors.inviteInvalid()
 }
 
-/** Aceite do convite (sem sessão): define nome e senha e ativa o acesso. */
-export async function acceptInvite(db: Db, input: { token: string; name: string; password: string }, ip: string): Promise<void> {
+/**
+ * Aceite do convite (sem sessão): define a senha e ativa o acesso. O nome continua o que quem convidou registrou
+ * (a rota é pública: quem tem o link não escolhe como aparece na auditoria); trocar o nome é pela tela Equipe,
+ * com auditoria. Um `name` enviado é ignorado.
+ */
+export async function acceptInvite(db: Db, input: { token: string; password: string }, ip: string): Promise<void> {
   const problem = passwordProblem(input.password, SECURITY.passwordMinLength)
   if (problem) throw Errors.invalid(problem, { field: 'password' })
   // confere antes de gastar o hash; confere de novo com trava dentro da transação
@@ -468,22 +571,22 @@ export async function acceptInvite(db: Db, input: { token: string; name: string;
     const inv = await findInvite(t, input.token, true)
     assertInviteUsable(inv)
     await t.query(
-      `update users set name = $2, password_hash = $3, status = 'ativo', must_change_password = false,
+      `update users set password_hash = $2, status = 'ativo', must_change_password = false,
               failed_logins = 0, locked_until = null, updated_at = now()
         where id = $1`,
-      [inv.user_id, input.name, hash],
+      [inv.user_id, hash],
     )
     await t.query('update invites set used_at = now() where user_id = $1 and used_at is null', [inv.user_id])
     await bumpKvVersion(t, TEAM_VERSION_KEY, current, inv.user_id)
     const actor: AuthUser = {
       id: inv.user_id,
-      name: input.name,
+      name: inv.name,
       email: inv.email,
       roleId: inv.role_id,
       status: 'ativo',
       totpEnabled: inv.totp_enabled,
       mustChangePassword: false,
     }
-    await writeAudit(t, { user: actor, ip }, { action: 'editar', entity: `Equipe · ${input.name}`, summary: `Convite aceito (${inv.email}); acesso ativado.` })
+    await writeAudit(t, { user: actor, ip }, { action: 'editar', entity: `Equipe · ${inv.name}`, summary: `Convite aceito (${inv.email}); acesso ativado.` })
   })
 }

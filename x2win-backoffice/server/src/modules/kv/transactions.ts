@@ -17,8 +17,14 @@
 //  - o saldo do jogador (balanceReal/balanceBonus em geral.jogadores) muda na
 //    mesma transação, sem mudar a versão da lista de jogadores (é campo do servidor);
 //  - a lista gravada é: itens novos (na ordem enviada) + gravados (na ordem gravada);
-//  - primeira gravação (nada gravado) aceita o extrato inteiro como base.
+//  - nada gravado = extrato vazio: todo item passa pelas regras de lançamento novo
+//    (a gravação pela tela nunca cria uma "base" sem regras).
 // Cada lançamento novo vira um registro na auditoria (creditar/estornar).
+//
+// Histórico da plataforma entra pela importação explícita
+// POST /api/kv/geral.transacoes/import { transactions } — só Superadmin com 2FA
+// ativo; só inclui ids novos, não mexe em saldo e audita quem importou.
+import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { canWriteKey, findKvRule } from '@shared/kv-registry'
 import { brl } from '@shared/money'
@@ -26,9 +32,10 @@ import type { AuditAction } from '@shared/audit'
 import { AppError, Errors } from '../../errors'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { writeAudit } from '../../services/audit'
-import { auditEntity, genericHandler } from './generic'
+import { auditEntity, auditSummary, genericHandler } from './generic'
 import { deepEqual, isPlainObject, MISSING, setOwn, type JsonObject } from './json'
 import { PLAYERS_KEY } from './player-status'
+import { requireImporter } from './players'
 import { restoreMasked, writePolicy } from './redact'
 import { assertVersion, encryptAtRest, loadRow, rewriteRowValue, saveRow, storedValue } from './store'
 
@@ -197,20 +204,8 @@ export const kvHandlers: KvHandlers = {
         const policy = writePolicy(rule)
         const encrypt = encryptAtRest(rule)
 
-        if (stored === MISSING) {
-          // primeira gravação: o extrato inteiro vira a base (máscaras sem valor gravado são recusadas)
-          const base = restoreMasked(list, MISSING, policy) as JsonObject[]
-          base.forEach((tx) => baseTx.parse(tx))
-          const saved = await saveRow(t, app.cipher, key, base, encrypt, row, auth.user.id)
-          await writeAudit(t, auth, {
-            action: 'editar',
-            entity,
-            summary: `${key} — Base inicial do extrato com ${base.length} ${base.length === 1 ? 'transação' : 'transações'}`,
-          })
-          return { value: base, version: saved.version, updatedAt: saved.updatedAt }
-        }
-
-        const storedList = (Array.isArray(stored) ? stored : []).filter(isPlainObject)
+        // nada gravado = extrato vazio: todo item é lançamento novo e passa pelas regras
+        const storedList = (stored === MISSING || !Array.isArray(stored) ? [] : stored).filter(isPlainObject)
         const storedById = new Map<string, JsonObject>()
         for (const tx of storedList) if (typeof tx.id === 'string') storedById.set(tx.id, tx)
 
@@ -331,12 +326,72 @@ export const kvHandlers: KvHandlers = {
         if (entries.length) {
           for (const tx of entries) await writeAudit(t, auth, { entity, ...auditFor(tx) })
         } else {
-          await writeAudit(t, auth, { action: 'editar', entity, summary: `${key} — Extrato salvo sem lançamentos novos` })
+          await writeAudit(t, auth, { action: 'editar', entity, summary: auditSummary(key, 'Extrato salvo sem lançamentos novos', row?.version ?? 0, saved.version) })
         }
         return { value: next, version: saved.version, updatedAt: saved.updatedAt }
       })
     },
   },
+}
+
+// Importação explícita do histórico da plataforma -------------------------------------
+
+export const MAX_IMPORT_TRANSACTIONS = 20_000
+
+const importedTx = baseTx.extend({
+  id: txId.trim(),
+  at: z.string('Data inválida.').max(40, 'Data inválida.').refine((s) => !Number.isNaN(Date.parse(s)), 'Data inválida.'),
+  amount: z.number('Valor inválido.').min(-1e9, 'Valor inválido.').max(1e9, 'Valor inválido.').refine(twoDecimals, 'Use no máximo duas casas decimais.'),
+})
+const importBody = z.object(
+  {
+    transactions: z
+      .array(importedTx, 'Envie a lista de transações.')
+      .min(1, 'Envie pelo menos uma transação.')
+      .max(MAX_IMPORT_TRANSACTIONS, `No máximo ${MAX_IMPORT_TRANSACTIONS} transações por importação.`),
+  },
+  'Envie { transactions }.',
+)
+
+export function registerTransactionImportRoute(app: FastifyInstance) {
+  app.post(`/${TRANSACTIONS_KEY}/import`, async (req, reply) => {
+    const auth = requireImporter(req)
+    const { transactions } = importBody.parse(req.body ?? {})
+    const rule = findKvRule(TRANSACTIONS_KEY)!
+    const out = await app.db.tx(async (t) => {
+      const row = await loadRow(t, TRANSACTIONS_KEY, true)
+      const stored = storedValue(row, app.cipher)
+      const current = (stored === MISSING || !Array.isArray(stored) ? [] : stored).filter(isPlainObject)
+      const existing = new Set(current.map((tx) => String(tx.id)))
+      const seen = new Set<string>()
+      const now = Date.now()
+      for (const tx of transactions) {
+        if (seen.has(tx.id) || existing.has(tx.id)) throw Errors.invalid(`Transação repetida ou já gravada (${tx.id}).`, { id: tx.id })
+        seen.add(tx.id)
+        if (Date.parse(tx.at) > now + FUTURE_SKEW_MS) throw Errors.invalid(`Transação ${tx.id}: data no futuro.`, { id: tx.id })
+      }
+      if (current.length + transactions.length > MAX_TRANSACTIONS) throw Errors.invalid(`No máximo ${MAX_TRANSACTIONS} transações.`)
+      const imported = restoreMasked(transactions, MISSING, writePolicy(rule)) as JsonObject[]
+      // histórico: depois do que já está gravado (o extrato fica do mais novo para o mais antigo)
+      const next = [...current, ...imported]
+      const saved = await saveRow(t, app.cipher, TRANSACTIONS_KEY, next, encryptAtRest(rule), row, auth.user.id)
+      const byType = new Map<string, { n: number; total: number }>()
+      for (const tx of imported) {
+        const k = String(tx.type)
+        const cur = byType.get(k) ?? { n: 0, total: 0 }
+        byType.set(k, { n: cur.n + 1, total: round2(cur.total + Number(tx.amount)) })
+      }
+      const totals = [...byType].map(([k, v]) => `${k}: ${v.n} (${brl(v.total)})`).join(', ')
+      await writeAudit(t, auth, {
+        action: 'criar',
+        entity: auditEntity(rule.page),
+        summary: auditSummary(TRANSACTIONS_KEY, `Importação de ${imported.length} transações da plataforma (saldos não mudam) — ${totals}`, row?.version ?? 0, saved.version),
+      })
+      return { imported: imported.length, version: saved.version }
+    })
+    reply.header('cache-control', 'no-store')
+    return { ok: true as const, ...out }
+  })
 }
 
 function isPanelTxType(type: string) {

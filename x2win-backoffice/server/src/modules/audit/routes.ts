@@ -1,14 +1,28 @@
 // Auditoria: eventos relatados pelo painel, consulta paginada e exportação CSV. Prefixo /api/audit.
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { isAuditAction } from '@shared/audit'
+import { isAuditAction, panelAuditDecision, type AuditAction } from '@shared/audit'
 import type { AuditListResponse } from '@shared/api'
+import { AppError, Errors } from '../../errors'
 import { requireActive, requirePerm } from '../../http'
 import { writeAudit } from '../../services/audit'
 import { auditCsv, auditFilterSchema, auditListSchema, buildAuditWhere, describeFilter, toAuditEntry, type AuditRow } from './format'
 
 /** Teto de linhas por exportação (as mais recentes que casam com os filtros). */
 export const EXPORT_MAX_ROWS = 50_000
+
+/**
+ * Eventos relatados pelo painel: por pessoa (não por sessão: abrir sessões novas pelo login não dá cota nova)
+ * e, além disso, por IP (várias contas atrás do mesmo IP não somam cota sem limite).
+ */
+export const EVENTS_PER_USER_PER_MINUTE = 30
+export const EVENTS_PER_IP_PER_MINUTE = 120
+
+const REJECTED_MESSAGE = {
+  acao_do_servidor: 'Esta ação é registrada só pelo servidor, quando ela é executada.',
+  entidade_do_servidor: 'Este registro é gravado só pelo servidor.',
+  evento_desconhecido: 'Este evento não pode ser relatado pelo painel.',
+} as const
 
 const eventBody = z.object({
   action: z
@@ -34,22 +48,39 @@ export default async function routes(app: FastifyInstance) {
     return payload
   })
 
+  // segundo limite (o da rota substitui o global por IP do @fastify/rate-limit): conta só o que seria gravado
+  const perIpLimit = app.createRateLimit({
+    max: EVENTS_PER_IP_PER_MINUTE,
+    timeWindow: '1 minute',
+    keyGenerator: (req) => `audit-events-ip:${req.clientIp || req.ip}`,
+  })
+
   app.post(
     '/events',
     {
       config: {
         rateLimit: {
-          max: 120,
+          max: EVENTS_PER_USER_PER_MINUTE,
           timeWindow: '1 minute',
-          // por sessão (o plugin de sessão roda antes): cada pessoa tem a sua cota
-          keyGenerator: (req) => (req.auth ? `audit:${req.auth.sessionId}` : `audit-ip:${req.clientIp || req.ip}`),
+          // por pessoa (o plugin de sessão roda antes): sessões novas da mesma pessoa dividem a mesma cota
+          keyGenerator: (req) => (req.auth ? `audit-user:${req.auth.user.id}` : `audit-ip:${req.clientIp || req.ip}`),
         },
       },
     },
     async (req, reply) => {
       const auth = requireActive(req)
       const body = eventBody.parse(req.body ?? {})
-      // quem, quando e IP vêm sempre do servidor
+      // só eventos que a tela realmente relata, e só por quem pode fazer a ação naquela tela;
+      // o que o servidor já registra (aprovar, revelar, banir, login, dados por chave...) nunca vem do painel
+      const decision = panelAuditDecision(body.action as AuditAction, body.entity)
+      if (!decision.ok) throw new AppError(403, 'evento_nao_relatavel', REJECTED_MESSAGE[decision.reason], { reason: decision.reason })
+      if (!decision.perms.some((p) => auth.perms.has(p))) throw Errors.forbidden()
+      const limit = await perIpLimit(req)
+      if (!limit.isAllowed && limit.isExceeded) {
+        reply.header('retry-after', String(limit.ttlInSeconds))
+        throw new AppError(429, 'muitas_tentativas', 'Muitas tentativas. Aguarde um minuto e tente de novo.')
+      }
+      // quem, quando e IP vêm sempre do servidor; source = 'painel' (relatado, não verificado)
       const row = await app.db.one<{ id: number }>(
         `insert into audit_log (actor_id, actor_name, action, entity, summary, ip, source)
          values ($1, $2, $3, $4, $5, $6, 'painel') returning id`,

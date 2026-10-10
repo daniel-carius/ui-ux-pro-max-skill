@@ -8,7 +8,16 @@ import { randomToken } from '../../lib/crypto'
 import { isMasked, maskSecret } from '../../lib/mask'
 import type { KvContext, KvHandlers, KvValue } from '../../kv/types'
 import { writeAudit } from '../../services/audit'
-import { hostOf, WEBHOOK_EVENT_LABEL, WEBHOOK_EVENTS, webhookStrictMode, webhookUrlProblem, type WebhookEvent } from './url'
+import {
+  DEMO_SECRET_PATTERN,
+  hostOf,
+  isDemoWebhookHost,
+  WEBHOOK_EVENT_LABEL,
+  WEBHOOK_EVENTS,
+  webhookStrictMode,
+  webhookUrlProblem,
+  type WebhookEvent,
+} from './url'
 
 /** Linha de settings com a versão da lista de destinos ({ version }). */
 export const DESTINATIONS_VERSION_KEY = 'campanhas.webhooks.destinos'
@@ -107,6 +116,13 @@ export const kvHandlers: KvHandlers = {
 
     async write(ctx, value, expectedVersion) {
       if (!canWriteKey(ctx.rule, ctx.auth.perms)) throw Errors.forbidden()
+      // versão sempre obrigatória, inclusive na primeira gravação (a leitura de uma instalação nova devolve 0).
+      // Gravação sem versão é a de quem não conseguiu ler a lista (o painel mostrou o padrão de demonstração
+      // depois de uma leitura que falhou): 409 faz o painel recarregar a lista real antes de qualquer validação.
+      if (expectedVersion === undefined) {
+        const v = await ctx.app.db.one<{ value: { version?: number } }>('select value from settings where key = $1', [DESTINATIONS_VERSION_KEY])
+        throw versionConflict(Number(v?.value?.version ?? 0))
+      }
       const list = listSchema.parse(value)
       // modo estrito salvo liberação explícita (não depende de NODE_ENV=production)
       const strict = webhookStrictMode(ctx.app.config)
@@ -120,6 +136,10 @@ export const kvHandlers: KvHandlers = {
         if (s && !isMasked(s) && s.length < MIN_SECRET_LENGTH) {
           throw Errors.invalid(`O segredo precisa de pelo menos ${MIN_SECRET_LENGTH} caracteres.`, { id: d.id, field: 'secret' })
         }
+        // segredo de demonstração: público no bundle do painel (qualquer um forjaria a assinatura)
+        if (s && !isMasked(s) && DEMO_SECRET_PATTERN.test(s)) {
+          throw Errors.invalid('Este é um segredo de demonstração. Gere um segredo novo para o destino.', { id: d.id, field: 'secret' })
+        }
       }
 
       return ctx.app.db.tx(async (t) => {
@@ -128,8 +148,8 @@ export const kvHandlers: KvHandlers = {
         const vrow = await t.one<{ value: { version?: number } }>('select value from settings where key = $1 for update', [DESTINATIONS_VERSION_KEY])
         const current = Number(vrow?.value?.version ?? 0)
         const rows = await t.query<DestinationRow>('select * from webhook_destinations order by created_at asc, id asc')
-        const exists = current > 0 || rows.length > 0
-        if (exists && expectedVersion !== current) throw versionConflict(current)
+        // a versão precisa ser exatamente a atual (0 numa instalação nova)
+        if (expectedVersion !== current) throw versionConflict(current)
 
         const byId = new Map(rows.map((r) => [r.id, r]))
         const created: string[] = []
@@ -139,6 +159,13 @@ export const kvHandlers: KvHandlers = {
           const incoming = d.secret?.trim() ?? ''
           const keepSecret = !incoming || isMasked(incoming)
           const old = byId.get(d.id)
+          // destino novo ou endereço trocado para um host de demonstração (terceiro): recusa
+          if ((!old || old.url !== url) && isDemoWebhookHost(url)) {
+            throw Errors.invalid(
+              `${WEBHOOK_EVENT_LABEL[d.event]}: ${hostOf(url)} é um endereço de demonstração, não um destino da operação.`,
+              { id: d.id, field: 'url' },
+            )
+          }
           if (!old) {
             const secret = keepSecret ? randomToken(24) : incoming
             await t.query(

@@ -23,9 +23,13 @@ import {
   type StoreResetOptions,
 } from '@/domain/auth-state'
 import { csvCell as panelCsvCell, toCsv } from '@/lib/csv-format'
+import { seedAffiliateWithdrawals } from '@/data/afiliados'
+import { seedAffiliates } from '@/data/players'
+import { findKvRule } from '@shared/kv-registry'
 import { SECURITY } from '../src/config'
 import { totpCode } from '../src/lib/totp'
 import { csvCell as serverCsvCell } from '../src/modules/audit/format'
+import { encryptAtRest, loadRow, saveRow, storedValue } from '../src/modules/kv/store'
 import { api as call, createTestApp, createUser, sessionCookie } from './helpers'
 
 // Importados em tempo de execução (especificador em variável): o tsc do servidor não tem os
@@ -35,6 +39,8 @@ interface StoreModule {
   prefetchKeys(keys: string[]): void
   refreshKey(key: string): Promise<void>
   dbSet<T>(key: string, next: T, seed?: T): void
+  dbSetAndWait<T>(key: string, next: T | ((prev: T) => T), seed?: T): Promise<boolean>
+  isLoadFailed(key: string): boolean
   resetDb(opts?: { notify?: boolean; serverDataOnly?: boolean }): void
 }
 interface ApiModule {
@@ -43,6 +49,7 @@ interface ApiModule {
 }
 const STORE_MODULE = '@/lib/store'
 const API_MODULE = '@/lib/api'
+const AFILIADOS_MODULE = '@/domain/afiliados'
 
 let app: FastifyInstance
 let store: StoreModule
@@ -52,11 +59,23 @@ let client: ApiModule
 let jar: string | null = null
 /** simula falha de rede em pedidos escolhidos (ex.: só o POST /api/auth/logout) */
 let dropRequest: ((method: string, url: string) => boolean) | null = null
+/** simula resposta de erro do servidor/proxy (ex.: 503 numa leitura) em pedidos escolhidos */
+let failRequest: ((method: string, url: string) => number | null) | null = null
+/** pedidos que o "navegador" enviou (método e caminho) */
+const sent: string[] = []
 
 async function browserFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
   const url = String(input)
   const method = (init.method ?? 'GET').toUpperCase() as 'GET' | 'POST' | 'PUT' | 'DELETE'
+  sent.push(`${method} ${url}`)
   if (dropRequest?.(method, url)) throw new TypeError('Failed to fetch')
+  const forced = failRequest?.(method, url)
+  if (forced) {
+    return new Response(JSON.stringify({ error: { code: 'indisponivel', message: `Serviço indisponível (${forced}).` } }), {
+      status: forced,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
   const res = await app.inject({
     method,
     url,
@@ -139,6 +158,8 @@ afterAll(async () => {
 beforeEach(() => {
   jar = null
   dropRequest = null
+  failRequest = null
+  sent.length = 0
   store.resetDb()
 })
 
@@ -165,7 +186,8 @@ describe('sessão do painel: memória (store) por pessoa e por sessão', () => {
     // A entra e abre a auditoria e a equipe (o store guarda o que o servidor mostra para A)
     jar = await sessionCookie(app, a.id, 'active')
     expect((await tab.reload()).status.kind).toBe('active')
-    await client.api('POST', '/api/audit/events', { action: 'editar', entity: 'Teste', summary: 'registro que só A pode ver' })
+    // evento que o painel pode relatar (o servidor recusa entidades desconhecidas e ações que só ele registra)
+    await client.api('POST', '/api/audit/events', { action: 'exportar', entity: 'Saques de afiliados', summary: 'registro que só A pode ver' })
     const auditA = await loadFresh<unknown[]>('auditoria.registros', [])
     expect(JSON.stringify(auditA)).toContain('registro que só A pode ver')
     expect((await loadFresh<unknown[]>('equipe.membros', [])).length).toBeGreaterThanOrEqual(2)
@@ -354,6 +376,123 @@ describe('sessão do painel: sair só com a confirmação do servidor', () => {
       expect(isLogoutPending(storage)).toBe(true)
     }
     expect(logoutFailureText({ status: 403, code: 'ip_nao_autorizado' })).toContain('IP')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// r2: pagar/recusar saque de afiliado mostrava "pago" e auditava 'aprovar' antes do servidor responder;
+// com a leitura da lista falhando (5xx/429/rede), o padrão aparecia e um pedido já pago podia ser
+// "pago" de novo (outra linha 'aprovar' na auditoria)
+// ---------------------------------------------------------------------------
+
+interface DecisionResult {
+  ok: boolean
+  message: string
+}
+interface AfiliadosModule {
+  payAffiliateWithdrawal(w: unknown, role: unknown, actorName: string): Promise<DecisionResult> | DecisionResult
+  rejectAffiliateWithdrawal(w: unknown, role: unknown, actorName: string, reason: string): Promise<DecisionResult> | DecisionResult
+}
+
+describe('saques de afiliados: decisão só com a confirmação do servidor', () => {
+  type W = { id: string; status: string; amount: number; affiliateId: string; decidedBy: string | null }
+  type A = { id: string; balance: number }
+  const WKEY = 'afiliados.saques'
+  const AKEY = 'crescimento.afiliados'
+  /** cargo como o painel o vê (a permissão de decidir; o servidor confere de novo) */
+  const role = { id: 'superadmin', name: 'Superadmin', permissions: ['afiliados-saques.aprovar'], approvalCeiling: null }
+  let afiliados: AfiliadosModule
+
+  beforeAll(async () => {
+    afiliados = (await import(/* @vite-ignore */ AFILIADOS_MODULE)) as AfiliadosModule
+  })
+
+  /** grava como a plataforma (a lista é só do servidor) */
+  async function platformWrite(key: string, value: unknown) {
+    await app.db.tx(async (t) => {
+      const row = await loadRow(t, key, true)
+      await saveRow(t, app.cipher, key, value, encryptAtRest(findKvRule(key)!), row, 'plataforma')
+    })
+  }
+  async function stored<T>(key: string): Promise<T[]> {
+    const row = await loadRow(app.db, key)
+    return (row ? storedValue(row, app.cipher) : []) as T[]
+  }
+  const auditOf = (id: string) =>
+    app.db.query<{ action: string; source: string }>(`select action, source from audit_log where entity = $1 order by id`, [`Saque de afiliado #${id}`])
+  const pending = () => (seedAffiliateWithdrawals() as unknown as W[]).filter((w) => w.status === 'pendente')
+
+  it('pagar só confirma depois do servidor; com a lista sem carregar (503) nada é pago, gravado nem auditado de novo', async () => {
+    const seed = seedAffiliateWithdrawals() as unknown as W[]
+    await platformWrite(WKEY, seed)
+    const target = pending()[0]
+    const op = { ...(await createUser(app, { roleId: 'superadmin', name: 'Operadora Afiliados' })), name: 'Operadora Afiliados' }
+    jar = await sessionCookie(app, op.id, 'active')
+
+    // 1) pagar: a resposta vem depois do servidor gravar a lista e auditar (linha do servidor, não do painel)
+    const item = (await loadFresh<W[]>(WKEY, seed)).find((w) => w.id === target.id)!
+    expect(item.status).toBe('pendente')
+    const paid = await afiliados.payAffiliateWithdrawal(item, role, op.name)
+    expect(paid.ok).toBe(true)
+    expect((await stored<W>(WKEY)).find((w) => w.id === target.id)).toMatchObject({ status: 'pago', decidedBy: 'Operadora Afiliados' })
+    expect(store.dbGet<W[]>(WKEY, seed).find((w) => w.id === target.id)?.status).toBe('pago')
+    expect(await auditOf(target.id)).toEqual([{ action: 'aprovar', source: 'servidor' }])
+    expect(sent.filter((r) => r.startsWith('PUT ') || r === 'POST /api/audit/events')).toEqual([])
+
+    // 2) a página recarrega e GET /api/kv/afiliados.saques dá 503 uma vez: a tela tem o padrão (pedido "pendente")
+    store.resetDb()
+    failRequest = (method, url) => (method === 'GET' && url === `/api/kv/${WKEY}` ? 503 : null)
+    const stale = (await loadFresh<W[]>(WKEY, seed)).find((w) => w.id === target.id)!
+    expect(stale.status).toBe('pendente')
+    expect(store.isLoadFailed(WKEY)).toBe(true)
+    sent.length = 0
+    const again = await afiliados.payAffiliateWithdrawal(stale, role, op.name)
+    expect(again.ok).toBe(false)
+    expect(again.message).toMatch(/não foram carregados/)
+    expect((await afiliados.rejectAffiliateWithdrawal(stale, role, op.name, 'Outro motivo')).ok).toBe(false)
+    // nenhuma gravação sobre o padrão, por qualquer caminho
+    expect(await store.dbSetAndWait<W[]>(WKEY, (prev) => prev.map((w) => (w.id === stale.id ? { ...w, status: 'pago' } : w)))).toBe(false)
+    expect(sent).toEqual([])
+    expect(await auditOf(target.id)).toEqual([{ action: 'aprovar', source: 'servidor' }])
+
+    // 3) o servidor volta: "tentar de novo" carrega a lista real e libera a chave
+    failRequest = null
+    await store.refreshKey(WKEY)
+    expect(store.isLoadFailed(WKEY)).toBe(false)
+    expect(store.dbGet<W[]>(WKEY, seed).find((w) => w.id === target.id)?.status).toBe('pago')
+    // uma linha velha (ainda "pendente") não paga de novo: o servidor confere o status
+    const dup = await afiliados.payAffiliateWithdrawal(stale, role, op.name)
+    expect(dup.ok).toBe(false)
+    expect(dup.message).toMatch(/já foi decidido/)
+    expect(await auditOf(target.id)).toEqual([{ action: 'aprovar', source: 'servidor' }])
+    await store.refreshKey(WKEY)
+  })
+
+  it('recusar devolve o saldo no servidor; erro do servidor na decisão não vira sucesso nem auditoria', async () => {
+    const seed = seedAffiliateWithdrawals() as unknown as W[]
+    await platformWrite(WKEY, seed)
+    await platformWrite(AKEY, seedAffiliates())
+    const [, toReject, toFail] = pending()
+    const balanceBefore = (await stored<A>(AKEY)).find((a) => a.id === toReject.affiliateId)!.balance
+    const op = { ...(await createUser(app, { roleId: 'superadmin', name: 'Operador Recusa' })), name: 'Operador Recusa' }
+    jar = await sessionCookie(app, op.id, 'active')
+    const list = await loadFresh<W[]>(WKEY, seed)
+
+    const res = await afiliados.rejectAffiliateWithdrawal(list.find((w) => w.id === toReject.id)!, role, op.name, 'Dados do PIX divergentes do titular')
+    expect(res.ok).toBe(true)
+    expect((await stored<W>(WKEY)).find((w) => w.id === toReject.id)).toMatchObject({ status: 'recusado', decidedBy: 'Operador Recusa' })
+    expect((await stored<A>(AKEY)).find((a) => a.id === toReject.affiliateId)!.balance).toBeCloseTo(balanceBefore + toReject.amount, 2)
+    expect(await auditOf(toReject.id)).toEqual([{ action: 'recusar', source: 'servidor' }])
+
+    // a decisão não chega ao servidor (503 no POST): a tela não diz que pagou e o pedido continua pendente
+    failRequest = (method, url) => (method === 'POST' && url.includes(`/${toFail.id}/`) ? 503 : null)
+    const failed = await afiliados.payAffiliateWithdrawal(list.find((w) => w.id === toFail.id)!, role, op.name)
+    expect(failed.ok).toBe(false)
+    expect(failed.message).toMatch(/não foi salva/)
+    expect(store.dbGet<W[]>(WKEY, seed).find((w) => w.id === toFail.id)?.status).toBe('pendente')
+    expect((await stored<W>(WKEY)).find((w) => w.id === toFail.id)?.status).toBe('pendente')
+    expect(await auditOf(toFail.id)).toEqual([])
+    expect(sent.filter((r) => r.startsWith('PUT ') || r === 'POST /api/audit/events')).toEqual([])
   })
 })
 

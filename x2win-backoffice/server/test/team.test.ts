@@ -2,13 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { findKvRule } from '@shared/kv-registry'
 import { effectivePermissions, seedRoles } from '@shared/permissions'
-import { passwordProblem, sha256 } from '../src/lib/crypto'
+import { ensureAdmin, warnLookAlikeNames } from '../src/bootstrap'
+import { newId, passwordProblem, sha256 } from '../src/lib/crypto'
 import type { KvContext } from '../src/kv/types'
 import { kvHandlers } from '../src/modules/team/kv'
 import { seedDemo } from '../src/modules/team/seed'
 import { getRole, toCents } from '../src/services/roles-repo'
 import type { AuthContext } from '../src/types'
-import { api, createTestApp, createUser, loginAs, sessionCookie } from './helpers'
+import { api, cookieFrom, createTestApp, createUser, loginAs, sessionCookie } from './helpers'
 
 // ---------- utilitários locais ----------
 
@@ -241,7 +242,7 @@ describe('equipe: convites', () => {
     expect(l.statusCode).toBe(401)
   })
 
-  it('aceite define nome e senha, ativa o acesso e permite login', async () => {
+  it('aceite define a senha, ativa o acesso e permite login; o nome continua o que quem convidou registrou', async () => {
     const r = await api(app, 'POST', '/api/team/invite', { cookie: admin.cookie, body: { email: 'diego@x2win.bet', roleId: 'suporte', name: 'Diego' } })
     const token = tokenOf(r.json().inviteUrl)
     const id = r.json().member.id
@@ -251,17 +252,16 @@ describe('equipe: convites', () => {
     expect(weak.statusCode).toBe(400)
     const noDigits = await accept(app, { token, name: 'Diego Alves', password: 'somenteletras' })
     expect(noDigits.statusCode).toBe(400)
-    const noName = await accept(app, { token, name: '', password: 'SenhaForte123' })
-    expect(noName.statusCode).toBe(400)
 
+    // a rota é pública: o nome enviado é ignorado (trocar o nome é pela tela Equipe, com auditoria)
     const ok = await accept(app, { token, name: 'Diego Alves', password: 'SenhaForte123' })
     expect(ok.statusCode).toBe(200)
     expect(ok.json()).toEqual({ ok: true })
     const row = await userRow(app, id)
-    expect(row).toMatchObject({ status: 'ativo', name: 'Diego Alves', must_change_password: false })
+    expect(row).toMatchObject({ status: 'ativo', name: 'Diego', must_change_password: false })
     expect(row?.password_hash).toMatch(/^scrypt\$/)
     const audit = await lastAudit(app)
-    expect(audit).toMatchObject({ action: 'editar', actor_id: id })
+    expect(audit).toMatchObject({ action: 'editar', actor_id: id, entity: 'Equipe · Diego' })
 
     const l = await login(app, 'diego@x2win.bet', 'SenhaForte123')
     expect(l.statusCode).toBe(200)
@@ -271,7 +271,14 @@ describe('equipe: convites', () => {
     const again = await accept(app, { token, name: 'Outro', password: 'OutraSenha123' })
     expect(again.statusCode).toBe(400)
     expect(again.json().error.message).toMatch(/já foi usado/)
-    expect((await userRow(app, id))?.name).toBe('Diego Alves')
+    expect((await userRow(app, id))?.name).toBe('Diego')
+  })
+
+  it('aceite sem nome também vale (o painel antigo ainda envia o campo; ele é ignorado)', async () => {
+    const r = await api(app, 'POST', '/api/team/invite', { cookie: admin.cookie, body: { email: 'sem.nome@x2win.bet', roleId: 'suporte' } })
+    const ok = await accept(app, { token: tokenOf(r.json().inviteUrl), password: 'SenhaForte123' })
+    expect(ok.statusCode, ok.body).toBe(200)
+    expect((await userRow(app, r.json().member.id))?.name).toBe('Sem Nome')
   })
 
   it('convite vencido, desconhecido ou de pessoa desligada é recusado', async () => {
@@ -684,6 +691,218 @@ describe('equipe.membros (chave)', () => {
     const lateral = (cur!.value as Record<string, unknown>[]).map((m) => (m.id === target.id ? { ...m, roleId: 'financeiro' } : m))
     const ok = await team.write!(ctxFor(app, admAuth), lateral, cur!.version)
     expect((ok.value as { id: string; roleId: string }[]).find((m) => m.id === target.id)?.roleId).toBe('financeiro')
+  })
+})
+
+// ---------- nome exibido: único e sem caracteres enganosos ----------
+// Regressão r2-audit-forgery-attribution-2: um convidado de cargo baixo assumia no aceite o nome exato do
+// Superadmin e as aprovações de saque, logins e linhas da auditoria dele ficavam indistinguíveis das do Superadmin.
+
+async function pendingWithdrawal(app: FastifyInstance, cents: number) {
+  const id = newId('SQ')
+  await app.db.query(
+    `insert into withdrawals (id, player_id, player_name, player_email, amount_cents, fee_cents, status, risk_level, risk_score,
+                              risk_reasons, pix_key_type, pix_key_enc, reference, created_at, updated_at)
+     values ($1, 'p1', 'Jogador Teste', 'jogador@exemplo.com', $2, 0, 'pendente', 'baixo', 10, '["motivo"]'::jsonb, 'CPF', $3, 'E123', now(), now())`,
+    [id, cents, app.cipher.encrypt('12345678909')],
+  )
+  return id
+}
+
+describe('equipe: nome exibido único e sem caracteres enganosos', () => {
+  let app: FastifyInstance
+  let daniel: Awaited<ReturnType<typeof loginAs>>
+  beforeAll(async () => {
+    app = await createTestApp()
+    daniel = await loginAs(app, 'superadmin', { name: 'Daniel Carius', email: 'daniel@x2win.bet.br' })
+  })
+  afterAll(async () => app.close())
+
+  const direct = (name: string, email: string, roleId = 'suporte') =>
+    api(app, 'POST', '/api/team/direct', { cookie: daniel.cookie, body: { name, email, roleId } })
+
+  it('convidado não troca o nome no aceite: aprovação, login e auditoria apontam para quem agiu, não para o Superadmin', async () => {
+    const realId = await pendingWithdrawal(app, 300_000)
+    const fakeId = await pendingWithdrawal(app, 490_000)
+    expect((await api(app, 'POST', `/api/withdrawals/${realId}/approve`, { cookie: daniel.cookie })).statusCode).toBe(200)
+
+    const inv = await api(app, 'POST', '/api/team/invite', {
+      cookie: daniel.cookie,
+      body: { email: 'fin.nova@x2win.bet', roleId: 'financeiro', name: 'Fernanda' },
+    })
+    expect(inv.statusCode).toBe(200)
+    const invitedId = inv.json().member.id as string
+    const token = tokenOf(inv.json().inviteUrl)
+
+    // rota pública: o nome enviado não substitui o que o admin registrou
+    const acc = await api(app, 'POST', '/api/team/invites/accept', { ip: '198.51.100.9', body: { token, name: 'Daniel Carius', password: 'SenhaForte2027x' } })
+    expect(acc.statusCode, acc.body).toBe(200)
+    expect((await userRow(app, invitedId))?.name).toBe('Fernanda')
+    expect((await app.db.query(`select id from users where name = 'Daniel Carius'`)).map((r) => r.id)).toEqual([daniel.user.id])
+
+    const login = await api(app, 'POST', '/api/auth/login', { ip: '198.51.100.9', body: { email: 'fin.nova@x2win.bet', password: 'SenhaForte2027x' } })
+    expect(login.statusCode, login.body).toBe(200)
+    const fakeAp = await api(app, 'POST', `/api/withdrawals/${fakeId}/approve`, { cookie: cookieFrom(login)!, ip: '198.51.100.9' })
+    expect(fakeAp.statusCode, fakeAp.body).toBe(200)
+    expect(fakeAp.json().withdrawal.decidedBy).toBe('Fernanda')
+
+    // Saques (operacao.saques): as duas decisões são distinguíveis
+    const kv = await api(app, 'GET', '/api/kv/operacao.saques', { cookie: daniel.cookie })
+    const list = (kv.json().value ?? []) as { id: string; decidedBy?: string }[]
+    expect(list.find((w) => w.id === realId)?.decidedBy).toBe('Daniel Carius')
+    expect(list.find((w) => w.id === fakeId)?.decidedBy).toBe('Fernanda')
+
+    // auditoria: aceite, login e aprovação do convidado ficam no nome dele
+    const rows = await app.db.query<{ actor_name: string; entity: string; summary: string }>(
+      'select actor_name, entity, summary from audit_log where actor_id = $1 order by id',
+      [invitedId],
+    )
+    expect(rows.length).toBeGreaterThanOrEqual(3)
+    expect(rows.every((r) => r.actor_name === 'Fernanda')).toBe(true)
+    expect(rows[0]).toMatchObject({ entity: 'Equipe · Fernanda' })
+    expect(rows[0].summary).toMatch(/Convite aceito/)
+
+    // CSV oficial: cada aprovação com o nome de quem aprovou
+    const csv = await api(app, 'GET', '/api/audit/export.csv', { cookie: daniel.cookie })
+    expect(csv.statusCode).toBe(200)
+    const approvals = csv.body.split(/\r?\n/).filter((l) => l.includes(';Aprovou;Saque #'))
+    expect(approvals).toHaveLength(2)
+    expect(approvals.filter((l) => l.includes('Daniel Carius'))).toHaveLength(1)
+    expect(approvals.filter((l) => l.includes('Fernanda'))).toHaveLength(1)
+  })
+
+  it('cadastro direto recusa nome igual ou que se confunde (409 nome_em_uso) e caracteres invisíveis ou de outro alfabeto (400)', async () => {
+    const conflicts = [
+      'Daniel Carius',
+      'daniel  CARIUS',
+      'Dâniel Cárius',
+      'DanieI Carius', // I maiúsculo no lugar do l
+      'Danie1 Carius',
+      'Daniel Carius.',
+      'Daniel-Carius',
+      'Daniel Carius', // espaço sem quebra (NFKC vira espaço)
+      'Ｄaniel Carius', // D de largura total (NFKC vira D)
+      'Dan̸iel Carius', // traço sobreposto (marca combinante)
+      'Sistema', // nome que a auditoria usa para ações sem pessoa
+    ]
+    for (const [i, name] of conflicts.entries()) {
+      const r = await direct(name, `conflito${i}@x2win.bet`)
+      expect(r.statusCode, JSON.stringify(name)).toBe(409)
+      expect(r.json().error).toMatchObject({ code: 'nome_em_uso', details: { field: 'name' } })
+    }
+    const invalid = [
+      'Daniel​ Carius', // zero-width space
+      'Daniel Carius‮', // RLO (bidi)
+      '⁦Daniel Carius⁩', // isolates (bidi)
+      '﻿Daniel Carius', // BOM
+      'Daniel­Carius', // soft hyphen
+      'Daniel\tCarius',
+      'Daniel\u0000Carius',
+      'Dаniel Carius', // "а" cirílico
+      'Dɑniel Carius', // "ɑ" latino IPA
+      'Ꭰaniel Carius', // "Ꭰ" cherokee
+      '-Daniel Carius',
+      'Dá́́niel',
+    ]
+    for (const [i, name] of invalid.entries()) {
+      const r = await direct(name, `invalido${i}@x2win.bet`)
+      expect(r.statusCode, JSON.stringify(name)).toBe(400)
+      expect(r.json().error.code).toBe('dados_invalidos')
+      expect(r.json().error.details).toEqual([expect.objectContaining({ path: 'name' })])
+    }
+    expect(await app.db.one(`select id from users where email like 'conflito%' or email like 'invalido%'`)).toBeNull()
+
+    // nome válido é gravado normalizado
+    const ok = await direct('  𝐁eatriz   Lima  Júnior ', 'beatriz.lima@x2win.bet')
+    expect(ok.statusCode, ok.body).toBe(200)
+    expect(ok.json().member.name).toBe('Beatriz Lima Júnior')
+    expect(ok.json().member.name).toBe('Beatriz Lima Júnior'.normalize('NFKC'))
+    const ascii = await direct("Ana-Lúcia d'Ávila O’Neil", 'ana.lucia@x2win.bet')
+    expect(ascii.statusCode, ascii.body).toBe(200)
+  })
+
+  it('convite: nome digitado ou montado do e-mail segue a mesma regra', async () => {
+    await createUser(app, { roleId: 'suporte', name: 'João Silva' })
+    const typed = await api(app, 'POST', '/api/team/invite', { cookie: daniel.cookie, body: { email: 'js2@x2win.bet', roleId: 'suporte', name: ' joao  SILVA ' } })
+    expect(typed.statusCode).toBe(409)
+    expect(typed.json().error.code).toBe('nome_em_uso')
+    const derived = await api(app, 'POST', '/api/team/invite', { cookie: daniel.cookie, body: { email: 'joao.silva@outro.bet', roleId: 'suporte' } })
+    expect(derived.statusCode).toBe(409)
+    expect(derived.json().error.code).toBe('nome_em_uso')
+    const zw = await api(app, 'POST', '/api/team/invite', { cookie: daniel.cookie, body: { email: 'zw@x2win.bet', roleId: 'suporte', name: 'Jo​ão' } })
+    expect(zw.statusCode).toBe(400)
+    const junk = await api(app, 'POST', '/api/team/invite', { cookie: daniel.cookie, body: { email: '!x@x2win.bet', roleId: 'suporte' } })
+    expect(junk.statusCode).toBe(400)
+    expect(junk.json().error.details).toMatchObject({ field: 'name' })
+    expect(await app.db.one(`select id from users where email in ('js2@x2win.bet', 'joao.silva@outro.bet', 'zw@x2win.bet', '!x@x2win.bet')`)).toBeNull()
+    // com outro nome, convida
+    const ok = await api(app, 'POST', '/api/team/invite', { cookie: daniel.cookie, body: { email: 'joao.silva@outro.bet', roleId: 'suporte', name: 'João Silva Prado' } })
+    expect(ok.statusCode, ok.body).toBe(200)
+  })
+
+  it('nome de quem foi desligado ou ainda é convidado continua reservado', async () => {
+    await createUser(app, { roleId: 'suporte', name: 'Rita Gomes', status: 'desligado' })
+    await createUser(app, { roleId: 'suporte', name: 'Caio Prates', status: 'convidado' })
+    expect((await direct('Rita Gomes', 'rita2@x2win.bet')).statusCode).toBe(409)
+    expect((await direct('caio prates', 'caio2@x2win.bet')).statusCode).toBe(409)
+  })
+
+  it('renomear pela chave equipe.membros também confere; ajustar o próprio nome (maiúsculas, espaços) pode', async () => {
+    const carla = await createUser(app, { roleId: 'suporte', name: 'Carla Dias' })
+    const outra = await createUser(app, { roleId: 'suporte', name: 'Outra Pessoa' })
+    const auth = await authFor(app, daniel.user.id)
+    const rename = async (id: string, name: string) => {
+      const cur = await team.read(ctxFor(app, auth))
+      const list = (cur!.value as Record<string, unknown>[]).map((m) => (m.id === id ? { ...m, name } : m))
+      return team.write!(ctxFor(app, auth), list, cur!.version)
+    }
+    await expect(rename(outra.id, 'CARLA DIAS')).rejects.toMatchObject({ status: 409, code: 'nome_em_uso' })
+    await expect(rename(outra.id, 'Daniel Carius')).rejects.toMatchObject({ status: 409, code: 'nome_em_uso' })
+    await expect(rename(outra.id, 'Carla​ Dias')).rejects.toMatchObject({ name: 'ZodError' })
+    expect((await userRow(app, outra.id))?.name).toBe('Outra Pessoa')
+    await rename(carla.id, 'Carla  DIAS')
+    expect((await userRow(app, carla.id))?.name).toBe('Carla DIAS')
+  })
+
+  it('duas criações simultâneas com o mesmo nome: só uma passa', async () => {
+    const [a, b] = await Promise.all([direct('Paula Neves', 'paula1@x2win.bet'), direct('Paula Neves', 'paula2@x2win.bet')])
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409])
+    expect((await app.db.query(`select id from users where name = 'Paula Neves'`)).length).toBe(1)
+  })
+})
+
+describe('equipe: nomes na subida e na semente de demonstração', () => {
+  it('ADMIN_NAME segue a regra de nome; a subida avisa sobre nomes antigos que se confundem', async () => {
+    const bad = await createTestApp({ ADMIN_EMAIL: 'adm@teste.x2win', ADMIN_PASSWORD: 'SenhaForteDoTeste2026', ADMIN_NAME: 'Admin​' })
+    try {
+      await expect(ensureAdmin(bad)).rejects.toThrow(/ADMIN_NAME/)
+      expect(await bad.db.one('select id from users')).toBeNull()
+    } finally {
+      await bad.close()
+    }
+    const app = await createTestApp({ ADMIN_EMAIL: 'adm@teste.x2win', ADMIN_PASSWORD: 'SenhaForteDoTeste2026', ADMIN_NAME: '  Ana   Admin ' })
+    try {
+      expect(await ensureAdmin(app)).toBe('criado')
+      expect((await app.db.one<{ name: string }>('select name from users'))?.name).toBe('Ana Admin')
+      expect(await warnLookAlikeNames(app)).toEqual([])
+      // instalação antiga com xarás gravados antes da regra
+      await createUser(app, { name: 'ANA ADMIN', email: 'xara@teste.x2win', roleId: 'suporte' })
+      expect(await warnLookAlikeNames(app)).toEqual([['Ana Admin <adm@teste.x2win>', 'ANA ADMIN <xara@teste.x2win>']])
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('semente de demonstração não cria xará de quem já existe', async () => {
+    const app = await createTestApp()
+    try {
+      await createUser(app, { email: 'outro.rafael@x2win.bet', name: 'Rafael Lima', roleId: 'suporte' })
+      const summary = await seedDemo(app)
+      expect(summary).toContain('rafael@x2win.bet (nome Rafael Lima já usado)')
+      expect(await app.db.one(`select id from users where email = 'rafael@x2win.bet'`)).toBeNull()
+    } finally {
+      await app.close()
+    }
   })
 })
 

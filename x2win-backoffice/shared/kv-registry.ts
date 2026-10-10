@@ -1,7 +1,9 @@
 // Registro de todas as chaves de dados usadas pelas telas, com as regras de
 // acesso aplicadas pelo servidor. Chave sem registro é recusada (leitura e
-// gravação). A regra vale para a chave exata e para chaves filhas
-// ("campanhas.cupons" cobre "campanhas.cupons.resgates").
+// gravação). A regra vale para a chave exata e para as chaves filhas listadas
+// em `children` ("cassino.agregadores" com children ['testes'] cobre
+// "cassino.agregadores.testes"); qualquer outra chave filha é desconhecida (404),
+// para ninguém criar chaves novas à vontade sob um prefixo gravável.
 
 /** Módulos de domínio no servidor (dados com regra de negócio própria). */
 export type KvDomain =
@@ -16,6 +18,9 @@ export type KvDomain =
   | 'players'
   | 'transactions'
   | 'player-status'
+  | 'affiliates'
+  | 'commission-rules'
+  | 'ggr-settlements'
 
 export interface KvRule {
   prefix: string
@@ -51,7 +56,27 @@ export interface KvRule {
   urls?: { revealPermission: string }
   /** tratado por um módulo de domínio (não é JSON genérico) */
   domain?: KvDomain
+  /**
+   * chaves filhas (sufixos depois de "<prefix>.") que seguem esta mesma regra.
+   * Outras chaves filhas sem registro próprio são recusadas.
+   */
+  children?: string[]
+  /**
+   * guarda cada versão substituída (histórico só de inclusão, recuperável pela
+   * rota de histórico). Para configurações pequenas e reguladas; listas grandes de
+   * registros usam um domínio que audita os valores de cada mudança.
+   */
+  history?: boolean
+  /** tamanho máximo do valor gravado (bytes do JSON). Padrão: KV_DEFAULT_MAX_BYTES. */
+  maxBytes?: number
 }
+
+/** Tamanho máximo padrão do valor de uma chave (JSON). */
+export const KV_DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+/** Chaves com imagens (data URL de até 3 MB cada): o limite é o do corpo da requisição. */
+const IMAGES = 12 * 1024 * 1024
+/** Listas de registros que crescem com o uso (concessões, compras, históricos): idem. */
+const RECORDS = 12 * 1024 * 1024
 
 /** Chaves que ficam só no navegador (preferências de tela e rascunhos pessoais). */
 export const LOCAL_ONLY_PREFIXES = [
@@ -106,39 +131,54 @@ export const KV_RULES: KvRule[] = [
   // Operação ------------------------------------------------------------------
   { prefix: 'operacao.saques', page: 'saques', read: 'tela', write: 'servidor', domain: 'withdrawals' },
   { prefix: 'operacao.saques.regras', page: 'saques', read: 'tela', readPages: ['rollover'], write: ['saques.editar'], domain: 'withdrawal-rules' },
-  { prefix: 'operacao.depositos', page: 'depositos', read: 'tela', pii: PII_PLAYERS },
+  // registro de depósitos: vem do gateway; o painel só reconsulta PIX vencido (POST /api/kv/operacao.depositos/recheck)
+  { prefix: 'operacao.depositos', page: 'depositos', read: 'tela', write: 'servidor', pii: PII_PLAYERS },
+  { prefix: 'operacao.depositos.limites', page: 'depositos', read: 'tela', history: true },
+  { prefix: 'operacao.depositos.campanhas', page: 'depositos', read: 'tela', history: true },
 
   // Esportes (consulta; a liquidação vem do sportsbook) ------------------------
   { prefix: 'esportes.apostas', page: 'apostas-esportivas', read: 'tela', write: 'servidor', pii: PII_PLAYERS },
 
   // Cassino -------------------------------------------------------------------
-  { prefix: 'cassino.jogos', page: 'jogos', read: 'equipe' },
-  { prefix: 'cassino.provedoras', page: 'provedoras', read: 'equipe' },
+  { prefix: 'cassino.jogos', page: 'jogos', read: 'equipe', children: ['selos'], maxBytes: IMAGES },
+  { prefix: 'cassino.provedoras', page: 'provedoras', read: 'equipe', children: ['atualizacao'] },
   { prefix: 'cassino.vitrines', page: 'vitrines', read: 'equipe' },
-  { prefix: 'cassino.agregadores', page: 'agregadores', read: 'tela', readPages: ['provedoras', 'jogos'], secrets: true },
-  { prefix: 'cassino.sportsbook-credenciais', page: 'agregadores', read: 'tela', secrets: true },
+  {
+    prefix: 'cassino.agregadores',
+    page: 'agregadores',
+    read: 'tela',
+    readPages: ['provedoras', 'jogos'],
+    secrets: true,
+    children: ['testes', 'sincronizacoes', 'segredos', 'regras'],
+    maxBytes: RECORDS,
+  },
+  { prefix: 'cassino.sportsbook-credenciais', page: 'agregadores', read: 'tela', secrets: true, children: ['teste'] },
 
   // Crescimento ---------------------------------------------------------------
+  // saldo de comissão é do servidor (recusa de saque devolve o valor); cada permissão muda só os campos dela
   {
     prefix: 'crescimento.afiliados',
     page: 'afiliados-gerentes',
     read: 'tela',
     readPages: AFFILIATE_READ_PAGES,
-    write: ['afiliados-gerentes.editar', 'comissoes.editar', 'afiliados-saques.aprovar'],
+    write: ['afiliados-gerentes.editar', 'comissoes.editar'],
     pii: PII_AFFILIATES,
+    domain: 'affiliates',
   },
-  { prefix: 'crescimento.comissoes', page: 'comissoes', read: 'equipe' },
+  { prefix: 'crescimento.comissoes', page: 'comissoes', read: 'equipe', domain: 'commission-rules', history: true },
   { prefix: 'crescimento.links.status', page: 'links', read: 'equipe', write: ['comissoes.editar'] },
-  { prefix: 'crescimento.ggr.apuracoes', page: 'ggr', read: 'tela', write: ['ggr.apurar'] },
+  // ciclo aberta → fechada → paga validado pelo servidor
+  { prefix: 'crescimento.ggr.apuracoes', page: 'ggr', read: 'tela', write: ['ggr.apurar'], domain: 'ggr-settlements' },
 
   // Programa de afiliados -----------------------------------------------------
-  { prefix: 'afiliados.configuracao', page: 'afiliados-configuracao', read: 'equipe' },
+  { prefix: 'afiliados.configuracao', page: 'afiliados-configuracao', read: 'equipe', history: true },
+  // pedidos vêm da plataforma; pagar e recusar só pelas rotas POST /api/kv/afiliados.saques/:id/pay|reject
   {
     prefix: 'afiliados.saques',
     page: 'afiliados-saques',
     read: 'tela',
     readPages: ['afiliados-visao-geral'],
-    write: ['afiliados-saques.aprovar'],
+    write: 'servidor',
     pii: PII_AFFILIATES,
     // dados bancários do TED (o nome do banco fica visível)
     piiFields: ['agency', 'account', 'holder'],
@@ -165,67 +205,73 @@ export const KV_RULES: KvRule[] = [
     urls: WEBHOOK_URLS,
     domain: 'webhook-executions',
   },
-  { prefix: 'campanhas.free-spins', page: 'free-spins', read: 'equipe' },
-  // registros com jogador (nome, e-mail): só quem vê a tela, com dados pessoais mascarados
-  { prefix: 'campanhas.free-spins.concessoes', page: 'free-spins', read: 'tela', pii: PII_PLAYERS },
-  { prefix: 'campanhas.bonus-deposito', page: 'bonus-deposito', read: 'equipe' },
-  { prefix: 'campanhas.saldo-bonus', page: 'saldo-bonus', read: 'equipe' },
-  { prefix: 'campanhas.rollover', page: 'rollover', read: 'equipe' },
-  { prefix: 'campanhas.moeda', page: 'moeda', read: 'equipe' },
+  { prefix: 'campanhas.free-spins', page: 'free-spins', read: 'equipe', history: true },
+  // registros com jogador (nome, e-mail): só quem vê a tela, com dados pessoais mascarados.
+  // Concessões: o servidor monta a concessão manual (valor do giro, prazo, autor) e só aceita cancelar.
+  { prefix: 'campanhas.free-spins.concessoes', page: 'free-spins', read: 'tela', pii: PII_PLAYERS, maxBytes: RECORDS },
+  { prefix: 'campanhas.bonus-deposito', page: 'bonus-deposito', read: 'equipe', history: true },
+  { prefix: 'campanhas.saldo-bonus', page: 'saldo-bonus', read: 'equipe', history: true },
+  { prefix: 'campanhas.rollover', page: 'rollover', read: 'equipe', history: true },
+  { prefix: 'campanhas.moeda', page: 'moeda', read: 'equipe', maxBytes: IMAGES },
   { prefix: 'campanhas.roleta', page: 'roleta', read: 'equipe' },
-  { prefix: 'campanhas.roleta.giros', page: 'roleta', read: 'tela', pii: PII_PLAYERS },
-  { prefix: 'campanhas.loja', page: 'loja', read: 'equipe' },
-  { prefix: 'campanhas.loja.compras', page: 'loja', read: 'tela', pii: PII_PLAYERS },
-  { prefix: 'campanhas.cupons', page: 'cupons', read: 'equipe' },
-  { prefix: 'campanhas.cupons.resgates', page: 'cupons', read: 'tela', pii: PII_PLAYERS },
+  // giros e resgates vêm da plataforma do jogador (custo calculado lá): o painel só lê
+  { prefix: 'campanhas.roleta.giros', page: 'roleta', read: 'tela', write: 'servidor', pii: PII_PLAYERS },
+  { prefix: 'campanhas.loja', page: 'loja', read: 'equipe', maxBytes: IMAGES },
+  // compras vêm da plataforma; o painel só confirma a entrega ou estorna
+  { prefix: 'campanhas.loja.compras', page: 'loja', read: 'tela', pii: PII_PLAYERS, maxBytes: RECORDS },
+  { prefix: 'campanhas.cupons', page: 'cupons', read: 'equipe', history: true },
+  { prefix: 'campanhas.cupons.resgates', page: 'cupons', read: 'tela', write: 'servidor', pii: PII_PLAYERS },
   // só a tela de Indicação lê (configuração e registros de indicados com e-mail do indicador)
-  { prefix: 'campanhas.indicacao', page: 'indicacao', read: 'tela', pii: PII_PLAYERS },
+  { prefix: 'campanhas.indicacao', page: 'indicacao', read: 'tela', pii: PII_PLAYERS, children: ['status'], maxBytes: RECORDS },
   { prefix: 'campanhas.missoes', page: 'missoes', read: 'equipe' },
   { prefix: 'campanhas.torneios', page: 'torneios', read: 'equipe' },
-  { prefix: 'campanhas.niveis', page: 'niveis', read: 'equipe' },
-  { prefix: 'campanhas.cashback', page: 'cashback', read: 'equipe' },
-  { prefix: 'campanhas.notificacoes', page: 'notificacoes', read: 'equipe' },
-  { prefix: 'campanhas.popups-inbox', page: 'popups-inbox', read: 'equipe' },
-  { prefix: 'campanhas.disparos', page: 'disparos', read: 'equipe' },
+  { prefix: 'campanhas.niveis', page: 'niveis', read: 'equipe', history: true },
+  { prefix: 'campanhas.cashback', page: 'cashback', read: 'equipe', history: true },
+  { prefix: 'campanhas.notificacoes', page: 'notificacoes', read: 'equipe', children: ['historico'], maxBytes: RECORDS },
+  { prefix: 'campanhas.popups-inbox', page: 'popups-inbox', read: 'equipe', children: ['popups', 'inbox'], maxBytes: IMAGES },
+  { prefix: 'campanhas.disparos', page: 'disparos', read: 'equipe', children: ['historico'], maxBytes: IMAGES },
   { prefix: 'campanhas.jornadas', page: 'jornadas', read: 'equipe' },
 
   // Personalização ------------------------------------------------------------
-  { prefix: 'personalizacao.tema', page: 'tema', read: 'equipe' },
-  { prefix: 'personalizacao.sportsbook', page: 'sportsbook', read: 'equipe' },
-  { prefix: 'personalizacao.home', page: 'home', read: 'equipe' },
-  { prefix: 'personalizacao.provedores-home', page: 'provedores-home', read: 'equipe' },
-  { prefix: 'personalizacao.banners', page: 'banners', read: 'equipe' },
-  { prefix: 'personalizacao.avatares', page: 'avatares', read: 'equipe' },
-  { prefix: 'personalizacao.menus', page: 'menus', read: 'equipe' },
-  { prefix: 'personalizacao.carrosseis', page: 'carrosseis', read: 'equipe' },
-  { prefix: 'personalizacao.rodape', page: 'rodape', read: 'equipe' },
-  { prefix: 'personalizacao.redes-sociais', page: 'redes-sociais', read: 'equipe' },
-  { prefix: 'personalizacao.seo', page: 'seo', read: 'equipe' },
+  { prefix: 'personalizacao.tema', page: 'tema', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.sportsbook', page: 'sportsbook', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.home', page: 'home', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.provedores-home', page: 'provedores-home', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.banners', page: 'banners', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.avatares', page: 'avatares', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.menus', page: 'menus', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.carrosseis', page: 'carrosseis', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.rodape', page: 'rodape', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.redes-sociais', page: 'redes-sociais', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'personalizacao.seo', page: 'seo', read: 'equipe', maxBytes: IMAGES },
 
   // Segurança -----------------------------------------------------------------
-  { prefix: 'seguranca.bloqueios', page: 'antifraude', read: 'tela', write: ['antifraude.banir'] },
+  // bloqueios gravados não mudam (desfazer = remover); autor e data vêm do servidor
+  { prefix: 'seguranca.bloqueios', page: 'antifraude', read: 'tela', write: ['antifraude.banir'], history: true, maxBytes: RECORDS },
   { prefix: 'seguranca.modo-ataque', page: 'modo-ataque', read: 'equipe' },
 
   // Configurações -------------------------------------------------------------
-  { prefix: 'config.empresa', page: 'empresa', read: 'equipe' },
-  { prefix: 'config.faturas', page: 'faturas', read: 'tela' },
-  { prefix: 'config.textos-legais', page: 'textos-legais', read: 'equipe' },
+  { prefix: 'config.empresa', page: 'empresa', read: 'equipe', maxBytes: IMAGES },
+  { prefix: 'config.faturas', page: 'faturas', read: 'tela', maxBytes: RECORDS },
+  { prefix: 'config.textos-legais', page: 'textos-legais', read: 'equipe', history: true, maxBytes: RECORDS },
   { prefix: 'config.modulos', page: 'modulos', read: 'equipe' },
-  { prefix: 'config.cadastro', page: 'cadastro', read: 'equipe' },
-  { prefix: 'config.jogo-responsavel', page: 'jogo-responsavel', read: 'equipe' },
+  { prefix: 'config.cadastro', page: 'cadastro', read: 'equipe', history: true },
+  // ferramentas de jogo responsável (Lei 14.790/2023): validadas pelo servidor
+  { prefix: 'config.jogo-responsavel', page: 'jogo-responsavel', read: 'equipe', history: true },
   { prefix: 'config.suporte', page: 'suporte', read: 'equipe' },
   { prefix: 'config.manutencao', page: 'manutencao', read: 'equipe' },
-  { prefix: 'config.dominios.verificacoes', page: 'dominios', read: 'equipe', write: ['dominios.ver'] },
-  { prefix: 'config.paises.bloqueados', page: 'paises', read: 'equipe' },
-  { prefix: 'config.tracking', page: 'tracking', read: 'tela', secrets: true },
-  { prefix: 'config.gateways', page: 'gateways', read: 'tela', readPages: ['depositos'], secrets: true },
+  // a tela é só de leitura: quem vê só inclui uma verificação nova (o servidor define id, data e autor)
+  { prefix: 'config.dominios.verificacoes', page: 'dominios', read: 'equipe', write: ['dominios.ver'], history: true },
+  { prefix: 'config.paises.bloqueados', page: 'paises', read: 'equipe', history: true },
+  { prefix: 'config.tracking', page: 'tracking', read: 'tela', secrets: true, children: ['testes'] },
+  { prefix: 'config.gateways', page: 'gateways', read: 'tela', readPages: ['depositos'], secrets: true, children: ['contas', 'roteamento'] },
   // status das contas (conectada ou não) é lido por Disparos e Jornadas; segredos saem mascarados
-  { prefix: 'config.integracoes', page: 'integracoes', read: 'equipe', secrets: true },
-  { prefix: 'config.templates-email', page: 'templates-email', read: 'equipe' },
+  { prefix: 'config.integracoes', page: 'integracoes', read: 'equipe', secrets: true, children: ['ultimo-teste'] },
+  { prefix: 'config.templates-email', page: 'templates-email', read: 'equipe', maxBytes: IMAGES },
   { prefix: 'config.equipe.convites', page: 'equipe', read: 'tela' },
   { prefix: 'equipe.membros', page: 'equipe', read: 'equipe', domain: 'team' },
   { prefix: 'cargos.lista', page: 'cargos', read: 'equipe', write: ['cargos.editar'], domain: 'roles' },
-  { prefix: 'config.mcp', page: 'mcp', read: 'tela', secrets: true },
+  { prefix: 'config.mcp', page: 'mcp', read: 'tela', secrets: true, children: ['chaves', 'uso'], maxBytes: RECORDS },
   { prefix: 'config.seguranca-painel', page: 'seguranca-painel', read: 'tela', readPages: ['equipe'], domain: 'panel-security' },
   { prefix: 'auditoria.registros', page: 'auditoria', read: 'tela', readPages: ['modo-ataque', 'seguranca-painel', 'equipe'], write: 'servidor', domain: 'audit' },
 ]
@@ -234,13 +280,18 @@ function matches(key: string, prefix: string) {
   return key === prefix || key.startsWith(`${prefix}.`)
 }
 
-/** Regra mais específica para a chave (prefixo mais longo), ou undefined. */
+const RULE_BY_KEY = new Map<string, KvRule>()
+for (const r of KV_RULES) {
+  RULE_BY_KEY.set(r.prefix, r)
+  for (const c of r.children ?? []) if (!RULE_BY_KEY.has(`${r.prefix}.${c}`)) RULE_BY_KEY.set(`${r.prefix}.${c}`, r)
+}
+
+/**
+ * Regra da chave: a chave exata de uma regra ou uma das chaves filhas que a
+ * regra lista em `children`. Qualquer outra chave → undefined (desconhecida).
+ */
 export function findKvRule(key: string): KvRule | undefined {
-  let best: KvRule | undefined
-  for (const r of KV_RULES) {
-    if (matches(key, r.prefix) && (!best || r.prefix.length > best.prefix.length)) best = r
-  }
-  return best
+  return RULE_BY_KEY.get(key)
 }
 
 export function isLocalOnlyKey(key: string): boolean {
