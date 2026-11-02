@@ -1,9 +1,0 @@
-.next
-node_modules
-pnpm-lock.yaml
-prisma/migrations
-playwright-report
-test-results
-SPEC.md
-PLAN.md
-DECISIONS.md
