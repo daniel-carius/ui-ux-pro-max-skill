@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { effectiveGeoEnforcement, showStagingBanner } from "@/domain/app-env";
+import { effectiveTurnstileEnabled, showStagingBanner } from "@/domain/app-env";
 
-describe("effectiveGeoEnforcement (SPEC 3 / 13A)", () => {
-  it("é sempre ligado em production, mesmo com a setting desligada", () => {
-    expect(effectiveGeoEnforcement("production", false)).toBe(true);
+describe("effectiveTurnstileEnabled (Q4)", () => {
+  it("sem escolha do admin: ligado só em production", () => {
+    expect(effectiveTurnstileEnabled("production", null)).toBe(true);
+    expect(effectiveTurnstileEnabled("staging", null)).toBe(false);
+    expect(effectiveTurnstileEnabled("development", null)).toBe(false);
   });
 
-  it("respeita a setting fora de production", () => {
-    expect(effectiveGeoEnforcement("staging", false)).toBe(false);
-    expect(effectiveGeoEnforcement("development", true)).toBe(true);
+  it("a escolha explícita do admin prevalece", () => {
+    expect(effectiveTurnstileEnabled("production", false)).toBe(false);
+    expect(effectiveTurnstileEnabled("staging", true)).toBe(true);
   });
 });
 

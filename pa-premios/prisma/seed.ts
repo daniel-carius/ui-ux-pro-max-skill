@@ -15,9 +15,8 @@ export const defaultSettings = {
   supportMessage: "Olá! Preciso de ajuda com minha compra na {brand_name}",
   timezone: "America/Fortaleza",
   showAuthorizationBadge: false,
-  authorizedState: "MA", // confirmar com o termo de autorização
-  territorialRule: "PHYSICAL_LOCATION",
-  geoEnforcement: true,
+  authorizationScope: "NATIONAL", // SPEC 3 e 19.14: fixo; STATE no backlog
+  // turnstileEnabled fica null: default do ambiente (ligado só em production, Q4)
   antiScamEnabled: true,
   antiScamText: "Nunca pedimos PIX, senha ou código para liberar prêmio. Único canal oficial: {support}.",
 } as const;

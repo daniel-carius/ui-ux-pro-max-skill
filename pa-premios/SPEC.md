@@ -1,6 +1,8 @@
 # SPEC — Plataforma de campanhas de sorteio "P.A PRÊMIOS"
 
-**Versão:** 2.0 (consolidada) — 02/11/2026. Substitui integralmente a versão 1.0 colada no chat.
+**Versão:** 2.1 — 02/11/2026. Base: 2.0 (consolidada), que substituiu a 1.0 colada no chat.
+
+**Alterações da 2.1:** abrangência nacional sem bloqueio geográfico (seções 3, 4.2, 5, 12, 13A, 15, 16, 17, 18 e 19.14). Modo STATE (GPS + polígono da UF) vai para o backlog.
 
 ## 0. COMO TRABALHAR (leia antes de tudo)
 
@@ -54,10 +56,7 @@ Plataforma web de campanhas de sorteio com apuração pela Loteria Federal, de u
   - false: selo oculto; o item 2 do regulamento diz apenas "Documentação da autorização disponível mediante solicitação pelo e-mail {sac_email}".
   - O cadastro interno da autorização é obrigatório para publicar em production, independentemente desta flag.
 - Modalidades (lista configurável): nome, órgão, flag allows_cash_prize.
-- Territorialidade (seção 13A):
-  - authorized_state: UF da autorização (ex.: "MA")
-  - territorial_rule: PHYSICAL_LOCATION | DOMICILE | PHYSICAL_OR_DOMICILE (default PHYSICAL_LOCATION)
-  - geo_enforcement: on/off (sempre on em production; não pode ser desligado com APP_ENV=production)
+- authorization_scope: NATIONAL | STATE. Fixo em NATIONAL no seed e não exibido na UI de configurações. O campo existe no schema como ponto de extensão; o modo STATE está no backlog (seção 18).
 - Banner antigolpe (ligado por padrão, texto editável): "Nunca pedimos PIX, senha ou código para liberar prêmio. Único canal oficial: {support}."
 - Em staging: faixa fixa no topo "AMBIENTE DE HOMOLOGAÇÃO".
 
@@ -75,15 +74,14 @@ Plataforma web de campanhas de sorteio com apuração pela Loteria Federal, de u
 1. Galeria (até 8 imagens + 1 vídeo opcional)
 2. Título completo (nunca truncar) + selo de status
 3. Selo de autorização: "{modalidade} — Autorização nº {numero}" + link. Exibido somente se show_authorization_badge = true.
-4. Aviso territorial (sempre visível): "Venda permitida apenas para pessoas localizadas em {UF}." (texto ajustado conforme territorial_rule)
-5. Preço da cota, total de cotas, data do sorteio, nº do concurso da Loteria Federal (quando definido)
-6. Barra de progresso + nota de transparência (seção 8)
-7. Seletor de quantidade: botões ADITIVOS configuráveis por campanha (default +50, +100 com selo "Mais popular", +200, +500), campo editável com − e +, aviso inline de mínimo e máximo com o motivo ("Compra mínima: R$ 7,00")
-8. Barra fixa inferior: quantidade, total em R$ e CTA "Quero participar"
-9. Ranking (seção 9)
-10. Cotas premiadas (seção 10, feature flag)
-11. Regulamento em acordeão (Markdown sanitizado e RENDERIZADO, nunca cru) + link para o PDF da versão vigente
-12. Compartilhar (WhatsApp, Telegram, Facebook, copiar link) e "Meus números"
+4. Preço da cota, total de cotas, data do sorteio, nº do concurso da Loteria Federal (quando definido)
+5. Barra de progresso + nota de transparência (seção 8)
+6. Seletor de quantidade: botões ADITIVOS configuráveis por campanha (default +50, +100 com selo "Mais popular", +200, +500), campo editável com − e +, aviso inline de mínimo e máximo com o motivo ("Compra mínima: R$ 7,00")
+7. Barra fixa inferior: quantidade, total em R$ e CTA "Quero participar"
+8. Ranking (seção 9)
+9. Cotas premiadas (seção 10, feature flag)
+10. Regulamento em acordeão (Markdown sanitizado e RENDERIZADO, nunca cru) + link para o PDF da versão vigente
+11. Compartilhar (WhatsApp, Telegram, Facebook, copiar link) e "Meus números"
 
 - Campanha com vendas pausadas: aviso no topo e CTA desabilitado.
 
@@ -101,8 +99,6 @@ Conteúdo editável no admin (o jurídico fornece o texto). Seed com placeholder
 
 ## 5. CHECKOUT (bottom sheet no mobile)
 
-**Passo 0 — Localização** (seção 13A). Sem validação aprovada, o checkout não avança.
-
 **Passo 1 — CPF.** Validação de dígitos verificadores.
 
 - CPF já cadastrado: mostrar só "Olá, J***** V." e telefone mascarado "(99) *****-3568" para confirmação. NUNCA exibir nome completo, e-mail ou telefone completos a partir de um CPF digitado.
@@ -114,7 +110,6 @@ Conteúdo editável no admin (o jurídico fornece o texto). Seed com placeholder
 - E-mail
 - Celular com seletor de DDI (+55 padrão) + campo de confirmação
 - Data de nascimento → bloquear menores de 18 com mensagem clara
-- CEP: somente se territorial_rule aceitar domicílio
 
 Checkboxes:
 
@@ -131,7 +126,6 @@ Registrar no aceite: versão e hash do regulamento, timestamp, IP, user agent.
 
 **Passo 4 — Concluir reserva**
 
-- Revalida a localização (seção 13A).
 - Cria o pedido e aloca os números (seção 6).
 - Tela PIX: QR code, copia-e-cola, valor, timer de expiração (default 15 min, configurável), status por polling de 3s ou SSE.
 
@@ -266,7 +260,7 @@ Registrar no aceite: versão e hash do regulamento, timestamp, IP, user agent.
 - Por campanha e geral: receita, cotas pagas, cotas da casa, reservadas, disponíveis, ticket médio, conversão reserva→pago, pedidos pendentes.
 - Gráfico de vendas por hora (hoje vs ontem).
 - Top compradores (geral e do dia).
-- Bloqueios por localização (volume e UF de origem).
+- Vendas por UF (origem do acesso, seção 13A).
 - Alertas ativos (seção 12.10).
 
 ### 12.3 Campanhas
@@ -283,7 +277,7 @@ Registrar no aceite: versão e hash do regulamento, timestamp, IP, user agent.
   7. Ranking: exibir sim/não, prêmio opcional.
   8. Progresso: configurações da seção 8.5.
   9. Apuração: seção 11.
-- Publicação em production BLOQUEADA sem: dados legais do operador, CNPJ do promotor, modalidade, órgão, nº e vigência da autorização, regulamento sem nenhum marcador [PREENCHER: …], data do sorteio, regras de apuração e de número não vendido, authorized_state configurado. A trava procura o padrão `[PREENCHER:` em regulamento, termos e política.
+- Publicação em production BLOQUEADA sem: dados legais do operador, CNPJ do promotor, modalidade, órgão, nº e vigência da autorização, regulamento sem nenhum marcador [PREENCHER: …], data do sorteio, regras de apuração e de número não vendido, abrangência da autorização (authorization_scope) definida. A trava procura o padrão `[PREENCHER:` em regulamento, termos e política.
 - Em development/staging: publicação permitida com aviso visível das pendências.
 - Botão PAUSAR VENDAS (owner e operador): bloqueia novas reservas na hora, mantém o pagamento das reservas já criadas, mostra aviso na página pública e exige motivo (audit log). Retomar exige o mesmo.
 - Travas pós-venda (também no banco): preço, total, mínimo e regra de apuração. Regulamento só por errata versionada.
@@ -292,13 +286,13 @@ Registrar no aceite: versão e hash do regulamento, timestamp, IP, user agent.
 
 - Busca por CPF, nome, telefone, e-mail, nº do pedido, txid ou número da cota.
 - Filtros: status, campanha, período, valor.
-- Detalhe: itens, números, PIX (txid, valor, horários), geolocalização, aceite (versão, IP, horário), histórico de status.
+- Detalhe: itens, números, PIX (txid, valor, horários), origem do acesso (país e UF do IP), aceite (versão, IP, horário), histórico de status.
 - Ações: reenviar e-mail, cancelar reserva pendente, reembolso (motivo + comprovante, aprovação do financeiro).
 
 ### 12.5 Participante (visão 360)
 
 - Dados mascarados por padrão; botão "revelar" registra no audit log.
-- Todos os pedidos e números em todas as campanhas, total gasto, aceites, consentimento de marketing, registros de geolocalização, sinais de fraude.
+- Todos os pedidos e números em todas as campanhas, total gasto, aceites, consentimento de marketing, origem dos acessos (país e UF do IP), sinais de fraude.
 - Ações: bloquear CPF (com motivo), revogar consentimento, exportar dados do titular (pedido LGPD), anonimizar (respeitando a retenção legal).
 
 ### 12.6 Ganhadores e entrega
@@ -306,7 +300,7 @@ Registrar no aceite: versão e hash do regulamento, timestamp, IP, user agent.
 Fluxo por ganhador (prêmio principal, cota premiada e ranking): contatado → documentos recebidos → documentos validados → escolha do prêmio (bem ou dinheiro, se habilitado) → IR calculado/recolhido → entregue/pago → comprovante anexado → concluído.
 
 - Upload de documentos (RG, CPF, comprovante de residência) no bucket privado, com acesso registrado.
-- Na etapa "documentos validados", o admin preenche cidade e UF do ganhador. A UF da geolocalização do pedido vem como valor sugerido.
+- Na etapa "documentos validados", o admin preenche cidade e UF do ganhador. A UF do IP do pedido vem como valor sugerido (indicativa: IP de internet móvel pode apontar outra UF).
 - Registro do IR: base, alíquota, valor, data do recolhimento, guia anexada.
 - Prazo de reclamação com contagem regressiva e alerta.
 - Publicação na página de resultados só após "entregue" (opcional: vídeo de entrega).
@@ -320,13 +314,13 @@ Fluxo por ganhador (prêmio principal, cota premiada e ranking): contatado → d
 
 ### 12.8 Relatórios e exportações
 
-- Por campanha: vendas, participantes, números, ganhadores, apuração, geolocalização, bloqueios.
+- Por campanha: vendas, participantes, números, ganhadores, apuração, origem por UF.
 - Modelo de exportação configurável para prestação de contas à loteria.
 - Toda exportação registrada (quem, quando, filtro).
 
 ### 12.9 Antifraude
 
-- Sinais: mesmo telefone, e-mail, IP ou dispositivo em vários CPFs; muitas reservas expiradas; divergência GPS x IP; picos de compra de um CPF.
+- Sinais: mesmo telefone, e-mail, IP ou dispositivo em vários CPFs; muitas reservas expiradas; IP estrangeiro; picos de compra de um CPF.
 - Fila de revisão com ações: liberar, bloquear CPF, cancelar pedido pendente.
 
 ### 12.10 Alertas (no painel + e-mail/WhatsApp para a equipe)
@@ -334,7 +328,6 @@ Fluxo por ganhador (prêmio principal, cota premiada e ranking): contatado → d
 - Pagamento divergente ou webhook falhando.
 - Cota premiada encontrada.
 - Venda parada (sem pagamento por X minutos em horário de pico, configurável).
-- Pico de bloqueios geográficos.
 - Prazo de reclamação de prêmio perto do fim.
 - Erro no job de expiração, reconciliação ou geração do pool.
 
@@ -346,7 +339,7 @@ Fluxo por ganhador (prêmio principal, cota premiada e ranking): contatado → d
 
 ### 12.12 Configurações
 
-- Globais (seção 3), modalidades, territorialidade, termos de uso, política de privacidade, FAQ, usuários e papéis.
+- Globais (seção 3), modalidades, termos de uso, política de privacidade, FAQ, usuários e papéis.
 
 ### 12.13 Audit log
 
@@ -363,28 +356,12 @@ Fluxo por ganhador (prêmio principal, cota premiada e ranking): contatado → d
 - Retenção de dados configurável.
 - Aviso fixo "Proibido para menores de 18 anos. Participe com responsabilidade."
 
-## 13A. TERRITORIALIDADE E GEOLOCALIZAÇÃO (obrigatório em production)
+## 13A. ORIGEM DO ACESSO (registro, sem bloqueio)
 
-**Regra.** Venda permitida somente a quem atende territorial_rule em relação ao authorized_state (seção 3).
-
-**Checkout**
-
-- Passo 0, antes do CPF: solicitar localização pelo navegador (Geolocation API, alta precisão).
-- Validar as coordenadas contra o polígono oficial da UF (GeoJSON do IBGE versionado no repo; point-in-polygon no servidor, nunca só no front).
-- Sinal secundário: geolocalização por IP. Divergência forte entre GPS e IP (ex.: outra UF distante) → bloquear e registrar.
-- Se territorial_rule aceitar domicílio: pedir CEP e validar a UF via consulta de CEP.
-- Permissão negada ou fora da UF: bloquear a compra com mensagem clara ("Esta campanha só pode ser adquirida por pessoas localizadas em {UF}"). Nunca liberar a compra sem validação.
-- Revalidar a localização no passo 4 (reserva), não só no início.
-
-**Registro (prova de compliance)**
-
-- Por pedido: latitude, longitude, precisão, resultado da validação, UF por IP, timestamp.
-- Finalidade LGPD: cumprimento de obrigação legal. Retenção conforme o termo de autorização. Informar na Política de Privacidade.
-
-**Admin**
-
-- Relatório de bloqueios por localização (volume, UF de origem).
-- Exportação dos registros de geolocalização para fiscalização.
+- Por pedido, gravar país e UF do IP (headers da Vercel, D-36) e timestamp.
+- Uso: sinal de antifraude (12.9) e relatório de vendas por UF.
+- Nenhum bloqueio por localização, inclusive IP estrangeiro (apenas sinal de fraude).
+- Modo STATE (GPS + polígono da UF): backlog.
 
 ## 14. PERFORMANCE
 
@@ -406,7 +383,7 @@ Fluxo por ganhador (prêmio principal, cota premiada e ranking): contatado → d
 - Order bump acima do preço linear é rejeitado.
 - Menor de 18 bloqueado no checkout.
 - Digitar um CPF existente nunca expõe nome completo, e-mail ou telefone.
-- Geolocalização: dentro da UF permite; fora bloqueia; permissão negada bloqueia; GPS na UF + IP de UF distante bloqueia e registra; localização alterada entre passo 0 e passo 4 bloqueia.
+- Pedido registra país e UF do IP; IP estrangeiro gera sinal de fraude e não bloqueia a compra.
 - Publicação em production bloqueada com qualquer marcador [PREENCHER: …].
 - Travas pós-venda e audit log não podem ser burlados por SQL da aplicação.
 
@@ -414,7 +391,7 @@ Fluxo por ganhador (prêmio principal, cota premiada e ranking): contatado → d
 
 - Usuário owner do admin.
 - Modalidade "Loteria estadual — [PREENCHER: órgão]" com allows_cash_prize = true.
-- authorized_state: "MA" (confirmar com o termo de autorização).
+- authorization_scope: NATIONAL.
 - Campanha exemplo (rascunho): "iPhone 18 Pro Max Bordô 256GB", cota R$ 0,06, 1.000.000 de cotas, mínimo R$ 7,00, max_per_order 20.000, max_per_cpf 20.000, prazo de reserva 15 min, sorteio 18/11/2026, regra DEFAULT_6, opção em dinheiro R$ 8.000 (cash_option_enabled = true), order bumps desligados, cotas premiadas desligadas, cotas da casa em 0.
 - Regulamento modelo. Todo marcador no padrão [PREENCHER: …] bloqueia a publicação em production. Variáveis entre chaves são preenchidas pelo sistema.
 
@@ -422,7 +399,7 @@ Fluxo por ganhador (prêmio principal, cota premiada e ranking): contatado → d
 REGULAMENTO — {titulo}
 
 1. PROMOTOR: [PREENCHER: razão social], CNPJ [PREENCHER: CNPJ], [PREENCHER: endereço completo].
-2. AUTORIZAÇÃO: {SE show_authorization_badge = true: "Loteria estadual — {orgao_autorizador}, termo nº {numero_autorizacao}, vigência {vigencia_autorizacao}."} {SE show_authorization_badge = false: "Documentação da autorização disponível mediante solicitação pelo e-mail {sac_email}."} Participação permitida somente a pessoas {texto_territorial} do Estado de {authorized_state_nome}, verificado por geolocalização no momento da compra.
+2. AUTORIZAÇÃO: {SE show_authorization_badge = true: "Loteria estadual — {orgao_autorizador}, termo nº {numero_autorizacao}, vigência {vigencia_autorizacao}."} {SE show_authorization_badge = false: "Documentação da autorização disponível mediante solicitação pelo e-mail {sac_email}."} Participação permitida em todo o território nacional.
 3. PRÊMIO: {descricao}. Valor da cota: R$ {preco}. Total: {total} números ({min_number} a {max_number}). 1 ganhador. {SE cash_option_enabled: "O ganhador poderá optar por R$ {cash_value} via PIX em conta de sua titularidade."}
 4. PARTICIPAÇÃO: maiores de 18 anos, com CPF válido. Compra mínima de R$ {min_order_value}. Limite de {max_per_cpf} cotas por CPF nesta campanha. Compras somente pelos canais oficiais.
 5. APURAÇÃO: Loteria Federal, concurso nº {concurso} de {data_sorteio}. Número contemplado = 3 últimos algarismos do 1º prêmio + 3 últimos algarismos do 2º prêmio. Exemplo: 1º prêmio 68003 e 2º prêmio 33062 → 003062. Se o número não tiver sido vendido e pago a um participante, será contemplado o próximo número pago imediatamente superior; após o último número, a contagem recomeça do primeiro. Se a extração for adiada ou cancelada, vale a extração seguinte. {SE houver cotas da casa: cláusula da seção 8.4}
@@ -439,10 +416,10 @@ REGULAMENTO — {titulo}
 **F0 — Setup:** repositório pa-premios, Docker Compose, Prisma, Supabase (local e projeto SP), CI (lint, typecheck, test), CLAUDE.md, PLAN.md, DECISIONS.md, APP_ENV, pg_cron habilitado.
 Aceite: `pnpm dev` sobe e o CI está verde.
 
-**F1 — Núcleo de venda:** página da campanha, seletor, geolocalização, checkout completo (CPF, dados, e-mail, aceites, 18+), NumberAllocator, geração do pool via pg_cron, PIX mock, expiração, confirmação, e-mail, botão do grupo de WhatsApp, botão de suporte, banner antigolpe, Meus números.
+**F1 — Núcleo de venda:** página da campanha, seletor, checkout completo (CPF, dados, e-mail, aceites, 18+), NumberAllocator, geração do pool via pg_cron, PIX mock, expiração, confirmação, e-mail, botão do grupo de WhatsApp, botão de suporte, banner antigolpe, Meus números.
 Aceite:
 - E2E mobile de compra completa
-- Testes da seção 15 sobre concorrência, pool, limites, 18+, CPF e geolocalização
+- Testes da seção 15 sobre concorrência, pool, limites, 18+, CPF e origem do acesso
 
 **F2 — Admin:** seção 12 completa.
 Aceite:
@@ -465,7 +442,7 @@ Aceite: metas da seção 14 atingidas.
 
 ## 18. FORA DE ESCOPO AGORA
 
-Escolha manual de números (grade), DEFAULT_7, OTP no WhatsApp, afiliados, roleta, raspadinha, caixa surpresa, app nativo, white-label para outros operadores.
+Escolha manual de números (grade), DEFAULT_7, modo STATE de abrangência (GPS + polígono da UF, CEP de domicílio, bloqueio geográfico), OTP no WhatsApp, afiliados, roleta, raspadinha, caixa surpresa, app nativo, white-label para outros operadores.
 
 ## 19. DECISÕES JÁ TOMADAS
 
@@ -482,3 +459,4 @@ Escolha manual de números (grade), DEFAULT_7, OTP no WhatsApp, afiliados, rolet
 11. Selo de autorização oculto por padrão (show_authorization_badge); cadastro interno obrigatório para publicar em production.
 12. Placeholders no padrão [PREENCHER: …]; variáveis {max_number} e {max_per_cpf} separadas.
 13. DEFAULT_7 no backlog.
+14. Abrangência nacional, sem bloqueio geográfico. Modo STATE no backlog.

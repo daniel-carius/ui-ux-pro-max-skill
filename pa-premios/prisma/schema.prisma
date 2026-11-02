@@ -13,12 +13,12 @@ datasource db {
   directUrl = env("DIRECT_URL") // conexão direta, migrations
 }
 
-enum TerritorialRule {
-  PHYSICAL_LOCATION
-  DOMICILE
-  PHYSICAL_OR_DOMICILE
+/// Abrangência da autorização (SPEC 3). NATIONAL fixo; STATE é ponto de extensão (backlog).
+enum AuthorizationScope {
+  NATIONAL
+  STATE
 
-  @@map("territorial_rule")
+  @@map("authorization_scope")
 }
 
 enum ActorType {
@@ -31,29 +31,29 @@ enum ActorType {
 
 /// Configurações globais (SPEC 3). Linha única: CHECK (id = 1) na migration.
 model Settings {
-  id                      Int             @id @default(1)
-  brandName               String          @map("brand_name")
-  logoUrl                 String?         @map("logo_url")
-  primaryColor            String          @map("primary_color")
-  secondaryColor          String          @map("secondary_color")
-  supportWhatsapp         String          @map("support_whatsapp")
-  supportMessage          String          @map("support_message")
-  whatsappGroupUrlDefault String?         @map("whatsapp_group_url_default")
-  timezone                String          @default("America/Fortaleza")
-  legalName               String?         @map("legal_name")
+  id                      Int                @id @default(1)
+  brandName               String             @map("brand_name")
+  logoUrl                 String?            @map("logo_url")
+  primaryColor            String             @map("primary_color")
+  secondaryColor          String             @map("secondary_color")
+  supportWhatsapp         String             @map("support_whatsapp")
+  supportMessage          String             @map("support_message")
+  whatsappGroupUrlDefault String?            @map("whatsapp_group_url_default")
+  timezone                String             @default("America/Fortaleza")
+  legalName               String?            @map("legal_name")
   cnpj                    String?
   address                 String?
-  sacEmail                String?         @map("sac_email")
-  dpoName                 String?         @map("dpo_name")
-  dpoEmail                String?         @map("dpo_email")
-  showAuthorizationBadge  Boolean         @default(false) @map("show_authorization_badge")
-  authorizedState         String?         @map("authorized_state") @db.Char(2)
-  territorialRule         TerritorialRule @default(PHYSICAL_LOCATION) @map("territorial_rule")
-  geoEnforcement          Boolean         @default(true) @map("geo_enforcement")
-  antiScamEnabled         Boolean         @default(true) @map("anti_scam_enabled")
-  antiScamText            String          @map("anti_scam_text")
-  updatedAt               DateTime        @updatedAt @map("updated_at")
-  updatedById             String?         @map("updated_by_id")
+  sacEmail                String?            @map("sac_email")
+  dpoName                 String?            @map("dpo_name")
+  dpoEmail                String?            @map("dpo_email")
+  showAuthorizationBadge  Boolean            @default(false) @map("show_authorization_badge")
+  authorizationScope      AuthorizationScope @default(NATIONAL) @map("authorization_scope")
+  /// null = default do ambiente (ligado só em production). false/true = escolha explícita do admin.
+  turnstileEnabled        Boolean?           @map("turnstile_enabled")
+  antiScamEnabled         Boolean            @default(true) @map("anti_scam_enabled")
+  antiScamText            String             @map("anti_scam_text")
+  updatedAt               DateTime           @updatedAt @map("updated_at")
+  updatedById             String?            @map("updated_by_id")
 
   @@map("settings")
 }

@@ -1,11 +1,11 @@
 import type { AppEnv } from "@/env/schema";
 
 /**
- * Geolocalização é sempre obrigatória em production (SPEC 3 e 13A),
- * independentemente do valor salvo em settings.
+ * Turnstile (Q4): ligado por padrão em production (reserva e "Meus números"),
+ * desligado por padrão em dev/staging. Uma escolha explícita do admin prevalece.
  */
-export function effectiveGeoEnforcement(appEnv: AppEnv, settingValue: boolean): boolean {
-  return appEnv === "production" ? true : settingValue;
+export function effectiveTurnstileEnabled(appEnv: AppEnv, setting: boolean | null): boolean {
+  return setting ?? appEnv === "production";
 }
 
 export function showStagingBanner(appEnv: AppEnv): boolean {

@@ -1,6 +1,6 @@
 # CLAUDE.md — P.A PRÊMIOS
 
-Guia para agentes e devs. Fonte de verdade dos requisitos: `SPEC.md` (v2.0). Plano: `PLAN.md`.
+Guia para agentes e devs. Fonte de verdade dos requisitos: `SPEC.md` (v2.1, abrangência nacional). Plano: `PLAN.md`.
 Decisões sem regra na spec: `DECISIONS.md`. Fase atual: **F0 concluída, aguardando aprovação**.
 
 ## Regras de trabalho (SPEC 0)
@@ -49,10 +49,15 @@ pnpm db:migrate       # criar nova migration (prisma migrate dev)
 - `audit_log` é append-only: `pa_app` só tem SELECT/INSERT e um trigger bloqueia UPDATE/DELETE/TRUNCATE para
   qualquer role.
 - pg_cron vive no banco de `cron.database_name`; jobs para outros bancos usam `cron.schedule_in_database`.
+- **RLS em toda tabela de `public`**: toda migration que cria tabela deve incluir `ENABLE ROW LEVEL SECURITY`
+  e policy explícita `TO pa_app` (D-27, D-42). `tests/integration/rls.test.ts` falha se faltar.
+- Ordem do pool (`tickets.shuffle_rank`) é sigilosa: `pa_app` não lê essa coluna nem escreve em `tickets`;
+  o motor usa funções `SECURITY DEFINER` com `search_path` fixo (D-07, F1).
 
 ## Convenções
 
 - Dinheiro em centavos (Int); somatórios em BigInt. Horários em UTC; "dia" em America/Fortaleza.
 - Zod em toda borda (env, API, forms, webhooks).
 - Logs sem PII. Páginas públicas nunca mostram CPF, e-mail ou telefone completos.
+- Abrangência nacional: nenhum bloqueio geográfico; país/UF do IP só como registro e sinal de fraude (SPEC 13A).
 - Commits: `feat(fase-N): ...`, `fix: ...`, `docs: ...`, `test: ...`.

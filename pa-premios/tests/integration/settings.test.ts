@@ -23,8 +23,8 @@ describe("settings", () => {
   it("usa os defaults conservadores da SPEC", async () => {
     const s = await app.settings.findUniqueOrThrow({ where: { id: 1 } });
     expect(s.showAuthorizationBadge).toBe(false);
-    expect(s.geoEnforcement).toBe(true);
-    expect(s.territorialRule).toBe("PHYSICAL_LOCATION");
+    expect(s.authorizationScope).toBe("NATIONAL");
+    expect(s.turnstileEnabled).toBeNull();
     expect(s.antiScamEnabled).toBe(true);
     expect(s.timezone).toBe("America/Fortaleza");
   });

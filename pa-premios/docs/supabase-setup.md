@@ -29,17 +29,24 @@ ALTER ROLE pa_app LOGIN PASSWORD '<senha forte gerada no cofre>';
 
 Nunca usar o role `postgres` na `DATABASE_URL`.
 
-## 4. Storage (F2)
+## 4. Acesso de pessoas ao banco (D-07)
+
+- Restringir os membros do projeto Supabase: o Table Editor e o SQL editor usam o role dono e enxergam
+  `tickets.shuffle_rank`. Acesso emergencial só pelo responsável, com registro (habilitar `pgaudit` para
+  leituras de `tickets` pelo dono, ou procedimento formal com registro no audit log).
+
+## 5. Storage (F2)
 
 Bucket **privado** `winner-documents` (documentos de ganhadores e da autorização). Acesso apenas por URL
 assinada de curta duração gerada no servidor; cada acesso vai para o audit log.
 
-## 5. Vercel
+## 6. Vercel
 
 - Plano Pro, região de funções `gru1` (já em `vercel.json`).
 - Variáveis por ambiente (Preview = staging, Production = production): todas as de `.env.example`,
   com `APP_ENV` correspondente. `CRON_SECRET` com 32+ caracteres.
+- Turnstile (F1): criar o site no Cloudflare e configurar as chaves em production (ligado por padrão, D-39).
 
-## 6. Upstash
+## 7. Upstash
 
 Banco Redis na região São Paulo (`sa-east-1`). Copiar `UPSTASH_REDIS_REST_URL` e `UPSTASH_REDIS_REST_TOKEN`.
