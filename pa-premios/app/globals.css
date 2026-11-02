@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/* Cores de marca vêm de settings (injetadas no <html> pelo layout). */
+:root {
+  --brand-primary: #0b5fff;
+  --brand-secondary: #ffb800;
+  --background: #ffffff;
+  --foreground: #0f172a;
+  --muted: #475569;
+}
+
+@theme inline {
+  --color-brand: var(--brand-primary);
+  --color-brand-secondary: var(--brand-secondary);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 16px; /* evita zoom automático em inputs no iOS */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

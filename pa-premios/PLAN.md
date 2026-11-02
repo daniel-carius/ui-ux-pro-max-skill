@@ -1,9 +1,8 @@
 # PLAN.md — Plataforma de campanhas "P.A PRÊMIOS"
 
-> Status: **PROPOSTA — aguardando aprovação.** Nenhum código de aplicação foi escrito.
-> Data: 2026-11-02 · Spec de referência: SPEC enviada no chat (seções 0–18).
-> Decisões com default conservador estão em [`DECISIONS.md`](./DECISIONS.md).
-> As 10 perguntas bloqueantes estão na **seção 10**. Responda primeiro as Q1–Q4: sem elas a F0 não começa.
+> **Revisão 2** — 02/11/2026 · alinhada à `SPEC.md` v2.0 (consolidada).
+> Status: **F0 concluída** (ver seção 13). F1 aguarda aprovação deste plano e das perguntas da seção 12.
+> Decisões sem regra na spec: [`DECISIONS.md`](./DECISIONS.md). Decisões já tomadas: SPEC 19.
 
 ---
 
@@ -11,749 +10,498 @@
 
 | Item | Proposta |
 |---|---|
-| Arquitetura | Monólito Next.js 15 (App Router) + PostgreSQL 16 + Redis. Sem microsserviços. |
-| Ponto crítico | Motor de números: pool pré-gerado + `FOR UPDATE SKIP LOCKED` em SQL cru, numa transação curta. |
-| Gargalo previsto | Linha "quente" de contadores. Resolvido com **contadores particionados (16 shards)**. |
-| Escala pública | Página de campanha estática (ISR) + endpoints "vivos" com cache na CDN (`s-maxage`). Os 300 req/s caem quase todos na CDN. O banco só recebe as reservas. |
-| Maior risco | **Jurídico, não técnico**: modalidade da autorização, aceite do PSP e cotas da casa (seção 9). |
-| Fora do escopo agora | Seção 18 da spec, sem alteração. |
+| Arquitetura | Monólito Next.js 15 (App Router) na Vercel Pro (`gru1`) + Supabase Postgres (SP) + Upstash. |
+| Ponto crítico | `NumberAllocator` (SPEC 6.1). Implementação padrão em Postgres: transação curta + `FOR UPDATE SKIP LOCKED`, somente travas presas à transação. **Validado através do pooler em modo transação na F0** (D-21). |
+| Trabalho pesado | Dentro do banco, via pg_cron: geração do pool (uma instrução `INSERT … SELECT generate_series`) e cotas da casa (lotes de 10.000, canceláveis). Nada depende de timeout de função. |
+| Escala pública | Página e dados vivos em cache de CDN de 30–60s. O banco recebe essencialmente as reservas. |
+| Compliance novo (v2) | Territorialidade (13A): GPS + polígono IBGE no servidor + IP como sinal secundário, revalidado no passo 4, com registro por pedido. |
+| Maior risco novo | **Falso bloqueio por IP de operadora móvel** (R-02). Pode derrubar conversão no MA sem nenhum ganho de compliance. Ver Q6. |
 
 ---
 
-## 2. Stack e alternativas propostas
+## 2. Stack (final, SPEC 2 + 19)
 
-Mantenho a stack da seção 2. Os ajustes abaixo são **acréscimos ou detalhamentos**, não trocas.
-
-| Tema | Decisão | Por quê |
+| Tema | Escolha | Observação |
 |---|---|---|
-| Storage de mídia/PDF | Adapter S3-compatível (Cloudflare R2 ou S3 em prod; **MinIO** no Docker Compose) | A spec não define onde ficam imagens, vídeo e PDFs do regulamento. |
-| Geração do pool | Em **lotes de 100k via SQL `generate_series`**, um lote por execução do cron (ou worker) | 1M de linhas não cabe com segurança numa única função serverless; em lotes é retomável e idempotente. |
-| Alocação | `prisma.$queryRaw` com CTE `SELECT … FOR UPDATE SKIP LOCKED` + `UPDATE … RETURNING` numa única instrução | O Prisma não expressa `SKIP LOCKED`. Uma única instrução reduz a ida e volta ao banco. |
-| Particionamento de `tickets` | `PARTITION BY LIST (campaign_id)` via migration SQL manual | Campanhas encerradas viram partições arquiváveis; índice menor por campanha. O Prisma não gera partição; a migration é escrita à mão. |
-| Sessão admin | Auth.js Credentials (exige JWT) + `session_version` no banco checado a cada request | Credentials não suporta sessão em banco; o `session_version` permite derrubar sessões (troca de senha, desligamento). |
-| Hash de senha | `@node-rs/argon2` (argon2id) | Binário pré-compilado, funciona em serverless sem toolchain nativa. |
-| TOTP | `otplib` + segredo criptografado (AES-256-GCM) | Padrão de mercado; compatível com Google Authenticator e afins. |
-| PDF do regulamento | `@react-pdf/renderer` (sem Chromium) | Headless Chrome é pesado e instável em serverless. |
-| Markdown | `remark` → `rehype-sanitize` (allowlist) → HTML | Renderizado e sanitizado; nunca exibido cru. |
-| Rate limit | `@upstash/ratelimit` (Redis local compatível no dev) | Sliding window por IP e por CPF-hash. |
-| Logs | `pino` com redaction de PII (cpf, email, phone, name, birthDate) | Atende "logs sem PII" por padrão, não por disciplina. |
-| Anti-bot (opcional) | Cloudflare Turnstile **desligado por padrão**, ligável em settings | Ver Q10: mitiga enumeração de CPF em picos. |
-| CI | GitHub Actions: lint, typecheck, unit, integração (service Postgres 16 + Redis), Playwright | Critério de aceite da F0. |
+| App | Next.js 15.5, React 19, TS 5.9 strict, pnpm 10 | Next 16 e TS 7 existem, mas a spec fixa Next 15; TS 7 não é suportado pelo Next 15. |
+| ORM | **Prisma 6.19** | Prisma 7 troca o engine e exige driver adapters; 6.x é estável com `pgbouncer=true` (D-24). |
+| Banco | Supabase Postgres, SP; app pelo **transaction pooler** com role **`pa_app`**; migrations pela conexão direta/session pooler | D-21, D-25, D-26. Versão major a confirmar no painel (D-22). |
+| Jobs no banco | pg_cron (geração do pool, cotas da casa) | `cron.schedule_in_database` para bancos fora de `cron.database_name`. |
+| Jobs da app | Vercel Cron (1 min) → rotas com `CRON_SECRET` | expiração, reconciliação (F5), alertas, antifraude. |
+| Storage | Supabase Storage, bucket privado, URL assinada curta + audit log | substitui o S3/R2 do plano v1 (D-20). |
+| Redis | Upstash (rate limit + cache). Dev/CI: Redis + `serverless-redis-http` (mesma API REST) | |
+| UI | Tailwind 4 + shadcn/ui (`components.json` pronto) | |
+| Validação | Zod 4 em env, API, forms, webhooks | |
+| Auth admin | Auth.js Credentials + argon2id + TOTP; sessão 8h; reconfirmação de senha em ação sensível | Credentials exige JWT: `sessionVersion` no banco permite revogar. |
+| E-mail | Resend (adapter) / Mailpit no dev | |
+| Testes | Vitest (unit + integração com Postgres real **atrás do pgbouncer em modo transação**), Playwright 390x844 | |
+| Erros | Sentry (F5) | |
+| Geo | GeoJSON IBGE versionado + point-in-polygon no servidor; IP-UF pelos headers de geolocalização da Vercel (Q5); CEP via BrasilAPI com fallback ViaCEP | |
 
 ---
 
 ## 3. Arquitetura
 
 ```
-                ┌───────────── CDN (Vercel Edge) ──────────────┐
- Instagram /    │  /c/[slug]  ISR (revalidateTag no admin)     │
- WhatsApp  ───▶ │  /api/public/*/live      s-maxage=30, SWR    │
- (mobile)       │  /api/public/*/ranking   s-maxage=60, SWR    │
-                └───────────────┬──────────────────────────────┘
-                                │ miss / dinâmico
-                ┌───────────────▼──────────────────────────────┐
-                │ Next.js (Route Handlers + Server Actions)    │
-                │  checkout ─ reserva ─ status ─ meus números  │
-                │  admin (Auth.js + TOTP + RBAC)               │
-                │  webhooks PSP ─ cron (segredo no header)     │
-                └──┬──────────────┬──────────────┬─────────────┘
-                   │              │              │
-            ┌──────▼─────┐  ┌─────▼────┐  ┌──────▼──────────┐
-            │ Postgres 16│  │  Redis   │  │ PaymentProvider │
-            │ (pooler)   │  │ RL+cache │  │ Mock|Efí|Asaas|MP│
-            └────────────┘  └──────────┘  └─────────────────┘
+                ┌──────────── CDN (Vercel Edge) ─────────────┐
+ Instagram /    │ /c/[slug] ISR + revalidateTag              │
+ WhatsApp  ───▶ │ /api/public/*/live     s-maxage=30, SWR    │
+ (mobile)       │ /api/public/*/ranking  s-maxage=60, SWR    │
+                └──────────────┬─────────────────────────────┘
+                               │ dinâmico
+                ┌──────────────▼─────────────────────────────┐
+                │ Next.js (Route Handlers + Server Actions)  │
+                │  checkout: geo → CPF → dados → bump → reserva
+                │  admin (RBAC módulo×ação, TOTP, reauth)    │
+                │  webhooks PSP · cron (CRON_SECRET)         │
+                └──┬─────────────┬──────────────┬────────────┘
+     pooler 6543   │             │              │
+     role pa_app   │             │              │
+          ┌────────▼────────┐ ┌──▼─────┐ ┌──────▼──────────┐
+          │ Supabase PG (SP)│ │Upstash │ │ PaymentProvider │
+          │ + pg_cron jobs: │ │ RL +   │ │ Mock (até F4)   │
+          │  pool, casa     │ │ cache  │ │ real na F5      │
+          └────────┬────────┘ └────────┘ └─────────────────┘
                    │
-            S3/R2 (mídia, PDFs) · Resend (e-mail) · Sentry
+          Supabase Storage (privado) · Resend · Sentry
 ```
 
-### 3.1 Organização do código
+### 3.1 Código (estado após F0)
 
 ```
-pa-premios/
-├── app/
-│   ├── (public)/            # home, c/[slug], resultados, meus-numeros, pedido/[publicId], termos…
-│   ├── admin/               # páginas do admin (RSC + server actions)
-│   └── api/
-│       ├── public/          # endpoints vivos com cache
-│       ├── checkout/        # identify, reserve
-│       ├── orders/          # status, csv, simulate-payment (não-prod)
-│       ├── webhooks/        # payments/[provider]
-│       └── cron/            # expire, reconcile, generate-pool, retention
-├── src/
-│   ├── domain/              # regras puras (sem I/O): limites, apuração, máscara, progresso
-│   ├── services/            # casos de uso com transação: reservar, pagar, expirar, casa, apurar
-│   ├── infra/               # prisma, redis, storage, email, payments/*, crypto
-│   ├── schemas/             # Zod (API, forms, webhooks, env)
-│   └── ui/                  # componentes (shadcn/ui)
-├── prisma/                  # schema.prisma, migrations (incl. SQL manual), seed.ts
-├── tests/                   # unit, integration (Postgres real), e2e (Playwright 390x844)
-├── docker-compose.yml       # postgres, redis, mailpit, minio
-└── CLAUDE.md, PLAN.md, DECISIONS.md
+app/                      rotas (público, admin, api)
+src/domain/               regras puras, sem I/O (ESLint bloqueia imports de infra)
+src/allocator/            (F1) interface NumberAllocator + implementação Postgres
+src/services/             (F1+) casos de uso transacionais
+src/infra/                db (Prisma), redis, settings, storage, email, payments, geo
+src/env/                  schema Zod do ambiente
+src/ui/                   componentes (shadcn/ui)
+prisma/                   schema, migrations (SQL manual incluso), seed
+tests/{unit,integration,e2e}
+docker/                   imagem Postgres com pg_cron, config do pgbouncer
+docs/supabase-setup.md    checklist de contas (Supabase, Vercel, Upstash)
 ```
 
-Regra de camadas: `domain/` não importa nada de `infra/`. Toda regra de negócio crítica (apuração, limites, cotas da casa, máscara) fica em `domain/` com teste unitário puro.
-
-### 3.2 Configuração e ambientes
-- `env.ts` com Zod: falha no boot se faltar variável. `APP_ENV = development | staging | production`.
-- Textos de marca, telefone e links: **somente** da tabela `settings` (cache Redis 60s, invalidado ao salvar).
-- `staging`: faixa fixa "AMBIENTE DE HOMOLOGAÇÃO"; `MockProvider` permitido. `production`: `MockProvider` e `simulate-payment` **bloqueados no boot**.
+### 3.2 Ambientes
+- `APP_ENV` validado por Zod no boot. `staging`: faixa "AMBIENTE DE HOMOLOGAÇÃO", `noindex`.
+- `production`: `MockProvider`, `simulate-payment` e `geo_enforcement = off` **impossíveis** (checagem no código, não só na setting).
 
 ---
 
 ## 4. Modelo de dados (Prisma)
 
-Convenções:
-- Dinheiro sempre em **centavos (Int)**; somatórios em `BigInt`.
-- `tickets` usa `campaign_id Int` e `order_id BigInt` (e não UUID) para economizar ~40 bytes/linha: 1M de linhas ≈ 150 MB com índices; 10M ≈ 1,5 GB.
-- IDs expostos na URL são `publicId` aleatórios (128 bits). IDs internos nunca aparecem no front.
-- Horários em UTC; "dia" calculado em `America/Fortaleza` (UTC−3, sem horário de verão).
+Convenções: tabelas e colunas em snake_case (`@@map`/`@map`); dinheiro em centavos (`Int`), somatórios em `BigInt`; `publicId` aleatório nas URLs; UTC no banco, "dia" em America/Fortaleza. A F0 já criou `settings` e `audit_log`; os demais modelos entram na fase em que são usados.
 
 ```prisma
-generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")   // via pooler
-  directUrl = env("DIRECT_URL")     // migrations
-}
-
+// ── Enums ───────────────────────────────────────────────
 enum AdminRole        { OWNER OPERATOR FINANCE SUPPORT }
-enum CampaignStatus   { DRAFT POOL_GENERATING ACTIVE SALES_CLOSED DRAWN FINISHED CANCELLED }
-enum DrawRule         { DEFAULT_6 DEFAULT_7 }
+enum CampaignStatus   { DRAFT GENERATING_NUMBERS PUBLISHED SALES_PAUSED SALES_CLOSED DRAWN FINISHED CANCELLED /* CANCELLED: D-04 */ }
+enum DrawRule         { DEFAULT_6 /* DEFAULT_7: backlog */ }
 enum UnsoldRule       { NEXT_PAID_CIRCULAR }
 enum TicketStatus     { AVAILABLE RESERVED PAID HOUSE }
 enum OrderStatus      { PENDING PAID EXPIRED CANCELLED REFUND_PENDING REFUNDED }
 enum PaymentStatus    { PENDING PAID EXPIRED REFUNDED FAILED }
-enum ProgressRounding { ONE FIVE TEN }
-enum MediaType        { IMAGE VIDEO }
-enum RegulationKind   { ORIGINAL ERRATA }
+enum TerritorialRule  { PHYSICAL_LOCATION DOMICILE PHYSICAL_OR_DOMICILE }   // já na F0
+enum GeoStep          { STEP0 STEP4 }
+enum GeoResult        { APPROVED BLOCKED_OUTSIDE BLOCKED_PERMISSION BLOCKED_IP_DIVERGENCE BLOCKED_MOVED BLOCKED_CEP }
+enum JobStatus        { PENDING RUNNING CANCEL_REQUESTED CANCELLED DONE FAILED }
+enum HouseDirection   { BLOCK RELEASE }
 enum WinnerType       { MAIN INSTANT_PRIZE RANKING }
+enum WinnerStage      { NEW CONTACTED DOCS_RECEIVED DOCS_VALIDATED PRIZE_CHOSEN TAX_HANDLED DELIVERED PROOF_ATTACHED COMPLETED }
+enum PrizeChoice      { GOODS CASH }
+enum DocumentKind     { ID_DOCUMENT CPF_DOCUMENT ADDRESS_PROOF DELIVERY_PROOF TAX_GUIDE AUTHORIZATION }
+enum FraudKind        { SHARED_PHONE SHARED_EMAIL SHARED_IP SHARED_DEVICE MANY_EXPIRED GPS_IP_DIVERGENCE PURCHASE_SPIKE }
+enum ReviewStatus     { OPEN RELEASED CPF_BLOCKED ORDER_CANCELLED }
+enum AlertKind        { PAYMENT_MISMATCH WEBHOOK_FAILING INSTANT_PRIZE_FOUND SALES_STALLED GEO_BLOCK_SPIKE CLAIM_DEADLINE JOB_FAILED }
+enum AlertStatus      { OPEN ACKNOWLEDGED RESOLVED }
 enum ContentKey       { TERMS PRIVACY FAQ }
-enum HouseMode        { TARGET_PCT EXACT }
-enum ActorType        { ADMIN SYSTEM CUSTOMER }
+enum ActorType        { ADMIN SYSTEM CUSTOMER }                              // já na F0
 
-// ───────────── Configuração ─────────────
-model Settings {
-  id                      Int      @id @default(1)        // linha única
-  brandName               String
-  logoUrl                 String?
-  primaryColor            String
-  secondaryColor          String
-  supportWhatsapp         String
-  supportMessageTemplate  String   // "Olá! Preciso de ajuda com minha compra na {brand_name}"
-  whatsappGroupUrlDefault String?
-  timezone                String   @default("America/Fortaleza")
-  legalName               String?
-  cnpj                    String?
-  address                 String?
-  sacEmail                String?
-  dpoName                 String?
-  dpoEmail                String?
-  antiScamEnabled         Boolean  @default(true)
-  antiScamText            String
-  pixExpirationMinutes    Int      @default(15)
-  turnstileEnabled        Boolean  @default(false)
-  dataRetentionDays       Int?     // null = sem expurgo automático
-  updatedAt               DateTime @updatedAt
-  updatedById             String?
+// ── Configuração (F0: criado) ───────────────────────────
+model Settings {               // linha única, CHECK (id = 1)
+  // marca, suporte, timezone, dados legais, show_authorization_badge,
+  // authorized_state, territorial_rule, geo_enforcement, banner antigolpe  ← já existem
+  // F2 acrescenta:
+  stalledSalesMinutes Int?      // alerta "venda parada" (12.10)
+  peakHours           Json?     // janelas de pico para o alerta
+  alertEmails         String[]
+  alertWhatsapps      String[]  // canal depende da Q8
 }
 
-model Modality {
-  id              Int        @id @default(autoincrement())
-  name            String
-  organ           String
-  allowsCashPrize Boolean    @default(false)
-  active          Boolean    @default(true)
-  campaigns       Campaign[]
-}
+model Modality { id Int @id; name String; organ String; allowsCashPrize Boolean @default(false); active Boolean }
 
 model AdminUser {
-  id             String    @id @default(cuid())
-  email          String    @unique
-  name           String
-  passwordHash   String
-  totpSecretEnc  Bytes?
-  totpEnabledAt  DateTime?            // sem TOTP ativo = só acessa a tela de setup do 2FA
-  role           AdminRole
-  active         Boolean   @default(true)
-  sessionVersion Int       @default(0)
-  failedLogins   Int       @default(0)
-  lockedUntil    DateTime?
-  lastLoginAt    DateTime?
-  createdAt      DateTime  @default(now())
+  id String @id; email String @unique; name String; passwordHash String
+  totpSecretEnc Bytes?; totpEnabledAt DateTime?; role AdminRole; active Boolean
+  sessionVersion Int @default(0); failedLogins Int; lockedUntil DateTime?; lastLoginAt DateTime?
 }
 
-// ───────────── Participantes ─────────────
+// ── Participantes ───────────────────────────────────────
 model Customer {
-  id                   BigInt    @id @default(autoincrement())
-  cpfHash              String    @unique            // HMAC-SHA256(pepper, cpf)
-  cpfEnc               Bytes                        // AES-256-GCM
-  cryptoKeyVersion     Int
-  fullName             String
-  email                String
-  phoneDdi             String    @default("55")
-  phone                String
-  birthDate            DateTime  @db.Date
-  city                 String?                      // preenchido na validação do ganhador (ver DECISIONS D-14)
-  uf                   String?   @db.Char(2)
-  marketingConsent     Boolean   @default(false)
-  marketingConsentAt   DateTime?
-  marketingRevokedAt   DateTime?
-  blockedAt            DateTime?
-  blockedReason        String?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
-  orders               Order[]
-  acceptances          Acceptance[]
+  id BigInt @id; cpfHash String @unique; cpfEnc Bytes; cryptoKeyVersion Int
+  fullName String; email String; phoneDdi String @default("55"); phone String; birthDate DateTime @db.Date
+  cep String?; cepUf String? @db.Char(2)                        // só se territorial_rule aceitar domicílio
+  marketingConsent Boolean @default(false); marketingConsentAt DateTime?; marketingRevokedAt DateTime?
+  blockedAt DateTime?; blockedReason String?; anonymizedAt DateTime?
+  @@index([email]) @@index([phone])                             // antifraude e busca do admin
 }
 
-// ───────────── Campanha ─────────────
+// ── Campanha ────────────────────────────────────────────
 model Campaign {
-  id                    Int            @id @default(autoincrement())
-  slug                  String         @unique
-  title                 String
-  description           String                       // markdown
-  status                CampaignStatus @default(DRAFT)
-  featured              Boolean        @default(false) // hero da home
-  modalityId            Int?
-  modality              Modality?      @relation(fields: [modalityId], references: [id])
-  authorizationNumber   String?
-  authorizationUrl      String?
-  promoterLegalName     String?
-  promoterCnpj          String?
-  ticketPriceCents      Int                          // travado após 1ª reserva
-  totalTickets          Int                          // travado
-  minOrderValueCents    Int                          // travado
-  maxTicketsPerOrder    Int
-  maxTicketsPerCustomer Int
-  quantityPresets       Int[]          @default([50, 100, 200, 500])
-  popularPreset         Int?           @default(100)
-  drawDate              DateTime?
-  lotteryContest        Int?
-  drawRule              DrawRule                     // travado
-  unsoldRule            UnsoldRule     @default(NEXT_PAID_CIRCULAR)
-  cashOptionEnabled     Boolean        @default(false) // só se modality.allowsCashPrize
-  cashValueCents        Int?
-  whatsappGroupUrl      String?
-  instantPrizesEnabled  Boolean        @default(false)
-  rankingPrizeEnabled   Boolean        @default(false)
-  rankingPrizeText      String?
-  progressVisible       Boolean        @default(true)
-  progressShowFromPct   Int            @default(0)
-  progressRounding      ProgressRounding @default(ONE)
-  progressShowPct       Boolean        @default(true)
-  progressShowRemaining Boolean        @default(false)
-  milestoneMessages     Json                         // {"25": "...", "50": "...", "75": "...", "90": "...", "last": "Últimas cotas!"}
-  poolGeneratedUpTo     Int            @default(0)   // progresso da geração em lotes
-  poolSeedHash          String?                      // SHA-256 da seed do embaralhamento (ver DECISIONS D-07)
-  currentRegulationId   String?        @unique
-  firstReservationAt    DateTime?                    // dispara as travas
-  publishedAt           DateTime?
-  salesClosedAt         DateTime?
-  drawnAt               DateTime?
-  finishedAt            DateTime?
-  createdAt             DateTime       @default(now())
-  updatedAt             DateTime       @updatedAt
-
-  media         CampaignMedia[]
-  bumps         OrderBump[]
-  instantPrizes InstantPrize[]
-  regulations   RegulationVersion[] @relation("CampaignRegulations")
-  orders        Order[]
-  draw          Draw?
-  winners       Winner[]
-  @@index([status, featured])
+  id Int @id; slug String @unique; title String; description String; status CampaignStatus @default(DRAFT)
+  featured Boolean
+  modalityId Int?
+  ticketPriceCents Int; totalTickets Int; minOrderValueCents Int     // travados após a 1ª reserva (trigger)
+  maxPerOrder Int; maxPerCpf Int; reservationMinutes Int @default(15)
+  quantityPresets Int[] @default([50, 100, 200, 500]); popularPreset Int? @default(100)
+  drawDate DateTime?; lotteryContest Int?; drawRule DrawRule; unsoldRule UnsoldRule
+  cashOptionEnabled Boolean @default(false); cashValueCents Int?      // trigger: só se modality.allowsCashPrize
+  whatsappGroupUrl String?
+  instantPrizesEnabled Boolean @default(false)
+  showRanking Boolean @default(true); rankingPrizeEnabled Boolean @default(false); rankingPrizeText String?
+  progressVisible Boolean; progressShowFromPct Int; progressRounding Int /* 1|5|10 */
+  progressShowPct Boolean; progressShowRemaining Boolean; milestoneMessages Json
+  transparencyNoteEnabled Boolean @default(true)
+  transparencyNoteText String @default("Inclui números reservados pela organização, que não concorrem a prêmios.")
+  salesPausedReason String?
+  currentRegulationId String?; firstReservationAt DateTime?
+  publishedAt DateTime?; salesClosedAt DateTime?; drawnAt DateTime?; finishedAt DateTime?
 }
 
-model CampaignMedia {
-  id         String    @id @default(cuid())
-  campaignId Int
-  campaign   Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  type       MediaType
-  url        String
-  alt        String?
-  position   Int       // até 8 imagens + 1 vídeo (validado no serviço)
+model CampaignAuthorization {    // aba 2: cadastro interno, obrigatório para publicar em production
+  campaignId Int @id; promoterLegalName String; promoterCnpj String; modalityId Int; organ String
+  number String; validFrom DateTime @db.Date; validUntil DateTime @db.Date; documentPath String?  // bucket privado
 }
 
-model OrderBump {
-  id           String   @id @default(cuid())
-  campaignId   Int
-  campaign     Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  position     Int      // 1 ou 2
-  extraTickets Int
-  priceCents   Int      // CHECK: priceCents < extraTickets * ticketPriceCents
-  imageUrl     String?
-  active       Boolean  @default(false)
-  @@unique([campaignId, position])
-}
+model CampaignMedia { id String @id; campaignId Int; type String /* IMAGE|VIDEO */; url String; alt String?; position Int }
+model OrderBump     { id String @id; campaignId Int; position Int; extraTickets Int; priceCents Int; imageUrl String?; active Boolean
+                      @@unique([campaignId, position]) }   // trigger: priceCents < extraTickets × preço
+model InstantPrize  { id String @id; campaignId Int; number Int; description String; frozenAt DateTime?
+                      winnerCaseId String?; @@unique([campaignId, number]) }
+model RegulationVersion { id String @id; campaignId Int; version Int; kind String /* ORIGINAL|ERRATA */; errataReason String?
+                          markdown String; sha256 String; pdfPath String?; pdfSha256 String; publishedAt DateTime?
+                          @@unique([campaignId, version]) }
+model MessageTemplate { id String @id; campaignId Int?; name String; body String; updatedById String }   // 12.11
+model ContentPage     { id String @id; key ContentKey; version Int; markdown String; publishedAt DateTime? }
 
-model InstantPrize {
-  id               String    @id @default(cuid())
-  campaignId       Int
-  campaign         Campaign  @relation(fields: [campaignId], references: [id])
-  number           Int
-  description      String
-  frozenAt         DateTime? // preenchido na publicação; depois disso é imutável
-  winnerCustomerId BigInt?
-  winnerOrderId    BigInt?
-  wonAt            DateTime?
-  @@unique([campaignId, number])
-}
-
-model RegulationVersion {
-  id           String         @id @default(cuid())
-  campaignId   Int
-  campaign     Campaign       @relation("CampaignRegulations", fields: [campaignId], references: [id])
-  version      Int
-  kind         RegulationKind @default(ORIGINAL)
-  errataReason String?
-  markdown     String         // texto final, variáveis já resolvidas
-  sha256       String         // hash do markdown canônico (NFC, LF)
-  pdfUrl       String?
-  pdfSha256    String?
-  createdById  String
-  publishedAt  DateTime?
-  createdAt    DateTime       @default(now())
-  @@unique([campaignId, version])
-}
-
-// ───────────── Pedidos e pagamento ─────────────
-model Order {
-  id             BigInt      @id @default(autoincrement())
-  publicId       String      @unique              // 128 bits, usado na URL /pedido/[publicId]
-  code           String      @unique              // curto e legível: "PA-7KX92Q"
-  campaignId     Int
-  campaign       Campaign    @relation(fields: [campaignId], references: [id])
-  customerId     BigInt
-  customer       Customer    @relation(fields: [customerId], references: [id])
-  status         OrderStatus @default(PENDING)
-  baseQuantity   Int
-  bumpQuantity   Int         @default(0)
-  quantity       Int                               // base + bumps
-  amountCents    Int
-  expiresAt      DateTime
-  paidAt         DateTime?
-  latePayment    Boolean     @default(false)
-  refundReason   String?
-  refundProofUrl String?
-  refundedAt     DateTime?
-  refundedById   String?
-  createdAt      DateTime    @default(now())
-
-  bumps      OrderBumpSelection[]
-  payments   Payment[]
-  acceptance Acceptance?
-  @@index([campaignId, status, createdAt])
-  @@index([customerId, campaignId])
-  @@index([status, expiresAt])
-  // SQL manual: CREATE UNIQUE INDEX one_pending_per_customer
-  //   ON "Order"("campaignId","customerId") WHERE status = 'PENDING';
-}
-
-model OrderBumpSelection {
-  orderId      BigInt
-  order        Order  @relation(fields: [orderId], references: [id])
-  bumpId       String
-  extraTickets Int
-  priceCents   Int    // snapshot do preço no momento da compra
-  @@id([orderId, bumpId])
-}
-
-model Acceptance {
-  id                  String   @id @default(cuid())
-  orderId             BigInt   @unique
-  order               Order    @relation(fields: [orderId], references: [id])
-  customerId          BigInt
-  customer            Customer @relation(fields: [customerId], references: [id])
-  regulationVersionId String
-  regulationSha256    String
-  termsVersion        Int
-  ageDeclared         Boolean
-  marketingConsent    Boolean
-  ip                  String
-  userAgent           String
-  acceptedAt          DateTime @default(now())
-}
-
-model Payment {
-  id               String        @id @default(cuid())
-  orderId          BigInt
-  order            Order         @relation(fields: [orderId], references: [id])
-  provider         String        // mock | efi | asaas | mercadopago
-  providerChargeId String
-  txid             String        @unique
-  amountCents      Int
-  status           PaymentStatus @default(PENDING)
-  pixCopyPaste     String
-  expiresAt        DateTime
-  paidAt           DateTime?
-  paidAmountCents  Int?
-  endToEndId       String?
-  createdAt        DateTime      @default(now())
-  @@unique([provider, providerChargeId])
-  @@index([status, createdAt])
-}
-
-model WebhookEvent {
-  id             String    @id @default(cuid())
-  provider       String
-  eventId        String
-  payloadSha256  String
-  signatureValid Boolean
-  receivedAt     DateTime  @default(now())
-  processedAt    DateTime?
-  error          String?
-  @@unique([provider, eventId])   // idempotência
-}
-
-// ───────────── Motor de números ─────────────
-// Tabela particionada por campaign_id (migration SQL manual).
-model Ticket {
-  campaignId     Int
-  number         Int
-  shuffleRank    Int
-  status         TicketStatus @default(AVAILABLE)
-  orderId        BigInt?
-  reservedUntil  DateTime?
-  isInstantPrize Boolean      @default(false)
+// ── Motor de números ────────────────────────────────────
+model Ticket {                   // PK (campaign_id, number); campaign_id Int, order_id BigInt (economia de espaço)
+  campaignId Int; number Int; shuffleRank Int; status TicketStatus @default(AVAILABLE)
+  orderId BigInt?; reservedUntil DateTime?; isInstantPrize Boolean @default(false)
   @@id([campaignId, number])
-  // SQL manual:
-  //  idx_avail  ON tickets(campaign_id, shuffle_rank) WHERE status='AVAILABLE'
-  //  idx_order  ON tickets(order_id) WHERE order_id IS NOT NULL
-  //  idx_paid   ON tickets(campaign_id, number)       WHERE status='PAID'      -- apuração
-  //  idx_house  ON tickets(campaign_id, shuffle_rank) WHERE status='HOUSE'
-  //  idx_resexp ON tickets(campaign_id, reserved_until) WHERE status='RESERVED'
+  // SQL manual: índice (campaign_id, status, shuffle_rank) [SPEC 6.2];
+  //   CHECK (NOT (is_instant_prize AND status = 'HOUSE'));  índice parcial PAID para apuração.
+}
+model CampaignCounter { campaignId Int; shard Int /* 0..15 */; paid Int; reserved Int; house Int; paidRevenueCents BigInt
+                        @@id([campaignId, shard]) }
+model PoolGenerationJob { id String @id; campaignId Int; status JobStatus; total Int; error String?
+                          orderingSha256 String?   // hash de (number, shuffle_rank) ordenado: prova de não adulteração
+                          requestedById String; startedAt DateTime?; finishedAt DateTime? }
+model HouseJob { id String @id; campaignId Int; direction HouseDirection; mode String /* TARGET_PCT|EXACT */
+                 targetPct Int?; requested Int; processed Int @default(0); batchSize Int @default(10000)
+                 status JobStatus; error String?; createdById String; cancelledById String?; finishedAt DateTime? }
+
+// ── Pedidos, pagamento, aceite, geolocalização ─────────
+model Order {
+  id BigInt @id; publicId String @unique; code String @unique; campaignId Int; customerId BigInt
+  status OrderStatus; baseQuantity Int; bumpQuantity Int; quantity Int; amountCents Int
+  expiresAt DateTime; paidAt DateTime?; latePayment Boolean
+  refundReason String?; refundProofPath String?; refundRequestedById String?; refundApprovedById String?; refundedAt DateTime?
+  deviceId String?; ip String; userAgent String
+  @@index([campaignId, status, createdAt]) @@index([customerId, campaignId]) @@index([status, expiresAt])
+  // SQL manual: UNIQUE (campaign_id, customer_id) WHERE status = 'PENDING'   [SPEC 5, 15, 19.7]
+}
+model OrderBumpSelection { orderId BigInt; bumpId String; extraTickets Int; priceCents Int; @@id([orderId, bumpId]) }
+model Acceptance { id String @id; orderId BigInt @unique; regulationVersionId String; regulationSha256 String
+                   termsVersion Int; ageDeclared Boolean; marketingConsent Boolean; ip String; userAgent String; acceptedAt DateTime }
+model Payment { id String @id; orderId BigInt; provider String; providerChargeId String; txid String @unique
+                amountCents Int; status PaymentStatus; pixCopyPaste String; expiresAt DateTime
+                paidAt DateTime?; paidAmountCents Int?; endToEndId String?; feeCents Int? }
+model WebhookEvent { id String @id; provider String; eventId String; payloadSha256 String; signatureValid Boolean
+                     processedAt DateTime?; error String?; @@unique([provider, eventId]) }
+
+model GeoCheck {                 // 13A: prova de compliance, uma linha por validação
+  id String @id; campaignId Int; orderId BigInt?; customerId BigInt?; step GeoStep
+  latitude Decimal? @db.Decimal(9, 6); longitude Decimal? @db.Decimal(9, 6); accuracyM Int?
+  permission String /* GRANTED|DENIED|UNAVAILABLE */
+  gpsUf String? @db.Char(2); ipUf String? @db.Char(2); ipCountry String?; gpsIpDistanceKm Int?
+  cepUf String? @db.Char(2); result GeoResult; polygonVersion String; ip String; createdAt DateTime
+  @@index([campaignId, result, createdAt])
 }
 
-model CampaignCounter {          // 16 shards por campanha; leitura = SUM
-  campaignId       Int
-  shard            Int
-  paid             Int    @default(0)
-  reserved         Int    @default(0)
-  house            Int    @default(0)
-  paidRevenueCents BigInt @default(0)
-  @@id([campaignId, shard])
-}
+// ── Ranking ─────────────────────────────────────────────
+model ParticipantStat      { campaignId Int; customerId BigInt; paidTickets Int; reachedAt DateTime; @@id([campaignId, customerId]) }
+model ParticipantDailyStat { campaignId Int; day DateTime @db.Date; customerId BigInt; paidTickets Int; reachedAt DateTime
+                             @@id([campaignId, day, customerId]) }
 
-model ParticipantStat {          // ranking geral (casa nunca entra: só pedidos pagos)
-  campaignId  Int
-  customerId  BigInt
-  paidTickets Int
-  reachedAt   DateTime         // momento em que atingiu o total atual (desempate)
-  @@id([campaignId, customerId])
-  @@index([campaignId, paidTickets(sort: Desc), reachedAt])
+// ── Apuração e ganhadores ───────────────────────────────
+model Draw { id String @id; campaignId Int @unique; contestNumber Int; contestDate DateTime @db.Date; prizes String[]
+             enteredById String; confirmedById String; drawnNumber Int; winningNumber Int; steps Json
+             officialResultUrl String }                             // imutável (trigger)
+model WinnerCase {               // 12.6: um fluxo por ganhador (principal, cota premiada, ranking)
+  id String @id; campaignId Int; type WinnerType; customerId BigInt; orderId BigInt; number Int?; prize String
+  stage WinnerStage @default(NEW); choice PrizeChoice?; city String?; uf String? @db.Char(2); suggestedUf String? @db.Char(2)
+  claimDeadline DateTime; displayName String; deliveryVideoUrl String?; publishedAt DateTime?
 }
+model WinnerDocument { id String @id; caseId String; kind DocumentKind; storagePath String; sha256 String; uploadedById String; createdAt DateTime }
+model TaxRecord { caseId String @id; baseCents BigInt; rateBasisPoints Int; amountCents BigInt; paidAt DateTime?; guideDocumentId String? }
 
-model ParticipantDailyStat {     // ranking do dia (dia em America/Fortaleza)
-  campaignId  Int
-  day         DateTime @db.Date
-  customerId  BigInt
-  paidTickets Int
-  reachedAt   DateTime
-  @@id([campaignId, day, customerId])
-  @@index([campaignId, day, paidTickets(sort: Desc), reachedAt])
-}
+// ── Antifraude e alertas ────────────────────────────────
+model FraudSignal { id String @id; customerId BigInt; campaignId Int?; kind FraudKind; details Json; status ReviewStatus @default(OPEN)
+                    reviewedById String?; reviewedAt DateTime?; createdAt DateTime; @@index([status, createdAt]) }
+model Alert { id String @id; kind AlertKind; campaignId Int?; message String; payload Json; status AlertStatus @default(OPEN)
+              notifiedAt DateTime?; acknowledgedById String?; createdAt DateTime; @@index([status, createdAt]) }
 
-model HouseAdjustment {
-  id           String    @id @default(cuid())
-  campaignId   Int
-  mode         HouseMode
-  targetPct    Int?
-  requested    Int       // + bloquear / − devolver
-  applied      Int       // efetivamente aplicado
-  houseBefore  Int
-  houseAfter   Int
-  createdById  String
-  createdAt    DateTime  @default(now())
-}
-
-// ───────────── Apuração e ganhadores ─────────────
-model Draw {
-  id                 String   @id @default(cuid())
-  campaignId         Int      @unique
-  campaign           Campaign @relation(fields: [campaignId], references: [id])
-  contestNumber      Int
-  contestDate        DateTime @db.Date
-  prizes             String[] // 5 prêmios, 5 dígitos cada, conferidos por dupla digitação
-  enteredById        String
-  confirmedById      String
-  drawnNumber        Int      // número calculado pela regra
-  winningNumber      Int      // após aproximação
-  steps              Json     // passo a passo exibido na página de resultado
-  winnerOrderId      BigInt
-  officialResultUrl  String
-  deliveryVideoUrl   String?
-  createdAt          DateTime @default(now())
-}
-
-model Winner {
-  id          String     @id @default(cuid())
-  campaignId  Int
-  campaign    Campaign   @relation(fields: [campaignId], references: [id])
-  type        WinnerType
-  customerId  BigInt
-  orderId     BigInt
-  number      Int?
-  prize       String
-  displayName String     // snapshot mascarado "Jamilson V."
-  city        String?
-  uf          String?
-  published   Boolean    @default(false)
-  wonAt       DateTime
-  deliveredAt DateTime?
-}
-
-// ───────────── Conteúdo e auditoria ─────────────
-model ContentPage {
-  id          String     @id @default(cuid())
-  key         ContentKey
-  version     Int
-  markdown    String
-  publishedAt DateTime?
-  createdById String
-  @@unique([key, version])
-}
-
-model AuditLog {                  // append-only: trigger bloqueia UPDATE/DELETE
-  id         BigInt    @id @default(autoincrement())
-  actorType  ActorType
-  actorId    String?
-  action     String    // ex.: campaign.publish, house.adjust, draw.compute, participants.export
-  entityType String
-  entityId   String
-  before     Json?     // sem PII em claro (redaction no serviço)
-  after      Json?
-  ip         String?
-  createdAt  DateTime  @default(now())
-  @@index([entityType, entityId, createdAt])
-}
+// ── Auditoria (F0: criado) ──────────────────────────────
+model AuditLog { id BigInt @id; actorType ActorType; actorId String?; action String; entityType String; entityId String
+                 campaignId Int?; before Json?; after Json?; reason String?; ip String?; createdAt DateTime }
 ```
 
-Proteções em nível de banco (migrations SQL manuais):
-1. `audit_log`: trigger `BEFORE UPDATE OR DELETE → RAISE EXCEPTION`; o role da aplicação também não recebe `UPDATE/DELETE` nessa tabela.
-2. `tickets`: `CHECK (NOT (is_instant_prize AND status = 'HOUSE'))`, ou seja, uma cota premiada nunca vira cota da casa, nem por bug.
-3. `orders`: índice único parcial "1 pendente por CPF por campanha".
-4. `order_bumps`: trigger valida `price_cents < extra_tickets * ticket_price_cents` (segunda barreira além do Zod).
-5. `campaigns`: trigger impede alterar `ticket_price_cents`, `total_tickets`, `min_order_value_cents` e `draw_rule` quando `first_reservation_at IS NOT NULL`.
-6. `draws`, `instant_prizes` (após `frozen_at`) e `regulation_versions` (após `published_at`): imutáveis via trigger.
+### 4.1 Guardas no banco (SQL manual nas migrations)
+| Regra | Mecanismo | Fase |
+|---|---|---|
+| audit log append-only | `pa_app` só SELECT/INSERT + trigger em UPDATE/DELETE/TRUNCATE (inclusive para o dono) | **F0 ✔** |
+| App não burla travas por SQL | App conecta como `pa_app` (não é dono): não desabilita trigger nem altera schema | **F0 ✔** |
+| Data API do Supabase fechada | revoke de `anon`/`authenticated` + remover `public` dos schemas expostos | **F0 ✔** |
+| 1 reserva pendente por CPF/campanha | índice único parcial | F1 |
+| Cota premiada ≠ casa | `CHECK (NOT (is_instant_prize AND status='HOUSE'))` | F1 |
+| Travas pós-venda (preço, total, mínimo, regra) | trigger quando `first_reservation_at IS NOT NULL` | F1 (trigger) / F2 (UI) |
+| Opção em dinheiro só com `allows_cash_prize` | trigger em `campaigns` | F2 |
+| Order bump com desconto real | trigger `price_cents < extra_tickets × ticket_price_cents` | F3 |
+| Apuração, cotas premiadas congeladas e regulamento publicado imutáveis | triggers | F2–F4 |
 
 ---
 
-## 5. Motor de números (seção 6): desenho detalhado
+## 5. Motor de números
 
-### 5.1 Geração do pool (publicação)
-1. `DRAFT → POOL_GENERATING`. Grava-se `poolSeedHash` (D-07).
-2. Cron `generate-pool` (a cada 1 min, ou em loop no worker) insere um lote de 100k por execução:
-   ```sql
-   INSERT INTO tickets (campaign_id, number, shuffle_rank, status, is_instant_prize)
-   SELECT $1, n, permute(n, $seed), 'AVAILABLE', n = ANY($instant_numbers)
-   FROM generate_series($from, $to) n
-   ON CONFLICT DO NOTHING;           -- idempotente: pode reexecutar
-   ```
-   `permute` = permutação pseudoaleatória determinística (Feistel com seed secreta), o que permite auditar o embaralhamento depois da apuração.
-3. Ao completar `totalTickets`, valida-se `COUNT(*) = total` (uma única vez, no admin), os 16 shards são criados zerados e a campanha passa para `ACTIVE`.
-4. Estimativa: 1M de linhas em ~10–20 s no total (10 lotes). Para 10M (DEFAULT_7), ver o risco R-04.
-
-### 5.2 Reserva (transação curta, timeout de 10 s)
+### 5.1 Interface (SPEC 6.1)
+```ts
+interface NumberAllocator {
+  allocate(tx, { campaignId, orderId, quantity, reservedUntil }): Promise<number[]>;   // ou erro "restam N"
+  release(tx, { campaignId, orderId }): Promise<number>;                                 // expiração/cancelamento
+  confirm(tx, { campaignId, orderId }): Promise<number[]>;                              // RESERVED → PAID
+  blockHouse({ campaignId, quantity, actorId }): Promise<{ jobId: string }>;            // assíncrono
+  releaseHouse({ campaignId, quantity, actorId }): Promise<{ jobId: string }>;          // assíncrono
+  stats(campaignId): Promise<{ paid; reserved; house; available; total }>;              // soma dos 16 shards
+}
 ```
-0. Fora da transação: Zod, honeypot, rate limit (IP e CPF), CPF válido, 18+, cliente não bloqueado.
+O resto da aplicação só conhece a interface. Uma implementação externa (numeração da loteria ou sistema certificado) substitui `PostgresNumberAllocator` sem tocar checkout, admin ou apuração.
+
+### 5.2 Geração do pool (SPEC 6.3)
+1. Publicar: valida as pendências (12.3), cria `PoolGenerationJob(PENDING)`, campanha → `GENERATING_NUMBERS`, responde na hora.
+2. pg_cron (a cada minuto) chama `pa_process_pool_jobs()` (função PL/pgSQL, roda como dono):
+   - pega 1 job `PENDING` com `FOR UPDATE SKIP LOCKED` → `RUNNING`;
+   - `INSERT INTO tickets … SELECT $c, n, (random()*2147483646)::int, 'AVAILABLE', n = ANY(premiadas) FROM generate_series(0, total-1) n ON CONFLICT DO NOTHING`;
+   - cria os 16 shards de contador, grava o `orderingSha256`, campanha → `PUBLISHED`, job → `DONE`;
+   - em erro: job `FAILED` + mensagem, campanha → `DRAFT`, linha em `alerts`.
+   Toda a geração ocorre numa única transação: ou existe o pool completo, ou nada (idempotência por construção + `ON CONFLICT`).
+3. Admin mostra status (pendente, gerando, concluído, falhou + erro).
+4. Estimativa: 1M de linhas em segundos, dentro do banco. Para 10M (DEFAULT_7, backlog), a mesma função passa a gerar em faixas, uma por execução.
+
+### 5.3 Reserva (transação curta; travas só de transação)
+```
+fora da tx: Zod, honeypot, rate limit (IP+CPF), token geo do passo 0, revalidação geo do passo 4,
+            CPF válido, 18+, CPF não bloqueado
 BEGIN
-1. pg_advisory_xact_lock(hash(campaign_id, customer_id))      -- serializa o MESMO CPF
-2. SELECT campanha FOR SHARE; exige status=ACTIVE              -- o encerramento usa FOR UPDATE
-3. Se houver pedido PENDING desse CPF → recusa (índice único parcial como 2ª barreira)
-4. pagos_do_cpf + qty ≤ maxTicketsPerCustomer ; qty ≤ maxTicketsPerOrder ; valor ≥ mínimo
-5. INSERT order (PENDING, expires_at = now + pixExpirationMinutes)
-6. WITH picked AS (
-     SELECT number FROM tickets
-      WHERE campaign_id=$c AND status='AVAILABLE'
-      ORDER BY shuffle_rank LIMIT $qty
-      FOR UPDATE SKIP LOCKED)
-   UPDATE tickets t SET status='RESERVED', order_id=$o, reserved_until=$exp
-     FROM picked p WHERE t.campaign_id=$c AND t.number=p.number
-   RETURNING t.number;
-7. Se retornou < qty → ROLLBACK, com a resposta "restam N cotas" (o front oferece N)
-8. UPDATE campaign_counters SET reserved = reserved + qty WHERE shard = random(0..15)
-9. Se for a 1ª reserva: UPDATE campaigns SET first_reservation_at = now()
+  SET LOCAL statement_timeout = '5s'
+  pg_advisory_xact_lock(campaign_id, customer_id)          -- serializa o mesmo CPF
+  SELECT status FROM campaigns WHERE id=$c FOR SHARE       -- PUBLISHED; pausa/encerramento usam FOR UPDATE
+  limites: qty ≤ max_per_order; pagos+pendentes+qty ≤ max_per_cpf; valor ≥ mínimo
+  INSERT order (PENDING)                                    -- índice único parcial = 2ª barreira
+  allocate(): CTE SELECT … ORDER BY shuffle_rank LIMIT qty FOR UPDATE SKIP LOCKED → UPDATE … RETURNING
+  se < qty → ROLLBACK ("restam N cotas")
+  UPDATE campaign_counters … WHERE shard = random(0..15)
+  1ª reserva → first_reservation_at = now()                -- ativa as travas (trigger)
 COMMIT
-10. Fora da transação: provider.createPixCharge(). Se falhar → cancela o pedido e libera os números.
+fora da tx: provider.createPixCharge(); se falhar → release + CANCELLED
 ```
-Por que a cobrança PIX fica fora da transação: chamada de rede dentro da transação segura locks por segundos e derruba a vazão.
+Prisma: `$transaction(fn, { maxWait, timeout })` explícitos (D-21).
 
-### 5.3 Pagamento, expiração e pagamento tardio
-- **Confirmação** (webhook ou reconciliação): `SELECT order FOR UPDATE` → confere valor e txid → `RESERVED→PAID` → contadores (`reserved−`, `paid+`, receita) → `ParticipantStat` e `ParticipantDailyStat` (UPSERT) → checa cotas premiadas → commit → e-mail (fora da transação, com retry).
-- **Expiração**: cron a cada 1 min + verificação lazy quando o front consulta o status. Ambos travam o pedido com `FOR UPDATE`, então a disputa com um webhook simultâneo é resolvida pela ordem de chegada no lock.
-- **Pagamento tardio**: pedido `EXPIRED` + pagamento válido → tenta realocar `qty` novos números pelo mesmo CTE. Se não houver estoque, ou se a campanha não estiver `ACTIVE` → `REFUND_PENDING` + alerta ao admin (e-mail + item no dashboard).
+### 5.4 Pausar vendas (12.3)
+`PUBLISHED → SALES_PAUSED` com `FOR UPDATE` na campanha + motivo + reconfirmação de senha + audit log. A reserva lê o status **no banco** (não no cache), então o bloqueio é imediato (< 5s com folga). Pagamentos de reservas existentes seguem normalmente. A página pública recebe `revalidateTag`; o aviso pode levar até o TTL do cache para aparecer, mas o CTA bloqueado é garantido pela API.
 
-### 5.4 Cotas da casa (seção 8.2)
-- Alvo T% → `necessárias = ceil(T × total) − pagas − casa_atual`.
-  - `> 0`: aloca pelo mesmo CTE com `status='HOUSE'` e o filtro extra `AND NOT is_instant_prize`.
-  - `< 0`: devolve `HOUSE→AVAILABLE` (`ORDER BY shuffle_rank DESC … FOR UPDATE SKIP LOCKED`).
-- Validações antes da prévia: `T ≤ 95` e `disponíveis_após ≥ cotas_mínimas_por_pedido`.
-- Prévia: "Serão bloqueadas N cotas (P% do total). Receita máxima cai de R$ A para R$ B." O admin confirma, o sistema aplica, grava `HouseAdjustment` + `AuditLog`.
-- A casa é uma **quantidade absoluta**: o sistema nunca recalcula sozinho conforme as vendas sobem (D-05).
-- Se houver reservas em andamento, o `SKIP LOCKED` simplesmente as ignora. Se o estoque livre não bastar, aplica-se o possível e a diferença é informada (teste da seção 15).
+### 5.5 Cotas da casa (8.2, 19.9)
+1. Admin escolhe alvo % ou quantidade exata → prévia (N cotas, P%, receita máxima A→B) → reconfirmação de senha.
+2. Validação: alvo ≤ 95% e `disponíveis_após ≥ cotas mínimas por pedido`.
+3. Cria `HouseJob(PENDING)`. pg_cron (`'2 seconds'`) chama `pa_process_house_jobs()`: **1 lote de 10.000 por execução e por transação** (`FOR UPDATE SKIP LOCKED`, `AND NOT is_instant_prize`, atualiza shards). Antes de cada lote, se o status for `CANCEL_REQUESTED`, encerra como `CANCELLED`.
+4. Cancelar: `CANCEL_REQUESTED`. O lote em andamento termina (atomicidade), os seguintes não rodam. O estado fica consistente: cotas já bloqueadas permanecem `HOUSE` e aparecem no total; o admin vê "bloqueadas X de N, cancelado por Y".
+5. Barra de progresso no admin = `processed / requested` (polling 2s).
+6. Reservas em andamento nunca colidem: `SKIP LOCKED` pula linhas travadas. Se faltar estoque livre, o job conclui com o aplicado e informa a diferença.
+7. Quantidade absoluta: o sistema nunca recalcula sozinho (D-05).
 
 ---
 
-## 6. Apuração (seção 11)
+## 6. Territorialidade (13A)
 
-Função pura em `domain/draw.ts`, com teste unitário exaustivo:
+| Etapa | Implementação |
+|---|---|
+| Passo 0 | `navigator.geolocation` (alta precisão, timeout 15s). O servidor recebe lat/lng/precisão, faz point-in-polygon contra o GeoJSON IBGE da `authorized_state` (versionado em `data/geo/`, simplificado e com hash) e compara com a UF do IP. Grava `GeoCheck` e devolve um **token assinado (HMAC, 20 min)** com o id do check. |
+| Passos 1–3 | Exigem o token válido. |
+| Passo 4 | Nova leitura do GPS + nova validação. Bloqueia se estiver fora da UF, se a permissão for negada, se houver divergência forte com o IP ou se a posição tiver se movido além da tolerância (Q7). Grava `GeoCheck(STEP4)` vinculado ao pedido. |
+| Domicílio | Se `territorial_rule` aceitar domicílio: CEP → UF (BrasilAPI, fallback ViaCEP). `PHYSICAL_OR_DOMICILE`: aprova se GPS **ou** CEP estiver na UF. |
+| Mensagens | "Esta campanha só pode ser adquirida por pessoas localizadas em {UF}." Texto de acordo com a regra. |
+| Production | `geo_enforcement` forçado em `true` no código (`effectiveGeoEnforcement`, já na F0). |
+| LGPD | Base legal: cumprimento de obrigação legal. A Política de Privacidade informa a coleta e a retenção. |
+| Admin | Relatório de bloqueios por UF de origem + exportação dos `GeoCheck` (com audit log). |
 
-```
-DEFAULT_6: n = últimos3(1º) ‖ últimos3(2º)            → 68003, 33062 → "003062"
-DEFAULT_7: n = DEFAULT_6 ‖ algarismo(3º, posição ?)   → AGUARDA Q5
-```
-
-Aproximação (`NEXT_PAID_CIRCULAR`):
-```sql
-SELECT number FROM tickets
- WHERE campaign_id=$c AND status='PAID' AND number >= $n
- ORDER BY number LIMIT 1;
--- se vazio: mesmo SELECT com number >= 0 (volta ao início)
-```
-Cotas da casa, reservadas e disponíveis nunca têm `status='PAID'`, portanto são puladas por construção. O `steps` registra: número calculado → status encontrado ("da casa" ou "não vendido") → próximo pago → ganhador.
-
-Fluxo no admin: digitação 1 → digitação 2 (campos cegos) → divergência bloqueia → prévia do passo a passo → confirmação → `Draw` imutável + `Winner` + `status=DRAWN` + audit log.
+**Limite técnico:** geolocalização do navegador pode ser falsificada (apps de GPS falso, devtools). O mecanismo é prova de diligência e barreira razoável, não garantia absoluta. Divergência GPS × IP também alimenta a fila de antifraude.
 
 ---
 
-## 7. Rotas
+## 7. Apuração (SPEC 11)
+- `domain/draw.ts` (pura): `DEFAULT_6 = últimos3(1º) ‖ últimos3(2º)` → 68003, 33062 → `003062`.
+- Aproximação: próximo número `PAID` ≥ n; se não houver, volta ao início (circular). Casa, reservada e disponível nunca são `PAID`, então são puladas por construção. Passo a passo gravado em `Draw.steps`.
+- Dupla digitação cega → divergência bloqueia → prévia → confirmação com reauth → `Draw` imutável, `WinnerCase(NEW)`, campanha `DRAWN`, audit log.
+- DEFAULT_7: backlog. O teste `0030627` fica escrito como `it.todo`.
 
-### 7.1 Públicas (páginas)
-| Rota | Render | Observação |
-|---|---|---|
-| `/` | ISR 60s | hero da campanha `featured` + abas Ativas/Encerradas + ganhadores |
-| `/c/[slug]` | ISR + `revalidateTag(campaign:{id})` | dados vivos via fetch no cliente |
-| `/c/[slug]/resultado` | ISR | após `DRAWN` |
-| `/resultados` | ISR 300s | |
-| `/pedido/[publicId]` | dinâmica, `noindex` | tela PIX → confirmação; o cliente pode reabrir |
-| `/meus-numeros` | dinâmica | CPF + nascimento |
-| `/termos`, `/privacidade`, `/faq` | ISR | `ContentPage` vigente |
+---
 
-### 7.2 API
-| Método e rota | Cache | Proteção |
-|---|---|---|
-| `GET /api/public/campaigns/[slug]/live` | `s-maxage=30, swr` | progresso + marco |
-| `GET /api/public/campaigns/[slug]/ranking` | `s-maxage=60, swr` | |
-| `GET /api/public/campaigns/[slug]/instant-prizes` | `s-maxage=60` | só se a flag estiver ligada |
-| `POST /api/checkout/identify` | — | RL IP + CPF, honeypot, Turnstile opcional |
-| `POST /api/checkout/reserve` | — | RL, honeypot, Origin check |
-| `GET /api/orders/[publicId]/status` | `no-store` | lazy expire; polling de 3s |
-| `GET /api/orders/[publicId]/numbers.csv` | `no-store` | só se `PAID` |
-| `POST /api/orders/[publicId]/simulate-payment` | — | **inexistente em production** |
-| `POST /api/meus-numeros/lookup` | — | RL 5/15min por IP e por CPF → cookie assinado de 15 min |
-| `GET /api/meus-numeros/orders?page=` / `.csv` | `no-store` | cookie assinado |
-| `POST /api/webhooks/payments/[provider]` | — | assinatura + idempotência + conferência de valor e txid |
-| `POST /api/cron/{expire,reconcile,generate-pool,retention}` | — | header `CRON_SECRET` |
-| `GET /api/health` | — | DB + Redis |
+## 8. Admin (SPEC 12)
 
-### 7.3 Admin (`/admin`, RSC + Server Actions, RBAC por módulo)
-`login`, `2fa`, `dashboard`, `campanhas` (`[id]/editar`, `[id]/cotas-casa`, `[id]/regulamento`, `[id]/ofertas`, `[id]/premiadas`, `[id]/ranking`, `[id]/apuracao`), `pedidos`, `participantes`, `financeiro`, `ganhadores`, `configuracoes`, `modalidades`, `conteudo`, `usuarios`, `auditoria`.
-
-Matriz de permissões (proposta):
+### 8.1 Acesso (12.1)
+- Permissões = matriz **módulo × ação (ver, editar, exportar, aprovar)** por papel, versionada em código (`src/domain/permissions.ts`) e coberta por teste. Edição de papéis pelo admin fica para depois (D-34).
+- Sessão de 8h; `sessionVersion` revoga. Reconfirmação de senha (válida 5 min) em: reembolso, exportação, cotas da casa, apuração, pausar/retomar vendas, revelar dados.
+- Dashboard, Pedidos, Participante e Ganhadores projetados primeiro para 390px.
 
 | Módulo | owner | operador | financeiro | suporte |
 |---|---|---|---|---|
-| Campanhas, regulamento, ofertas, premiadas | RW | RW | R | R |
-| Cotas da casa | RW | RW | R | — |
-| Apuração | RW | 1ª digitação | — | — |
-| Pedidos | RW | R | RW (reembolso) | R + reenvio de e-mail |
-| Participantes / export CSV | RW | R | R | R (sem export) |
-| Financeiro | RW | — | RW | — |
-| Settings, modalidades, usuários | RW | — | — | — |
-| Audit log | R | R | R | — |
+| Dashboard | ver | ver | ver | ver |
+| Campanhas (dados, regulamento, ofertas, premiadas, ranking, progresso) | ver/editar | ver/editar | ver | ver |
+| Autorização (cadastro interno e documento) | ver/editar | ver/editar | ver | — |
+| Publicar / pausar / encerrar vendas | aprovar | aprovar | — | — |
+| Cotas da casa | ver/editar | ver/editar | ver | — |
+| Apuração | aprovar (confirmação) | editar (1ª digitação) | — | — |
+| Pedidos | ver/editar | ver | ver/aprovar reembolso | ver + reenviar e-mail + cancelar pendente |
+| Participante 360 / revelar / bloquear / exportar titular | tudo | ver/revelar | ver | ver/revelar |
+| Ganhadores e entrega | tudo | ver/editar | editar IR e pagamento | ver/editar contato |
+| Financeiro / conciliação / fechamento | tudo | — | tudo | — |
+| Relatórios e exportações | exportar | exportar | exportar | — |
+| Antifraude | tudo | ver/editar | ver | ver |
+| Alertas | tudo | ver/reconhecer | ver/reconhecer | ver |
+| Templates de mensagens | editar | editar | — | ver |
+| Configurações, modalidades, territorialidade, usuários | editar | ver | — | — |
+| Audit log | ver/exportar | ver | ver | — |
+
+### 8.2 Módulos
+| Seção | Pontos de implementação |
+|---|---|
+| 12.2 Dashboard | Agregados dos shards + tabelas de ranking; vendas por hora hoje × ontem a partir de `orders.paid_at` em America/Fortaleza; bloqueios geo por UF via `GeoCheck`. |
+| 12.3 Campanhas | Checklist de publicação = função pura `publicationBlockers(campaign, settings, appEnv)` (regex `\[PREENCHER:` em regulamento, termos e política; autorização completa e vigente; `authorized_state`). Production bloqueia; dev/staging mostra aviso. |
+| 12.4 Pedidos | Busca por CPF (pelo hash), nome, telefone, e-mail, código, txid, número da cota. Reembolso em 2 passos: solicitação (motivo + comprovante) → aprovação do financeiro. |
+| 12.5 Participante | Mascarado por padrão; "revelar" pede reauth e grava audit log; exportação do titular (JSON + CSV); anonimização mantém o que a retenção legal exigir (D-16). |
+| 12.6 Ganhadores | `WinnerCase` com etapas em sequência; documentos no bucket privado; "documentos validados" exige cidade/UF, com a UF sugerida vinda do `GeoCheck` do pedido; registro de IR; contagem do prazo de reclamação + alerta; publicação no resultado só após `DELIVERED`. |
+| 12.7 Financeiro | Conciliação local × provider (pagos sem pedido, pedido sem pagamento, valor divergente, tardio); fechamento por campanha; CSV/XLSX. |
+| 12.8 Relatórios | Exportações por campanha + modelo configurável para prestação de contas à loteria; todas no audit log. |
+| 12.9 Antifraude | Job (cron 5 min) gera `FraudSignal` por regras SQL (mesmo telefone/e-mail/IP/dispositivo em vários CPFs, expirações em série, divergência GPS×IP, pico por CPF). Fila com liberar / bloquear CPF / cancelar pendente. |
+| 12.10 Alertas | Tabela `alerts` + envio por e-mail (Resend). WhatsApp depende do provedor (Q8). |
+| 12.11 Templates | Renderização com dados reais (shards, ranking, settings). Botão copiar. |
+| 12.13 Audit log | Filtros por usuário, ação, campanha e período; exportável. |
 
 ---
 
-## 8. Segurança e LGPD: pontos de implementação
+## 9. Rotas
 
+### 9.1 Públicas
+| Rota | Render |
+|---|---|
+| `/` | ISR 60s |
+| `/c/[slug]` | ISR + `revalidateTag`; dados vivos no cliente |
+| `/c/[slug]/resultado`, `/resultados` | ISR |
+| `/pedido/[publicId]` | dinâmica, `noindex` (PIX → confirmação) |
+| `/meus-numeros` | dinâmica |
+| `/termos`, `/privacidade`, `/faq` | ISR |
+
+### 9.2 API
+| Rota | Cache / proteção |
+|---|---|
+| `GET /api/health` | **F0 ✔** `no-store` |
+| `GET /api/public/campaigns/[slug]/{live,ranking,instant-prizes}` | `s-maxage` 30/60s |
+| `POST /api/checkout/geo` (passo 0) | RL IP; devolve o token geo |
+| `POST /api/checkout/identify` (passo 1) | RL IP+CPF, honeypot, token geo |
+| `POST /api/checkout/reserve` (passo 4) | RL, honeypot, Origin, token geo + revalidação |
+| `GET /api/orders/[publicId]/status` | `no-store`, verificação lazy de expiração |
+| `GET /api/orders/[publicId]/numbers.csv` | só `PAID` |
+| `POST /api/orders/[publicId]/simulate-payment` | inexistente em production |
+| `POST /api/meus-numeros/lookup` + `GET …/orders` | RL 5/15min IP e CPF; cookie assinado de 15 min |
+| `POST /api/webhooks/payments/[provider]` | F5: assinatura + idempotência + valor/txid |
+| `POST /api/cron/{expire-reservations, reconcile, fraud-scan, alerts}` | `CRON_SECRET` |
+
+### 9.3 Admin
+`/admin/{login,2fa,dashboard,campanhas,campanhas/[id]/{dados,autorizacao,regulamento,cotas-casa,ofertas,premiadas,ranking,progresso,apuracao},pedidos,participantes/[id],ganhadores,financeiro,relatorios,antifraude,alertas,templates,configuracoes,usuarios,auditoria}`
+
+---
+
+## 10. Segurança e LGPD
 | Requisito | Como |
 |---|---|
-| CPF em repouso | AES-256-GCM com chave versionada (`CRYPTO_KEYS` no env) + `cpfHash` HMAC com pepper separada |
-| CPF digitado não expõe dados | `identify` responde só `{known, maskedName:"J***** V.", maskedPhone:"(99) *****-3568", missing:[…]}`. Teste dedicado (seção 15). |
-| Cadastro existente não é sobrescrito | Checkout público só **completa campos vazios**; nunca altera nome, e-mail ou telefone já gravados (D-12) |
-| Nomes públicos | `domain/mask.ts`: "Primeiro nome + inicial do último sobrenome." |
-| Logs | pino com redaction; Sentry com `beforeSend` removendo body e cookies |
-| Headers | CSP com nonce, HSTS, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` |
-| CSRF | Server Actions (origin check nativo) + checagem de `Origin` nas rotas POST públicas |
-| Admin | argon2id, TOTP obrigatório, bloqueio progressivo após 5 falhas, `sessionVersion` |
-| Aviso 18+ | Rodapé fixo em todas as páginas |
+| CPF | AES-256-GCM com chave versionada + `cpfHash` (HMAC com pepper separada) |
+| CPF digitado | `identify` devolve só `{known, "J***** V.", "(99) *****-3568", missing}`; CPF bloqueado → mensagem genérica; tempo de resposta constante |
+| Cadastro existente | o checkout só completa campos vazios (D-12) |
+| Logs | pino com redaction de PII; Sentry sem body e sem cookies |
+| Headers | HSTS, nosniff, `X-Frame-Options: DENY`, Referrer-Policy, `Permissions-Policy: geolocation=(self)` — **F0 ✔**; CSP com nonce na F1 |
+| CSRF | Server Actions (origin check) + verificação de `Origin` nas rotas POST |
+| Banco | role `pa_app` sem privilégios de dono; Data API do Supabase fechada — **F0 ✔** |
+| Documentos | bucket privado; URL assinada de 60s; cada emissão de URL vai para o audit log |
+| Dispositivo (antifraude) | cookie first-party com ID aleatório, sem fingerprinting (D-33, Q10) |
 
 ---
 
-## 9. Riscos (ordem de impacto no negócio)
+## 11. Riscos
 
-| # | Risco | Impacto | Mitigação proposta |
+| # | Risco | Impacto | Mitigação |
 |---|---|---|---|
-| R-01 | **Base legal da operação.** No Brasil, vender chances de prêmio exige enquadramento específico (ex.: título de capitalização via sociedade de capitalização autorizada pela SUSEP, ou outra modalidade). Em alguns modelos, **quem emite e numera os títulos é a capitalizadora**, não a plataforma. | Pode invalidar o motor de números como desenhado e expor o operador a sanções. | Q2. Até a resposta, o motor fica isolado atrás de uma interface (`NumberAllocator`) para permitir integrar uma série externa. |
-| R-02 | **PSP congelar a conta.** Vários PSPs restringem sorteios e rifas nos termos de uso. | Receita retida no pico da campanha. | Q3: aceite **por escrito** do PSP, com a autorização apresentada. Prever 2 adapters prontos para troca rápida. |
-| R-03 | **Cotas da casa x publicidade enganosa (CDC art. 37).** "X% esgotado" incluindo cotas não vendidas pode ser questionado como indução ao erro, mesmo com cláusula no regulamento. | Reclamação no Procon/MP, dano reputacional, questionamento da autorização. | Implemento como especificado + recomendo nota visível junto à barra (D-06, Q6). Validação jurídica antes de usar em production. |
-| R-04 | **10M de linhas (DEFAULT_7).** ~1,5 GB por campanha, geração mais lenta, custo de banco. | Custo e tempo de publicação. | Particionamento por campanha + arquivar a partição após `FINISHED`. Alternativa futura: alocação por permutação sem pool (só grava os números vendidos). |
-| R-05 | **Contenção na linha de contadores** a 50 reservas/s. | Fila de locks, timeouts no pico. | 16 shards por campanha; leitura = SUM de 16 linhas, cacheada. |
-| R-06 | **Enumeração de CPF** no passo 1 (descobrir quem é cliente + iniciais e final do telefone). | Vazamento parcial de PII, phishing direcionado. | RL por IP e CPF, honeypot, Turnstile ligável (Q10), resposta com tempo constante. |
-| R-07 | **"Meus números" por CPF + data de nascimento** é autenticação fraca (ambos vazam com frequência). | Terceiro vê números e pedidos de outra pessoa. | Tela mostra só números, status e valores, sem PII; RL 5/15min; OTP via WhatsApp na fase futura. |
-| R-08 | **Integridade interna (insider).** Quem tem acesso ao banco conhece o `shuffle_rank` e poderia prever a saída das cotas premiadas. | Fraude nas cotas premiadas. | Seed secreta + hash publicado na publicação (D-07); audit log append-only; admin não escolhe números. |
-| R-09 | **Limites do serverless** (tempo de função, cron por minuto, conexões ao banco). | Pool não gera, jobs atrasam, conexões esgotam. | Lotes idempotentes, pooler (PgBouncer/Neon/Supabase), Vercel Pro para cron de 1 min (Q4). |
-| R-10 | **Placeholders soltos no template**: `[N]`, `[endereço]`, `[nome/e-mail]` não começam com `PREENCHER` e passariam pela trava. Além disso, `{max}` aparece com dois sentidos (maior número e limite por CPF). | Regulamento publicado com lacunas ou com valor errado. | Seed reescrito com `[PREENCHER: …]` em todos os campos; variáveis renomeadas para `{max_numero}` e `{max_por_cpf}`; o item 5 é gerado conforme a `drawRule` (D-10). |
-| R-11 | **Gap de dados: cidade/UF do ganhador.** A página de resultado exige, mas o checkout não coleta. | Página de resultado incompleta. | Coletar na validação do ganhador (admin), sem fricção no checkout (D-14). |
-| R-12 | **E-mail na caixa de spam** (domínio novo, picos de volume). | Cliente não recebe os números e chama o suporte. | SPF, DKIM e DMARC no domínio antes da F1 em staging; a tela de confirmação e "Meus números" são a fonte primária. |
+| R-01 | Edital da loteria impor numeração externa ou certificação | Retrabalho no motor | `NumberAllocator` isolado (SPEC 6.1). Nenhum módulo acessa `tickets` diretamente. |
+| R-02 | **Geo por IP de operadora móvel é imprecisa no Brasil**: IPs de 4G (CGNAT) costumam aparecer em SP, RJ ou outro estado da operadora. "GPS na UF + IP em UF distante → bloquear" pode recusar compradores legítimos do MA em dados móveis. | Queda de conversão no canal principal (Instagram/WhatsApp no celular) | Implemento como na spec, com limiar configurável (distância e lista de UFs). Em staging, medir a taxa de divergência com tráfego real antes de ligar o bloqueio duro. Recomendação em Q6. |
+| R-03 | GPS falsificado | Venda fora da UF | Divergência com IP + antifraude; registro como prova de diligência. |
+| R-04 | Fricção do passo 0 (pedido de permissão antes do CPF) | Abandono no checkout | Tela curta explicando o motivo antes do prompt do navegador; instrução de como reativar a permissão; medir o abandono por etapa. |
+| R-05 | Supabase expor tabelas pela Data API | Vazamento de PII | Revoke em migration (**F0 ✔**) + desligar no painel (checklist). |
+| R-06 | Conexões no pooler com Fluid Compute (várias requisições por instância) | Esgotar conexões no pico | `connection_limit=5` por instância + monitorar o Supavisor; ajustar no teste k6 (D-26). |
+| R-07 | Versão do Postgres: spec diz 16; o Supabase pode provisionar outra major | Diferença dev × prod | `PG_MAJOR` parametrizado no Docker (D-22). |
+| R-08 | Contenção nos contadores | Timeouts no pico | 16 shards (SPEC 19.5). |
+| R-09 | Enumeração de CPF no passo 1 | Vazamento parcial | RL, honeypot, token geo obrigatório (eleva o custo do ataque), Turnstile opcional (Q4). |
+| R-10 | "Meus números" com CPF + nascimento | Exposição de números de terceiros | Sem PII na tela; RL; OTP no backlog. |
+| R-11 | Insider altera a ordem do pool | Fraude em cotas premiadas | `orderingSha256` gravado na geração + audit log; admin não escolhe números. |
+| R-12 | PSP congelar a conta | Receita retida | Provider real só com aceite escrito (SPEC 19.3); 2 adapters prontos. |
+| R-13 | Repositório definitivo ainda não existe | CI do GitHub não validado | Código isolado em `pa-premios/`, pronto para mover com histórico (D-23). |
 
 ---
 
-## 10. Perguntas bloqueantes (máx. 10)
+## 12. Perguntas abertas (máx. 10)
 
-Cada pergunta traz minha recomendação, para você só confirmar ou corrigir.
+Bloqueiam a fase indicada. Cada uma traz minha recomendação.
 
-**Q1. Onde fica o código?** Este repositório é o toolkit `ui-ux-pro-max-skill`. Criei o plano em `pa-premios/` (como já existe `cat-feeding-app/`), mas um app Next.js com banco, segredos e CI não deveria dividir repositório com o skill.
-→ *Recomendo:* repositório novo e privado (`pa-premios`), com a F0 começando lá. Se preferir manter aqui, a F0 vira um subprojeto com CI próprio, filtrado por path.
-
-**Q2. Qual é o enquadramento legal exato (modalidade, órgão) e quem numera os títulos?** Exemplo: capitalização (filantropia premiável ou incentivo) via capitalizadora parceira, ou outra modalidade. Se a capitalizadora fornecer série ou faixa de números, o pool precisa vir dela.
-→ *Recomendo:* confirmar com o jurídico antes da F1. Isso define se o motor gera os números ou importa a série.
-
-**Q3. Qual PSP de PIX e há aceite formal da atividade?** Efí, Asaas ou Mercado Pago? Já existe conta aprovada para esse ramo?
-→ *Recomendo:* o PSP que já aprovou a conta **por escrito** para a atividade, com a autorização anexada. Sem isso, nenhum adapter real entra na F5.
-
-**Q4. Infraestrutura de produção:** Vercel Pro (região `gru1`) + Postgres gerenciado em São Paulo (Neon ou Supabase `sa-east-1`) + Upstash. Confirma? Ou prefere VPS própria?
-→ *Recomendo:* Vercel Pro + Neon/Supabase SP. É o menor custo operacional para picos curtos; o cron de 1 min exige plano Pro.
-
-**Q5. DEFAULT_7: qual é exatamente o "3º algarismo do 3º prêmio" e onde ele entra?** Contado da esquerda ou da direita? Entra no início ou no fim do número de 7 dígitos? Peço um exemplo resolvido (5 prêmios → número final), como o do concurso 6111.
-
-**Q6. Cotas da casa: o jurídico validou o uso com a modalidade (Q2), e você aceita uma nota de transparência junto à barra?** Por exemplo: "ⓘ inclui números reservados pelo promotor, que não concorrem". Sem a nota, o risco R-03 fica com vocês.
-→ *Recomendo:* nota ligada por padrão, com o texto editável no admin.
-
-**Q7. Reembolso e cancelamento: o que acontece com os números?** (a) Reembolso antes do encerramento devolve os números ao estoque? (b) Reembolso depois do encerramento deixa o número "não pago", portanto fora da apuração? (c) Pagamento tardio com a campanha já encerrada: reembolso automático via API do PSP ou manual?
-→ *Recomendo:* (a) sim; (b) sim; (c) manual com alerta, até termos confiança no adapter.
-
-**Q8. Limite por CPF e order bump:** o "Limite de {max} cotas por CPF" do regulamento é igual ao máximo por pedido (20.000)? As cotas do bump contam para os limites por pedido e por CPF?
-→ *Recomendo:* limite por CPF igual a 20.000 no seed; bump conta para os dois limites.
-
-**Q9. Dupla digitação da apuração: pode ser o mesmo usuário ou exige dois usuários diferentes (quatro olhos)?**
-→ *Recomendo:* dois usuários diferentes em production (um operador digita, o owner confirma); o mesmo usuário apenas em dev/staging.
-
-**Q10. Anti-bot no checkout:** autoriza Cloudflare Turnstile (gratuito, invisível na maioria dos casos) para `identify`, `reserve` e "Meus números"? Ele adiciona uma dependência externa e uma fricção mínima.
-→ *Recomendo:* implementar desligado e ligar no 1º pico com sinal de abuso.
+| # | Pergunta | Recomendação | Bloqueia |
+|---|---|---|---|
+| Q1 | Reembolso: (a) antes do encerramento, os números voltam ao estoque? (b) depois, ficam não pagos (fora da apuração)? (c) pagamento tardio com a campanha encerrada: reembolso automático ou manual? | (a) sim, (b) sim, (c) manual com alerta | F1 |
+| Q2 | Cotas do order bump contam para `max_per_order` e `max_per_cpf`? | Sim, para os dois | F3 |
+| Q3 | Dupla digitação da apuração: dois usuários diferentes em production? | Sim: operador digita, owner confirma | F4 |
+| Q4 | Cloudflare Turnstile no checkout e em "Meus números"? | Implementar desligado; ligar no 1º sinal de abuso | F1 |
+| Q5 | UF por IP: usar os headers de geolocalização da Vercel (sem custo e sem enviar IP a terceiros) ou um provedor pago? | Headers da Vercel; reavaliar se a precisão medida em staging for ruim | F1 |
+| Q6 | O que é "divergência forte" GPS × IP? Bloquear sempre ou só quando o IP for de fora do Brasil, ou de UF não vizinha a mais de X km? | Bloquear se o IP for de fora do Brasil, de VPN/datacenter ou de UF a mais de 1.000 km; nos demais casos, registrar como sinal de fraude. Validar com o jurídico e medir em staging. | F1 |
+| Q7 | "Localização alterada entre o passo 0 e o passo 4": qual tolerância? | Bloquear se o passo 4 falhar na validação ou se a distância for maior que max(5 km, 3 × precisão informada) | F1 |
+| Q8 | Alertas por WhatsApp para a equipe: qual provedor (WhatsApp Cloud API, Twilio, outro)? | E-mail na F2; WhatsApp Cloud API na F5 | F2 |
+| Q9 | IR do ganhador: o sistema calcula (base × alíquota configurável) ou só registra o que o contador informa? | Só registrar na F2 (base, alíquota, valor, guia); cálculo depois, com regra do contador | F2 |
+| Q10 | Antifraude "mesmo dispositivo": cookie first-party aleatório (simples, LGPD leve) ou biblioteca de fingerprint? | Cookie first-party | F2 |
 
 ---
 
-## 11. Plano por fases (seção 17), com entregáveis técnicos
+## 13. Fases (SPEC 17)
 
-| Fase | Entregáveis principais | Aceite (spec) + extra |
-|---|---|---|
-| **F0 — Setup** | Repo, pnpm, TS strict, ESLint/Prettier, Docker Compose (postgres, redis, mailpit, minio), Prisma + migrations SQL manuais, `env.ts`, faixa de staging, CI (lint, typecheck, unit, integração, e2e smoke), CLAUDE.md | `pnpm dev` sobe; CI verde |
-| **F1 — Núcleo de venda** | Página da campanha, seletor aditivo, bottom sheet de checkout (5 passos), motor de números, pool em lotes, MockProvider + "simular pagamento", expiração (cron + lazy), pagamento tardio, confirmação, e-mail, grupo de WhatsApp, botão de suporte, banner antigolpe, Meus números, rodapé legal | E2E mobile 390x844; 200 reservas concorrentes sem duplicidade; mín./máx.; menor de 18 bloqueado; CPF não expõe dados; **+ benchmark: 20k números em < 2s** |
-| **F2 — Admin** | Auth + TOTP, RBAC, campanhas + estados + checklist de publicação por `APP_ENV`, travas (app + trigger), modalidades, opção em dinheiro condicionada, regulamento versionado + PDF + hash, pedidos, participantes + CSV com log, settings, audit log | Publicação bloqueada em prod / aviso em staging; travas pós-venda; dinheiro só com `allowsCashPrize` |
-| **F3 — Conversão** | Barra + cotas da casa (slider, quantidade, prévia), marcos, ranking geral e do dia, order bump com validação, compartilhamento, cotas premiadas (flag) | Testes da seção 15: casa a 50% exata e sem colisão; casa fora do ranking e das premiadas; ranking zera às 00:00 de Fortaleza; bump acima do linear rejeitado |
-| **F4 — Apuração** | Dupla digitação, cálculo, aproximação, página de resultado, ganhadores, imutabilidade | Concurso 6111 → 003062; casa → próximo pago; não vendido → circular |
-| **F5 — Produção** | Adapter PIX real + webhooks + reconciliação, rate limit afinado, Sentry, backups (PITR do provedor + dump diário externo), k6 | 300 req/s na página; 50 reservas/s; LCP < 2,5s em 4G |
+| Fase | Entregáveis | Aceite | Status |
+|---|---|---|---|
+| **F0 — Setup** | Next 15 + TS strict + pnpm; Docker Compose (Postgres com pg_cron, pgbouncer em modo transação, Redis + REST, Mailpit); Prisma + migrations (settings, audit log append-only, role `pa_app`, pg_cron, lockdown da Data API); `APP_ENV`; faixa de staging; rodapé legal; `/api/health`; CI (format, lint, typecheck, drift, unit, integração, build, e2e); CLAUDE.md; checklist do Supabase | `pnpm dev` sobe; CI verde | **Concluída localmente.** CI do GitHub roda no 1º push ao repositório definitivo (R-13). |
+| F1 — Núcleo de venda | página da campanha, seletor, geo (13A), checkout completo, `NumberAllocator`, pool via pg_cron, PIX mock, expiração, confirmação, e-mail, grupo do WhatsApp, suporte, banner antigolpe, Meus números | E2E mobile; testes da seção 15 (concorrência, pool, limites, 18+, CPF, geo) | aguardando |
+| F2 — Admin | seção 12 completa | ver SPEC 17 | aguardando |
+| F3 — Conversão | progresso + casa + nota, ranking, order bump, compartilhar, templates | testes da seção 15 | aguardando |
+| F4 — Apuração | DEFAULT_6, aproximação, resultado, ganhadores | testes da seção 15 | aguardando |
+| F5 — Produção | PIX real, webhooks, reconciliação, rate limit, Sentry, backups, k6 | metas da seção 14 | aguardando |
 
-Diretrizes de UI (do toolkit ui-ux-pro-max, aplicadas ao contexto): alvos de toque ≥ 44px, texto ≥ 16px (evita zoom no iOS), contraste AA, `prefers-reduced-motion`, ícones SVG (Lucide) em vez de emoji, barra fixa inferior com `env(safe-area-inset-bottom)` e botão de suporte posicionado **acima** dela, sem sobrepor conteúdo. Cores e logo vêm de `settings`.
+Diretrizes de UI: alvos de toque ≥ 44px, texto ≥ 16px, contraste AA, `prefers-reduced-motion`, ícones Lucide, barra fixa com `safe-area-inset-bottom`, botão de suporte acima da barra sem cobrir conteúdo, cores e logo de `settings`.
 
 ---
 
-## 12. Oportunidades fora da spec (não implementar sem aprovação)
-
-1. **Recuperação de reserva expirada** por e-mail transacional ("seus números expiraram, reserve de novo"): costuma ser a alavanca de conversão de maior retorno nesse modelo. Exige validar a base legal da mensagem (transacional x marketing).
-2. **Página pública de auditoria por campanha** (hash do regulamento, hash da seed, contagem final por status após a apuração): reforça a confiança e responde ao risco R-03.
-3. **UTM e origem por pedido** (Instagram, WhatsApp, story específico): mede qual canal gera receita, não só tráfego.
+## 14. Oportunidades (não implementar sem aprovação)
+1. Funil por etapa do checkout (geo → CPF → dados → bump → PIX → pago) no dashboard: mostra onde o passo 0 está custando vendas.
+2. Lembrete de reserva expirada por e-mail transacional (validar a base legal).
+3. Página pública de auditoria por campanha (hash do regulamento, `orderingSha256`, contagem final por status).
+4. UTM e origem por pedido (qual story ou grupo gera receita).

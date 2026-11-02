@@ -1,0 +1,82 @@
+// Schema da F0: apenas a fundação (settings + audit log).
+// O modelo completo está em PLAN.md, seção 4, e entra a partir da F1.
+// Convenção: modelos em PascalCase, tabelas e colunas em snake_case (@@map/@map),
+// para que o SQL cru do motor de números fique legível.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooler, modo transação, role pa_app
+  directUrl = env("DIRECT_URL") // conexão direta, migrations
+}
+
+enum TerritorialRule {
+  PHYSICAL_LOCATION
+  DOMICILE
+  PHYSICAL_OR_DOMICILE
+
+  @@map("territorial_rule")
+}
+
+enum ActorType {
+  ADMIN
+  SYSTEM
+  CUSTOMER
+
+  @@map("actor_type")
+}
+
+/// Configurações globais (SPEC 3). Linha única: CHECK (id = 1) na migration.
+model Settings {
+  id                      Int             @id @default(1)
+  brandName               String          @map("brand_name")
+  logoUrl                 String?         @map("logo_url")
+  primaryColor            String          @map("primary_color")
+  secondaryColor          String          @map("secondary_color")
+  supportWhatsapp         String          @map("support_whatsapp")
+  supportMessage          String          @map("support_message")
+  whatsappGroupUrlDefault String?         @map("whatsapp_group_url_default")
+  timezone                String          @default("America/Fortaleza")
+  legalName               String?         @map("legal_name")
+  cnpj                    String?
+  address                 String?
+  sacEmail                String?         @map("sac_email")
+  dpoName                 String?         @map("dpo_name")
+  dpoEmail                String?         @map("dpo_email")
+  showAuthorizationBadge  Boolean         @default(false) @map("show_authorization_badge")
+  authorizedState         String?         @map("authorized_state") @db.Char(2)
+  territorialRule         TerritorialRule @default(PHYSICAL_LOCATION) @map("territorial_rule")
+  geoEnforcement          Boolean         @default(true) @map("geo_enforcement")
+  antiScamEnabled         Boolean         @default(true) @map("anti_scam_enabled")
+  antiScamText            String          @map("anti_scam_text")
+  updatedAt               DateTime        @updatedAt @map("updated_at")
+  updatedById             String?         @map("updated_by_id")
+
+  @@map("settings")
+}
+
+/// Audit log append-only (SPEC 12.13). UPDATE, DELETE e TRUNCATE são bloqueados por trigger,
+/// e o role da aplicação (pa_app) só tem SELECT e INSERT.
+model AuditLog {
+  id         BigInt    @id @default(autoincrement())
+  actorType  ActorType @map("actor_type")
+  actorId    String?   @map("actor_id")
+  action     String
+  entityType String    @map("entity_type")
+  entityId   String    @map("entity_id")
+  campaignId Int?      @map("campaign_id")
+  before     Json?
+  after      Json?
+  reason     String?
+  ip         String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([entityType, entityId, createdAt])
+  @@index([campaignId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_log")
+}
